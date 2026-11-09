@@ -53,6 +53,14 @@ int ctr_gpu_clip_reserve(int, int, ctr_clip_vertex**, uint16_t**) {
   return 0;
 }
 void ctr_gpu_clip_draw_ranges(const ctr_draw_state*, const int*, const int*, int, int, int) {}
+void ctr_gpu_frame_begin(uint8_t, uint8_t, uint8_t) {}
+void ctr_gpu_frame_end(void) {}
+void ctr_gpu_draw(const ctr_draw_state*, const ctr_vertex*, int) {}
+void ctr_gpu_submit_now(void) {}
+void ctr_gpu_set_skip_color_clear(int) {}
+int ctr_gpu_top_histogram(unsigned int*) {
+  return 0;
+}
 // (AI-assisted) the renderer reads shadow_casters (the test drives the decoder directly)
 namespace ctr_settings_detail {
 const CtrSettings* g_settings = nullptr;
@@ -727,8 +735,7 @@ void run_case(const char* name, const Camera& cam, const std::vector<Object>& ob
       }
       const ctr_clip_vertex& v = verts[list[i]];
       const float e = 1e-4f * std::abs(v.w) + 1e-6f;
-      if (!(std::abs(v.x) <= 2.f * v.w + 2 * e && std::abs(v.y) <= 2.f * v.w + 2 * e &&
-            std::abs(v.z) <= v.w + e)) {
+      if (!(std::abs(v.x) <= v.w + e && std::abs(v.y) <= v.w + e && std::abs(v.z) <= v.w + e)) {
         fail("a corner outside the guard band");
         break;
       }

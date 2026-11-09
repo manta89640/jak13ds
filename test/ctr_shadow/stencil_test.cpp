@@ -12,10 +12,15 @@
  *  - the GPU models: env STENCIL_F24=1 rounds the clip space vertices to float24 (the PICA's
  *    vertex input), STENCIL_GUARD=T drops a triangle with a corner beyond T (x / w or y / w after
  *    the near clip), STENCIL_NOCLIP=1 doesn't clip at the near plane (only w > 0),
- *    STENCIL_BACK_INCR=1 counts the back faces up too (the front pass's op kept)
+ *    STENCIL_BACK_INCR=1 counts the back faces up too (the front pass's op kept),
+ *    STENCIL_BACK_LOST=1 gives the back pass no effect, STENCIL_BACK_GONE=1 loses the back faces
+ *    in every pass, STENCIL_FIX124=1 snaps screen coordinates to 1/16 pixel
  *  - STENCIL_SCENE=ledge: Jak in the air beside a ledge, a cliff face below (the console's band)
- * It reports the darkened pixels where the exact count is 0 (a shadow where there is none) and
- * the poses where they cover most of the darkening area (the solid quad).
+ *  - STENCIL_OLD_DARKEN=1: the darkening pass as it was (the front faces, no depth test)
+ * The darkening pass: the back faces behind the receiver where the count isn't 0. It reports
+ * the darkened pixels where the exact count is 0 (a shadow where there is none), the exact
+ * shadow pixels not darkened, and the poses where the false ones cover most of the volume's
+ * footprint (the solid quad).
  *
  *   test/ctr_shadow/build_stencil.sh && /tmp/ctr_stencil_test
  */
@@ -41,6 +46,14 @@ int ctr_gpu_clip_reserve(int, int, ctr_clip_vertex**, uint16_t**) {
   return 0;
 }
 void ctr_gpu_clip_draw_ranges(const ctr_draw_state*, const int*, const int*, int, int, int) {}
+void ctr_gpu_frame_begin(uint8_t, uint8_t, uint8_t) {}
+void ctr_gpu_frame_end(void) {}
+void ctr_gpu_draw(const ctr_draw_state*, const ctr_vertex*, int) {}
+void ctr_gpu_submit_now(void) {}
+void ctr_gpu_set_skip_color_clear(int) {}
+int ctr_gpu_top_histogram(unsigned int*) {
+  return 0;
+}
 namespace ctr_settings_detail {
 const CtrSettings* g_settings = nullptr;
 const CtrSettings& first_use() {
@@ -395,7 +408,19 @@ constexpr int kW = 400, kH = 240;
 struct Model {
   bool f24 = false, noclip = false;
   bool back_incr = false;  // the back pass kept the front pass's INCR op
+  bool back_lost = false;  // the back pass changes nothing
+  bool back_gone = false;  // the back faces are not drawn in any pass
+  bool old_darken = false;
+  bool fix124 = false;
   float guard = 0.f;
+};
+
+// what a face does to a pixel it covers
+enum class Op {
+  kIncr,    // depth >=: count + 1
+  kDecr,    // depth >=: count - 1
+  kCover,   // no depth test: count + 1
+  kDarken,  // count != 0 and depth <: darkened, count 0
 };
 
 float f24(float f) {
@@ -410,12 +435,17 @@ struct CV {
   double x, y, z, w;
 };
 
-void raster(const CV* v3, const float* depth, std::vector<int>& sten, int delta) {
+void raster(const Model& md, const CV* v3, const float* depth, std::vector<int>& sten, Op op,
+            std::vector<u8>* dark) {
   double sx[3], sy[3], sz[3];
   for (int i = 0; i < 3; i++) {
     sx[i] = 200.0 + 200.0 * v3[i].x / v3[i].w;
     sy[i] = 120.0 - 120.0 * v3[i].y / v3[i].w;
     sz[i] = (v3[i].z / v3[i].w + 1.0) * 0.5;
+    if (md.fix124) {
+      sx[i] = std::round(sx[i] * 16.0) / 16.0;
+      sy[i] = std::round(sy[i] * 16.0) / 16.0;
+    }
   }
   double area = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);
   if (std::abs(area) < 1e-12) {
@@ -445,15 +475,29 @@ void raster(const CV* v3, const float* depth, std::vector<int>& sten, int delta)
       }
       const double z = w0 * sz[0] + w1 * sz[1] + w2 * sz[2];
       const int i = px + py * kW;
-      if (z >= depth[i]) {
-        sten[i] = delta > 0 ? std::min(255, sten[i] + 1) : std::max(0, sten[i] - 1);
+      switch (op) {
+        case Op::kIncr:
+          sten[i] = z >= depth[i] ? std::min(255, sten[i] + 1) : sten[i];
+          break;
+        case Op::kDecr:
+          sten[i] = z >= depth[i] ? std::max(0, sten[i] - 1) : sten[i];
+          break;
+        case Op::kCover:
+          sten[i]++;
+          break;
+        case Op::kDarken:
+          if (sten[i] && z < depth[i]) {
+            (*dark)[i] = 1;
+            sten[i] = 0;
+          }
+          break;
       }
     }
   }
 }
 
 void draw_tri(const Model& md, const ctr_clip_vertex* const t[3], const float* depth,
-              std::vector<int>& sten, int delta, int& dropped) {
+              std::vector<int>& sten, Op op, int& dropped, std::vector<u8>* dark = nullptr) {
   CV poly[8], tmp[8];
   int n = 3;
   for (int k = 0; k < 3; k++) {
@@ -499,7 +543,7 @@ void draw_tri(const Model& md, const ctr_clip_vertex* const t[3], const float* d
   }
   for (int i = 1; i + 1 < n; i++) {
     const CV tri[3] = {poly[0], poly[i], poly[i + 1]};
-    raster(tri, depth, sten, delta);
+    raster(md, tri, depth, sten, op, dark);
   }
 }
 
@@ -705,19 +749,39 @@ Result run_pose(const Mesh& mesh, const Camera& cam, const Pose& pose, const Mod
   }
   std::vector<int> sten(kW * kH, 0);
   for (int pass = 0; pass < 2; pass++) {
+    if (pass && (md.back_lost || md.back_gone)) {
+      break;
+    }
     const u16* list = pass ? back.data() : front.data();
     const int nidx = pass ? v.back_count() : v.front_count();
     for (int k = 0; k + 2 < nidx; k += 3) {
       const ctr_clip_vertex* t[3] = {&verts[list[k]], &verts[list[k + 1]], &verts[list[k + 2]]};
-      draw_tri(md, t, depth.data(), sten, pass && !md.back_incr ? -1 : 1, res.dropped);
+      draw_tri(md, t, depth.data(), sten, pass && !md.back_incr ? Op::kDecr : Op::kIncr,
+               res.dropped);
     }
   }
-  // the darkening pass: the front faces again (where the stencil isn't 0)
+  // the volume's footprint (the front faces), and the darkening pass
   std::vector<int> cover(kW * kH, 0);
-  std::vector<float> zero(kW * kH, -1.f);
   for (int k = 0; k + 2 < v.front_count(); k += 3) {
     const ctr_clip_vertex* t[3] = {&verts[front[k]], &verts[front[k + 1]], &verts[front[k + 2]]};
-    draw_tri(md, t, zero.data(), cover, 1, res.dropped);
+    draw_tri(md, t, depth.data(), cover, Op::kCover, res.dropped);
+  }
+  std::vector<u8> dark(kW * kH, 0);
+  if (md.old_darken) {
+    for (int i = 0; i < kW * kH; i++) {
+      dark[i] = sten[i] && cover[i];
+      res.fill += cover[i];
+    }
+  } else if (!md.back_gone) {
+    std::vector<int> bcover(kW * kH, 0);
+    for (int k = 0; k + 2 < v.back_count(); k += 3) {
+      const ctr_clip_vertex* t[3] = {&verts[back[k]], &verts[back[k + 1]], &verts[back[k + 2]]};
+      draw_tri(md, t, depth.data(), sten, Op::kDarken, res.dropped, &dark);
+      draw_tri(md, t, depth.data(), bcover, Op::kCover, res.dropped);
+    }
+    for (int i = 0; i < kW * kH; i++) {
+      res.fill += bcover[i];
+    }
   }
   {
     // the old darkening rectangle: every vertex's x / w, y / w (+2 px), the screen if one has
@@ -748,21 +812,17 @@ Result run_pose(const Mesh& mesh, const Camera& cam, const Pose& pose, const Mod
   std::vector<u8> in_rect(kW * kH, 0);
   for (int i = 0; i < kW * kH; i++) {
     in_rect[i] = cover[i] != 0;
-    res.fill += cover[i];
-  }
-  for (int i = 0; i < kW * kH; i++) {
     res.rect_area += in_rect[i];
-    const bool dark = sten[i] && in_rect[i];
-    res.dark += dark;
-    res.false_dark += dark && !exact[i];
-    res.missing += !sten[i] && exact[i];
+    res.dark += dark[i];
+    res.false_dark += dark[i] && !exact[i];
+    res.missing += !dark[i] && exact[i];
   }
   if (dump) {
     // P6: red = darkened, green = exact shadow, blue = the darkening rectangle
     FILE* f = fopen("/tmp/ctr_stencil_pose.ppm", "wb");
     fprintf(f, "P6 %d %d 255\n", kW, kH);
     for (int i = 0; i < kW * kH; i++) {
-      const u8 px[3] = {(u8)(sten[i] && in_rect[i] ? 255 : 0), (u8)(exact[i] ? 200 : 0),
+      const u8 px[3] = {(u8)(dark[i] ? 255 : 0), (u8)(exact[i] ? 200 : 0),
                         (u8)(in_rect[i] ? 90 : depth[i] > 0 ? 40 : 0)};
       fwrite(px, 1, 3, f);
     }
@@ -778,6 +838,10 @@ int main(int argc, char** argv) {
   md.f24 = getenv("STENCIL_F24") != nullptr;
   md.noclip = getenv("STENCIL_NOCLIP") != nullptr;
   md.back_incr = getenv("STENCIL_BACK_INCR") != nullptr;
+  md.back_lost = getenv("STENCIL_BACK_LOST") != nullptr;
+  md.back_gone = getenv("STENCIL_BACK_GONE") != nullptr;
+  md.old_darken = getenv("STENCIL_OLD_DARKEN") != nullptr;
+  md.fix124 = getenv("STENCIL_FIX124") != nullptr;
   md.guard = getenv("STENCIL_GUARD") ? (float)atof(getenv("STENCIL_GUARD")) : 0.f;
   const Mesh mesh = make_caster();
   const Camera cam = make_camera(64.f);
@@ -818,7 +882,9 @@ int main(int argc, char** argv) {
   int worst = -1;
   double worst_frac = 0;
   Result worst_r;
-  for (size_t i = 0; i < poses.size(); i++) {
+  // STENCIL_STRIDE=N: every Nth pose (a quick run)
+  const size_t stride = getenv("STENCIL_STRIDE") ? std::max(1, atoi(getenv("STENCIL_STRIDE"))) : 1;
+  for (size_t i = 0; i < poses.size(); i += stride) {
     const Result r = run_pose(mesh, cam, poses[i], md, false);
     false_total += r.false_dark;
     dark_total += r.dark;

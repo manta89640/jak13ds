@@ -66,8 +66,8 @@ bool faces_away(const float* p0, const float* p1, const float* p2) {
 
 // the guard band (clip space |x|, |y| <= kGuard * w): a face with a corner beyond it, or beyond
 // the near / far plane, is cut to them on the CPU (the PICA drops triangles far off screen, and a
-// dropped face leaves its stencil count wherever it covers)
-constexpr float kGuard = 2.f;
+// dropped face leaves its stencil count wherever it covers). 1: the screen itself.
+constexpr float kGuard = 1.f;
 
 inline u32 sign_bit(float f) {
   u32 u;
@@ -453,15 +453,15 @@ void CtrShadowJak2Renderer::draw() {
     return;
   }
   const int nf = m_nf, nb = m_nb;
-  if (nf < 3) {
+  if (nf < 3 || nb < 3) {
     ctr_gpu_clip_draw_ranges(nullptr, nullptr, nullptr, 0, 0, 0);
     return;
   }
   memcpy(m_indices + nf, m_back.data(), (size_t)nb * 2);  // (the front list is there already)
   // the darkening: the PC subtracts (a - c) / 256 per channel (the color's alpha is the "no
   // change" level); multiplied by c / a here (CTR_BLEND_MUL: 0xff = 1), like Jak 1's shadow
-  // color. Drawn with the front faces again, like Jak 1's CtrShadowRenderer: only they count the
-  // stencil up, so they cover every pixel to darken, and the first one there clears it.
+  // color. Drawn with the back faces behind the scene, like Jak 1's CtrShadowRenderer: a counted
+  // pixel has one, the first one there darkens and clears it.
   u8 mul[3];
   for (int c = 0; c < 3; c++) {
     mul[c] = (u8)std::clamp(255 * (int)m_color[c] / std::max(1, (int)m_color[3]), 0, 255);
@@ -484,10 +484,10 @@ void CtrShadowJak2Renderer::draw() {
   st[0].flags = CTR_STATE_NO_COLOR | CTR_STATE_STENCIL_INCR;
   st[1].flags = CTR_STATE_NO_COLOR | CTR_STATE_STENCIL_DECR;
   st[2].blend = CTR_BLEND_MUL;
-  st[2].ztest = CTR_TEST_ALWAYS;
+  st[2].ztest = CTR_TEST_LESS;
   st[2].flags = CTR_STATE_STENCIL_CLEAR;
-  const int first[3] = {0, nf, 0};
-  const int count[3] = {nf, nb, nf};
+  const int first[3] = {0, nf, nf};
+  const int count[3] = {nf, nb, nb};
   // (the volumes in camera space, through m_clip on the GPU)
   ctr_gpu_clip_draw_ranges_mtx(m_clip, 3, st, first, count, 3, m_nv, nf + nb);
 }

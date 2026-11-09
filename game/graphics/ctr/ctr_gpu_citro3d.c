@@ -5055,39 +5055,39 @@ static int top_target_setup(void) {
   return 0;
 }
 
-static char s_stencil_status[256];
-const char* ctr_gpu_stencil_status(void) {
-  return s_stencil_status;
+void ctr_gpu_submit_now(void) {
+  if (!g.ready || !g.in_frame || s_bd.frame) {
+    return;
+  }
+  if (s_pipeline) {
+    pipeline_submit();
+  } else if (gx_begin()) {
+    flush_vbuf();
+    C3D_FrameSplit(GX_CMDLIST_FLUSH);
+    gxCmdQueueRun(&__C3D_Context.gxQueue);
+    gx_end();
+  }
 }
 
-int ctr_gpu_stencil_selftest(void) {
-  if (!g.ready || g.in_frame) {
+int ctr_gpu_top_histogram(unsigned int counts[256]) {
+  memset(counts, 0, 256 * sizeof(counts[0]));
+  if (!g.ready || g.in_frame || g_color16 || envIsHomebrew()) {
     return 0;
   }
   apt_gate_enter();
   gpu_drain();
-  CtrEarlyTestIn in;
-  memset(&in, 0, sizeof(in));
-  in.top = &g.top->frameBuf;
-  in.prog = &g.ps->basic;
-  in.uloc_projection = g.ps->uloc_projection;
-  in.emulator = ctr_gpu_is_emulator();
-  const int ok = ctr_stencil_selftest(&in, s_stencil_status, sizeof(s_stencil_status));
-  /* the game's program and state again, as after the early depth test */
-  g.cur_prog = PROG_NONE;
-  use_program(PROG_BASIC);
-  C3D_SetFrameBuf(&g.top->frameBuf);
-  set_top_viewport();
-  C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-  C3D_CullFace(GPU_CULL_NONE);
-  C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0);
-  C3D_StencilOp(GPU_STENCIL_KEEP, GPU_STENCIL_KEEP, GPU_STENCIL_KEEP);
-  g.last_state_valid = 0;
-  g.bound_tex = NULL;
-  s_tex_dirty = 1;
-  tex_units_forget();
+  const int idle = gxCmdQueueWait(&__C3D_Context.gxQueue, 0);
+  if (idle) {
+    /* RGBA8: R in the high byte */
+    const u32* c = (const u32*)g.top->frameBuf.colorBuf;
+    const u32 px = (u32)g.top->frameBuf.width * g.top->frameBuf.height;
+    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)c, px * 4);
+    for (u32 i = 0; i < px; i++) {
+      counts[(c[i] >> 8) & 0xff]++;
+    }
+  }
   apt_gate_leave();
-  return ok;
+  return idle;
 }
 
 void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear) {
@@ -7071,9 +7071,9 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     e.alphaTest = 1u | (((u32)map_test(st->atest) & 7) << 4) | ((u32)(ref > 255 ? 255 : ref) << 8);
   }
   /* (AI-assisted) the shadow volume passes (CTR_STATE_STENCIL_INCR / DECR / CLEAR): the depth test
-   * stays enabled (CLEAR: function ALWAYS) so the stencil's depth-pass operation is the one that
-   * runs, and writes are controlled by the write mask only (clearing the enable bit doesn't stop
-   * depth writes on the hardware): no color for NO_COLOR, no alpha for CTR_BLEND_MUL */
+   * stays enabled so the stencil's depth-pass operation is the one that runs, and writes are
+   * controlled by the write mask only (clearing the enable bit doesn't stop depth writes on the
+   * hardware): no color for NO_COLOR, no alpha for CTR_BLEND_MUL */
   const int shadow_pass =
       (st->flags & (CTR_STATE_STENCIL_INCR | CTR_STATE_STENCIL_DECR | CTR_STATE_STENCIL_CLEAR)) &&
       !g_depth16;
@@ -7127,10 +7127,10 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
                   ((u32)((st->flags & CTR_STATE_STENCIL_INCR) ? GPU_STENCIL_INCR : GPU_STENCIL_DECR)
                    << 8);
   } else if ((st->flags & CTR_STATE_STENCIL_CLEAR) && !g_depth16) {
-    /* (AI-assisted) where the stencil isn't 0; set to 0 there (the depth test always passes; the
-     * depth-fail operation zeroes too, should it run) */
+    /* (AI-assisted) where the stencil isn't 0 and the depth test passes; set to 0 there (kept
+     * where the depth test fails: another face of the draw may pass it there) */
     e.stencilMode = 1u | ((u32)GPU_NOTEQUAL << 4) | (0xFFu << 8) | (0xFFu << 24);
-    e.stencilOp = (u32)GPU_STENCIL_KEEP | ((u32)GPU_STENCIL_ZERO << 4) |
+    e.stencilOp = (u32)GPU_STENCIL_KEEP | ((u32)GPU_STENCIL_KEEP << 4) |
                   ((u32)GPU_STENCIL_ZERO << 8);
   } else {
     e.stencilMode &= ~1u;

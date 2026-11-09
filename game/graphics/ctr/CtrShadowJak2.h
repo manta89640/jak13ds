@@ -6,11 +6,11 @@
  * Jak II's shadow volumes for the 3DS renderer (buckets shadow and shadow2), like the PC's
  * Shadow2: the game's shadow-cpu sends camera space volume vertices (top and bottom) and byte
  * index lists for the caps and walls; the faces turned to the camera add 1 to the stencil, the
- * others take 1 away (depth test, no color or depth writes), then the front faces again darken
- * where the stencil isn't 0, by the shadow color (multiplied, like Jak 1's CtrShadow; the PC
- * subtracts). Faces with a corner outside the guard band (clip space |x|, |y| <= 2 w) or the
- * near / far plane are cut to them on the CPU; faces beyond one edge of the screen are left out
- * (no pixel). The same GPU passes as CtrShadow
+ * others take 1 away (depth test, no color or depth writes), then the back faces behind the
+ * scene darken where the stencil isn't 0, by the shadow color (multiplied, like Jak 1's
+ * CtrShadow; the PC subtracts). Faces with a corner outside the guard band (the screen: clip
+ * space |x|, |y| <= w) or the near / far plane are cut to them on the CPU; faces beyond one edge
+ * of the screen are left out (no pixel). The same GPU passes as CtrShadow
  * (ctr_gpu_clip_reserve / clip_draw_ranges).
  */
 
