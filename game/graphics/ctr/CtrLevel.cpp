@@ -10280,10 +10280,10 @@ static u32 g_tf_unif_id = 0;
 // the wind tie draws collected by draw_level (their rows in m_wind_rows)
 void CtrTfragRenderer::draw_wind_calls(const CtrLevelData& lev) {
   const u64 t0 = ctr_gpu_ticks();
-  // opaque (the early and sorted lists' wind draws): a chunk's draws together, so its matrix,
-  // wind rows and attribute buffers are sent once
-  std::stable_sort(m_wind_calls.begin(), m_wind_calls.end(),
-                   [](const WindCall& a, const WindCall& b) { return a.mesh < b.mesh; });
+  // opaque (the early and sorted lists' wind draws): by texture (each bound once), then by chunk
+  std::stable_sort(m_wind_calls.begin(), m_wind_calls.end(), [](const WindCall& a, const WindCall& b) {
+    return a.state->tex != b.state->tex ? a.state->tex < b.state->tex : a.mesh < b.mesh;
+  });
   for (const auto& c : m_wind_calls) {
     ctr_gpu_set_mesh_nofog(c.nofog);
     ctr_gpu_draw_mesh_wind(c.state, c.matrix, m_wind_rows.data() + 4 * c.row_first,
@@ -10302,15 +10302,17 @@ void CtrTfragRenderer::draw_env_calls(std::vector<EnvCall>& calls) {
     return;
   }
   const u64 t0 = ctr_gpu_ticks();
-  // each run of opaque draws by chunk (their uniforms and buffers sent once per chunk), the others
-  // in their order
+  // each run of opaque draws by texture (each bound once), then by chunk; the others in their order
   for (size_t i = 0; i < calls.size();) {
     size_t j = i;
     while (j < calls.size() && calls[j].state->blend == CTR_BLEND_OFF && calls[j].state->zwrite) {
       j++;
     }
-    std::stable_sort(calls.begin() + i, calls.begin() + j,
-                     [](const EnvCall& a, const EnvCall& b) { return a.mesh < b.mesh; });
+    std::stable_sort(calls.begin() + i, calls.begin() + j, [](const EnvCall& a, const EnvCall& b) {
+      return a.state->tex != b.state->tex   ? a.state->tex < b.state->tex
+             : a.env_tex != b.env_tex       ? a.env_tex < b.env_tex
+                                            : a.mesh < b.mesh;
+    });
     i = j + 1;
   }
   for (const auto& c : calls) {
