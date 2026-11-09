@@ -384,8 +384,8 @@ void ctr_gpu_pool_set_priority(int pool, int priority);
  * textures as noise or a solid color (config.ini rgba4_as_rgba8, default: on in the emulator). */
 void ctr_gpu_set_rgba4_as_rgba8(int on);
 int ctr_gpu_rgba4_as_rgba8(void);
-/* Texture pools in VRAM while there is room (config.ini vram_textures, default: on; was off in the
- * emulator, which draws VRAM textures as noise). */
+/* Copies of the texture pools in VRAM while there is room (config.ini vram_textures); linear
+ * memory keeps every pool. */
 void ctr_gpu_set_vram_textures(int on);
 /* Mip levels: 0 = off (always the first level), 1 = nearest level (default), 2 = blend two levels
  * (trilinear, slower) (config.ini mipmaps). */

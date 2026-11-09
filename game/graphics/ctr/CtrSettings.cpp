@@ -373,9 +373,6 @@ CtrSettings load() {
   // auto defaults: what the emulator draws correctly / what is fast on the 3DS
   s.emulator = ctr_gpu_is_emulator() != 0;
   s.rgba4_as_rgba8 = s.emulator;
-  // level textures in VRAM corrupt every texture on hardware (TODO.md); off on both, so the
-  // emulator keeps the same linear memory as the 3DS
-  s.vram_textures = false;
   if (g_game_version == GameVersion::Jak2) {
     // Jak II: the distances its city held 30 fps with, until its renderer can afford the PS2's
     s.lod_distance = 200.f;

@@ -141,7 +141,7 @@ struct CtrSettings {
   // RGBA4 level/model textures stored as RGBA8 (twice the memory): Azahar renders RGBA4 as noise.
   // Default (auto): on in the emulator, off on the 3DS.
   bool rgba4_as_rgba8 = false;
-  // Level textures in VRAM while there is room. Default (auto): off (TODO.md: corruption on hardware).
+  // Copies of the level textures in VRAM while there is room (the GPU reads them faster).
   bool vram_textures = true;
   // config.ini texshare = off: no shared texture groups, 1 MB level pools (as before sharing)
   bool texshare = true;
