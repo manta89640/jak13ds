@@ -308,7 +308,8 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
     } else if (key == "fast_clock") {
       s.fast_clock = parse_bool(v);
     } else if (key == "sound" || key == "sound_core" || key == "kernel_flush" ||
-               key == "mips2c_native_off" || key == "perf_sections" || key == "args" ||
+               key == "mips2c_native_off" || key == "perf_sections" || key == "hitch_ms" ||
+               key == "args" ||
                key == "listener" || key == "screenshots" || key == "pad_script" ||
                key == "debug_log" || key == "particle_density" ||
                key == "shield_density" ||

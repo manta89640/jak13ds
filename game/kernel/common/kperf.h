@@ -59,6 +59,8 @@ void rpc_poll(int channel, bool busy);
 //! Off by default (the timing costs time too, see docs/3ds-port/performance.md): enabled by the
 //! config.ini perf_sections = on on the 3DS, OPENGOAL_PERF_SECTIONS=1 on PC.
 extern bool g_sections_enabled;
+//! config.ini hitch_ms below 100: every long frame is logged (the render thread's too)
+extern std::atomic<bool> g_hitch_diag;
 void init_sections();
 //! 3DS: without perf_sections, one second in kSectionSampleEvery (60) is timed by section (the
 //! hook turns the GOAL side's *pc-prof-on* on and off), so hardware logs always have a breakdown.

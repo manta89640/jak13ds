@@ -64,6 +64,17 @@ uint32_t arm64_other_seg_mov32_link_v3(Ptr<uint8_t> link, ObjectFileHeader* ofh,
 //! linked into memory that may have held other data.
 extern u32 g_link_generation;
 
+//! The level load work of one frame (the linker, load-continue and the level login in level.gc):
+//! begun with the time the frame has left, it stops when that is used up. No limit outside of
+//! begin / end.
+void load_budget_begin(double ms);
+void load_budget_end();
+//! false once the budget is used up, or a unit was put off to the next frame
+bool load_budget_left();
+//! whether a unit of about this long may start: nothing else ran in this budget yet, or it has
+//! that much left. Else the rest of the budget is given up, so the unit is first in the next one.
+bool load_budget_for(double ms);
+
 struct link_control {
   Ptr<uint8_t> m_object_data;  //! points to the start of the object file
   Ptr<uint8_t> m_entry;        //! points to first code to execute
@@ -133,6 +144,7 @@ struct link_control {
   uint32_t jakx_work_v5();
   uint32_t jakx_work_opengoal();
 
+  bool jak1_may_finish();
   void jak1_finish(bool jump_from_c_to_goal);
   void jak2_finish(bool jump_from_c_to_goal);
   void jak3_finish(bool jump_from_c_to_goal);

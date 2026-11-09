@@ -435,6 +435,8 @@
         (add-ee-profile-frame 'unknown-cpu-time)
         ;; collect perf stats
         (read! (-> *perf-stats* data (perf-stat-bucket all-code))))
+      (#when TARGET_3DS
+        (level-load-work *level*))
       (with-profiler "dma-sync"
         (when (nonzero? (sync-path 0 0))
           (*dma-timeout-hook*)

@@ -1,5 +1,7 @@
 #include "klink.h"
 
+#include <cstring>
+
 #include "game/kernel/common/kperf.h"
 
 #include "common/log/log.h"
@@ -502,10 +504,10 @@ uint32_t link_control::jak1_work_v2() {
       }
       relocCounter--;
       if (relocCounter == 0) {
-        //        u32 clock_value = kernel.read_clock();
-        //        if(clock_value - startCycle > 150000) { // 0.5 milliseconds
-        //          return 0;
-        //        }
+        // the PS2 stopped here after 0.5 ms; this port when the frame's load budget is used up
+        if (!load_budget_left()) {
+          return 0;
+        }
         relocCounter = 0x400;
       }
     }
@@ -553,10 +555,9 @@ uint32_t link_control::jak1_work_v2() {
         if (*m_reloc_ptr == 0) {
           break;  // done
         }
-        //        u32 currentCycle = kernel.read_clock();
-        //        if(currentCycle - startCycle > 150000) {
-        //          return 0;
-        //        }
+        if (!load_budget_left()) {
+          return 0;
+        }
       }
       m_state = 3;
       m_segment_process = 0;
@@ -567,9 +568,19 @@ uint32_t link_control::jak1_work_v2() {
 }
 
 /*!
+ * Whether the linked object's finish (its top-level code or relocate method) may run in what is
+ * left of the frame's load budget. A level's tfrag texture page uploads its near textures there.
+ */
+bool link_control::jak1_may_finish() {
+  constexpr double kTpageMs = 6.0;
+  return strncmp(m_object_name, "tpage-", 6) == 0 ? load_budget_for(kTpageMs) : load_budget_left();
+}
+
+/*!
  * Complete linking. This will execute the top-level code for v3 object files, if requested.
  */
 void link_control::jak1_finish(bool jump_from_c_to_goal) {
+  kperf::SectionScope perf_section("link-finish");
   CacheFlush(m_code_start.c(), m_code_size);
   auto old_debug_segment = DebugSegment;
   if (m_keep_debug) {
@@ -675,6 +686,9 @@ uint64_t link_begin(u64* args) {
   auto work_result = saved_link_control.jak1_work();
   // if we managed to finish in one shot, take care of calling finish
   if (work_result) {
+    if (!saved_link_control.jak1_may_finish()) {
+      return 0;
+    }
     // called from goal
     saved_link_control.jak1_finish(false);
   }
@@ -689,6 +703,9 @@ uint64_t link_resume() {
   kperf::SectionScope perf_section("link-resume");
   auto work_result = saved_link_control.jak1_work();
   if (work_result) {
+    if (!saved_link_control.jak1_may_finish()) {
+      return 0;
+    }
     // called from goal
     saved_link_control.jak1_finish(false);
   }

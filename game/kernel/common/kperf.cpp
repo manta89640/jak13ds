@@ -22,6 +22,7 @@
 
 #ifdef __3DS__
 extern "C" int ctr_config_bool(const char* key, int def);  // platform/3ds/port/ctr_port.c
+extern "C" int ctr_config_get(const char* key, char* out, int size);
 #endif
 
 #ifdef __3DS__
@@ -84,7 +85,10 @@ u64 g_rpc_wait_frame[kRpcChannels];  // (AI-assisted) this frame only
 u64 g_rpc_last_busy[kRpcChannels];
 // (AI-assisted) long frames: the frame's own sections, RPC waits and IOP time are logged
 // ("[hitch]"), so a freeze names what it was. Section timing must be on (perf_sections = on).
+// config.ini hitch_ms (host: OPENGOAL_HITCH_MS) lowers the threshold; below 100 every long frame
+// gets its own line.
 constexpr double kHitchMs = 100.0;
+double g_hitch_ms = kHitchMs;
 u64 g_last_frame_us = 0;
 u64 g_frame_index = 0;
 std::atomic<u64> g_iop_ticks_total{0};
@@ -92,6 +96,7 @@ u64 g_iop_ticks_mark = 0;
 // (AI-assisted) at most one [hitch] line a second: long frames that follow each other (or come
 // within the second) are one line, the longest one's, with how many there were
 constexpr u64 kHitchLineUs = 1000000;
+u64 g_hitch_line_gap_us = kHitchLineUs;
 struct HitchGroup {
   int count = 0;
   double total_ms = 0;
@@ -111,6 +116,7 @@ int g_windows = 0;
 }  // namespace
 
 bool g_sections_enabled = false;
+std::atomic<bool> g_hitch_diag{false};
 u64 g_counters[(int)Counter::COUNT] = {};
 std::atomic<const char*> g_stage{"boot"};
 
@@ -237,10 +243,19 @@ void init_sections() {
     g_sections_enabled = true;
     g_sections_forced = true;
   }
+  char hitch[16];
+  const char* hitch_ms = ctr_config_get("hitch_ms", hitch, sizeof(hitch)) ? hitch : nullptr;
 #else
   const char* env = getenv("OPENGOAL_PERF_SECTIONS");
   g_sections_enabled = env && env[0] == '1';
+  const char* hitch_ms = getenv("OPENGOAL_HITCH_MS");
 #endif
+  if (hitch_ms && atof(hitch_ms) >= 1.0) {
+    g_hitch_ms = atof(hitch_ms);
+    g_hitch_line_gap_us = g_hitch_ms < kHitchMs ? 0 : kHitchLineUs;
+    g_hitch_diag.store(g_hitch_ms < kHitchMs, std::memory_order_relaxed);
+    lg::info("perf: long frames logged from {:.0f} ms", g_hitch_ms);
+  }
   if (g_sections_enabled) {
     // what one timed section costs on the C side (the GOAL side adds a call to pc-prof per event)
     static const char* kCal = "calibration";
@@ -309,7 +324,7 @@ void hitch_check(u64 now) {
   const u64 iop_frame = iop_total - g_iop_ticks_mark;
   g_iop_ticks_mark = iop_total;
   const double ms = last ? (now - last) / 1000.0 : 0.0;
-  const bool hitch = ms >= kHitchMs;
+  const bool hitch = ms >= g_hitch_ms;
   if (hitch) {
     if (!g_hitch.count) {
       g_hitch.first_frame = g_frame_index;
@@ -354,8 +369,8 @@ void hitch_check(u64 now) {
     g_hitch.worst = std::move(line);
   }
   // the long frames since the last line: once they stop, or after a second of them
-  if (g_hitch.count && now - g_hitch_line_us >= kHitchLineUs &&
-      (!hitch || now - g_hitch.since_us >= kHitchLineUs)) {
+  if (g_hitch.count && now - g_hitch_line_us >= g_hitch_line_gap_us &&
+      (!hitch || now - g_hitch.since_us >= g_hitch_line_gap_us)) {
     if (g_hitch.count > 1) {
       g_hitch.worst += fmt::format("; the longest of {} long frames since frame {} ({:.0f} ms)",
                                    g_hitch.count, g_hitch.first_frame, g_hitch.total_ms);

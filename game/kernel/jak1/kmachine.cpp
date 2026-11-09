@@ -61,6 +61,7 @@ using namespace ee;
 bool ctr_level_ready(const char* name);  // game/graphics/ctr/CtrRenderer.cpp
 #endif
 bool ctr_arrival_ready();  // game/graphics/ctr/CtrRenderer.cpp
+double ctr_frame_ms_left();  // game/graphics/ctr/CtrRenderer.cpp
 
 namespace jak1 {
 
@@ -649,6 +650,32 @@ void InitMachine_PCPort() {
     return s7.offset + true_symbol_offset(g_game_version);
   });
 #endif
+  // level.gc (TARGET_3DS): the load work of a frame takes the time the frame has left, less
+  // kLoadMarginMs for what the frame still does after it, at least kLoadMinMs, at most kLoadMaxMs
+  // (host: OPENGOAL_LOAD_BUDGET_MS)
+  make_function_symbol_from_c("pc-3ds-load-begin", +[]() -> u64 {
+    constexpr double kLoadMarginMs = 4.0, kLoadMinMs = 2.0, kLoadMaxMs = 12.0;
+    double ms = std::clamp(ctr_frame_ms_left() - kLoadMarginMs, kLoadMinMs, kLoadMaxMs);
+#ifndef __3DS__
+    static const char* env = getenv("OPENGOAL_LOAD_BUDGET_MS");
+    if (env) {
+      ms = atof(env);
+    }
+#endif
+    load_budget_begin(ms);
+    return 0;
+  });
+  make_function_symbol_from_c("pc-3ds-load-end", +[]() -> u64 {
+    load_budget_end();
+    return 0;
+  });
+  make_function_symbol_from_c("pc-3ds-load-time?", +[]() -> u64 {
+    return load_budget_left() ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
+  });
+  make_function_symbol_from_c("pc-3ds-load-time-for?", +[](u32 us) -> u64 {
+    return load_budget_for(us / 1000.0) ? s7.offset + true_symbol_offset(g_game_version)
+                                        : s7.offset;
+  });
   // target-continue keeps its blackout until the renderer has ring 0 in view (ctr renderer only)
   make_function_symbol_from_c("pc-3ds-arrival-ready?", +[]() -> u64 {
     return ctr_arrival_ready() ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;

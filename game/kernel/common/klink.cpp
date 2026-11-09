@@ -62,6 +62,40 @@ void klink_init_globals() {
 
 u32 g_link_generation = 0;
 
+u64 read_ee_timer();  // kmachine.cpp: 300 ticks per microsecond
+
+namespace {
+constexpr double kEeTicksPerMs = 300000.0;
+u64 g_load_budget_start = 0;
+u64 g_load_budget_end = 0;  // 0: no limit
+}  // namespace
+
+void load_budget_begin(double ms) {
+  g_load_budget_start = read_ee_timer();
+  g_load_budget_end = g_load_budget_start + (u64)(ms * kEeTicksPerMs);
+}
+
+void load_budget_end() {
+  g_load_budget_end = 0;
+}
+
+bool load_budget_left() {
+  return !g_load_budget_end || read_ee_timer() < g_load_budget_end;
+}
+
+bool load_budget_for(double ms) {
+  if (!g_load_budget_end) {
+    return true;
+  }
+  const u64 now = read_ee_timer();
+  if (now - g_load_budget_start < (u64)(0.3 * kEeTicksPerMs) ||
+      now + (u64)(ms * kEeTicksPerMs) <= g_load_budget_end) {
+    return true;
+  }
+  g_load_budget_end = now;
+  return false;
+}
+
 /*!
  * Initialize the link control.
  * TODO: this hasn't been carefully checked for jak 2 differences.
