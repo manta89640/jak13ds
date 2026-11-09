@@ -835,6 +835,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.vbuf_peak = std::max(m_timing.vbuf_peak, gs.vbuf_used);
   m_timing.vbuf_size = gs.vbuf_size;
   m_timing.vbuf_dropped += gs.vbuf_dropped;
+  m_timing.dead_draws += gs.dead_draws;
   m_timing.frames++;
   // (AI-assisted) the time of day work isn't GPU load: auto_detail counts it only for stepping
   // down (levellod: see auto_detail_frame)
@@ -919,9 +920,12 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
           m_timing.vbuf_dropped
               ? fmt::format(", {} draws DROPPED (vertex buffer full)", m_timing.vbuf_dropped)
               : std::string(),
-          m_timing.dropped ? fmt::format(", {} draws DROPPED (command buffer full)",
-                                         m_timing.dropped)
-                           : std::string(),
+          (m_timing.dropped ? fmt::format(", {} draws DROPPED (command buffer full)",
+                                          m_timing.dropped)
+                            : std::string()) +
+              (m_timing.dead_draws
+                   ? fmt::format(", {} draws SKIPPED (mesh not there)", m_timing.dead_draws)
+                   : std::string()),
           m_timing.color_clears_skipped
               ? fmt::format(", {} frames without the color clear (skip_clear)",
                             m_timing.color_clears_skipped)
