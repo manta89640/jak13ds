@@ -241,6 +241,10 @@ struct CtrSettings {
   // (geometry 0) are drawn with it within their PS2 distance, else with the far one (geometry 3).
   // off: the far versions only (as before v17)
   bool tie_lod = true;
+  // level meshes: 16-byte vertices in one attribute buffer (off), or 12-byte records and the colors
+  // in a buffer of their own (on: time of day rewrites touch 4 bytes per vertex, the GPU reads two
+  // streams)
+  bool color_stream = false;
   // (AI-assisted, streaming) c3l v19 levels: the near versions of the tie LOD groups (near chunks)
   // are read from the file around the camera on the loader thread, into a stream arena of
   // stream_kb KB of linear memory (taken at the first such level, kept), and freed far away; a group

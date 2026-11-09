@@ -1153,6 +1153,11 @@ bool read_split_vertices(c3l::Reader& f, u32 offset, u32 n, void* dst) {
   memcpy(col, colors.get(), 4 * (size_t)n);
   return true;
 }
+// the same in the layout of the mesh: split, or the file's 16-byte vertices as they are
+bool read_vertices(c3l::Reader& f, u32 offset, u32 n, void* dst, bool split) {
+  return split ? read_split_vertices(f, offset, n, dst)
+               : f.read(offset, dst, n * sizeof(c3l::Vertex));
+}
 }  // namespace
 
 // (AI-assisted) Partial unload / repair: make meshes of a loaded level again (loader thread): chunk
@@ -1225,7 +1230,10 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
       }
       if (mesh >= 0) {
         MeshBuild mb(mesh);  // (AI-assisted, streammem)
-        ctr_gpu_mesh_split_colors(mesh);
+        const bool split = ctr_settings().color_stream;
+        if (split) {
+          ctr_gpu_mesh_split_colors(mesh);
+        }
         bool read_ok = true;
         if (chunk_indices) {
           read_ok = f.read(job.index_data_offset + c.index_first * (u32)sizeof(u16), idst,
@@ -1234,10 +1242,9 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
           memcpy(idst, indices.data() + (c.index_first - lo), count * sizeof(u16));
         }
         read_ok = read_ok &&
-                  read_split_vertices(f,
-                                      job.vertex_data_offset +
-                                          c.first_vertex * (u32)sizeof(c3l::Vertex),
-                                      c.vertex_count, vdst);
+                  read_vertices(f,
+                                job.vertex_data_offset + c.first_vertex * (u32)sizeof(c3l::Vertex),
+                                c.vertex_count, vdst, split);
         // its envmapped tie normals, freed and read back with it
         mesh = mb.end(read_ok && (!tail || f.read(c.normals_offset,
                                                   (u8*)vdst + c.vertex_count * 16, tail)));
@@ -3062,24 +3069,44 @@ typedef u16 __attribute__((may_alias)) tod_half;
 static_assert(offsetof(c3l::Vertex, pad) == 6 && offsetof(c3l::Vertex, rgba) == 12);
 static_assert(sizeof(c3l::Vertex) == 16);
 
-// A level mesh's vertices as ctr_gpu_mesh_split_colors keeps them: per vertex a 12-byte record
-// (c3l::Vertex without its color: the time of day entry in pad), then the colors on their own, so
-// a color rewrite touches 4 bytes per vertex in FCRAM instead of the vertex's 16.
+// A level mesh's vertices in either layout. Split (ctr_gpu_mesh_split_colors): per vertex a
+// 12-byte record (c3l::Vertex without its color: the time of day entry in pad), then the colors on
+// their own, so a color rewrite touches 4 bytes per vertex in FCRAM instead of the vertex's 16.
+// Interleaved: the file's 16-byte vertices, the color in each.
 constexpr int kTodRec = 12;
 struct TodVerts {
   u8* rec = nullptr;
-  tod_word* rgba = nullptr;
-  u32 entry(int i) const { return *(const tod_half*)(rec + kTodRec * i + 6); }
+  tod_word* rgba = nullptr;  // vertex 0's color
+  u32 rs = kTodRec;          // bytes from a record to the next
+  u32 cs = 4;                // bytes from a color to the next
+  bool split() const { return cs == 4; }
+  u32 entry(int i) const { return *(const tod_half*)(rec + rs * i + 6); }
+  tod_word* col(u32 i) const { return (tod_word*)((u8*)rgba + cs * i); }
   explicit operator bool() const { return rec != nullptr; }
 };
-// a chunk mesh's vertices in place (none when it has no colors of its own)
+// n vertices at mem as the loader left them
+inline TodVerts tod_verts_at(void* mem, int n, bool split) {
+  TodVerts v;
+  v.rec = (u8*)mem;
+  if (split) {
+    v.rgba = (tod_word*)(v.rec + ctr_gpu_mesh_color_offset(n));
+  } else {
+    v.rgba = (tod_word*)(v.rec + offsetof(c3l::Vertex, rgba));
+    v.rs = v.cs = sizeof(c3l::Vertex);
+  }
+  return v;
+}
+// a chunk mesh's vertices in place
 inline TodVerts tod_verts(int mesh, int* n) {
   TodVerts v;
   void* rec = ctr_gpu_mesh_vertices_inplace(mesh, n);
-  void* col = rec ? ctr_gpu_mesh_colors_inplace(mesh) : nullptr;
-  if (col && *n > 0) {
-    v.rec = (u8*)rec;
-    v.rgba = (tod_word*)col;
+  if (rec && *n > 0) {
+    v = tod_verts_at(rec, *n, false);
+    if (void* col = ctr_gpu_mesh_colors_inplace(mesh)) {
+      v.rgba = (tod_word*)col;
+      v.rs = kTodRec;
+      v.cs = 4;
+    }
   }
   return v;
 }
@@ -3091,6 +3118,20 @@ constexpr int kTodPrefetch = 128;
 // f(entry, color) for vertices [first, end), 8 at a time: three lines of records and one of colors
 template <typename F>
 inline void tod_each(const TodVerts& v, int first, int end, F&& f) {
+  if (!v.split()) {
+    // two vertices a line, the entry and the color in it
+    u8* q = v.rec + 16 * first;
+    u8* const e = v.rec + 16 * end;
+    for (; q + 32 <= e; q += 32) {
+      __builtin_prefetch(q + kTodPrefetch, 1);
+      f(*(const tod_half*)(q + 6), (tod_word*)(q + 12));
+      f(*(const tod_half*)(q + 22), (tod_word*)(q + 28));
+    }
+    if (q < e) {
+      f(*(const tod_half*)(q + 6), (tod_word*)(q + 12));
+    }
+    return;
+  }
   const u8* p = v.rec + kTodRec * first;
   tod_word* c = v.rgba + first;
   int n = end - first;
@@ -3784,9 +3825,10 @@ void tod_make_list(CtrLevelData::Tod& t, u32 g, const TodVerts& v, int first, in
 // didn't move since is passed over whole; a run written since then counts from its own write.
 // Returns the vertices written.
 constexpr u32 kTodAllRuns = ~0u;
-template <bool kWide>
+template <bool kWide, bool kSplit>
 u32 tod_list_write(CtrLevelData::Tod& t, u16* r, const TodVerts& v, int first, u32 group_since,
                    bool all, u32 only) {
+  constexpr u32 sh = kSplit ? 2 : 4;  // a color every 4 or 16 bytes
   const u32 nr = r[0];
   u16* run = r + 2;
   const u16* e = run + 5 * nr;
@@ -3797,7 +3839,7 @@ u32 tod_list_write(CtrLevelData::Tod& t, u16* r, const TodVerts& v, int first, u
   }
   const u16* c = e + ne + nm;
   const u8* o = (const u8*)(e + 2 * ne + nm);
-  tod_word* const w = v.rgba + first;
+  u8* const w = (u8*)v.col((u32)first);
   const u32* const stamp = t.stamp.data();
   const u32* const cver = t.cver.data();
   const u32* const tab = t.table.data();
@@ -3825,11 +3867,11 @@ u32 tod_list_write(CtrLevelData::Tod& t, u16* r, const TodVerts& v, int first, u
         if (!kWide) {
           if (!keep) {
             for (u32 j = 0; j < cnt; j++) {
-              w[o[j]] = rgba;
+              *(tod_word*)(w + ((u32)o[j] << sh)) = rgba;
             }
           } else {
             for (u32 j = 0; j < cnt; j++) {
-              tod_word* x = w + o[j];
+              tod_word* x = (tod_word*)(w + ((u32)o[j] << sh));
               *x = (*x & keep) | rgba;
             }
           }
@@ -3843,7 +3885,7 @@ u32 tod_list_write(CtrLevelData::Tod& t, u16* r, const TodVerts& v, int first, u
               o += 2;
             }
             at += d;
-            tod_word* x = w + at;
+            tod_word* x = (tod_word*)(w + (at << sh));
             if (keep) {
               *x = (*x & keep) | rgba;
             } else {
@@ -3865,8 +3907,12 @@ u32 tod_list_write(CtrLevelData::Tod& t, u16* r, const TodVerts& v, int first, u
 u32 tod_list_write(CtrLevelData::Tod& t, u32 gl, const TodVerts& v, int first, u32 since, bool all,
                    u32 only) {
   u16* r = g_tod_lists.room + gl - 1;
-  return r[1] ? tod_list_write<true>(t, r, v, first, since, all, only)
-              : tod_list_write<false>(t, r, v, first, since, all, only);
+  if (v.split()) {
+    return r[1] ? tod_list_write<true, true>(t, r, v, first, since, all, only)
+                : tod_list_write<false, true>(t, r, v, first, since, all, only);
+  }
+  return r[1] ? tod_list_write<true, false>(t, r, v, first, since, all, only)
+              : tod_list_write<false, false>(t, r, v, first, since, all, only);
 }
 
 // The chunk's vertex colors brought up to date in its mesh (in place: a frame the GPU still draws
@@ -3983,7 +4029,8 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
         }
       }
       auto& lights = it->second;
-      tod_word* const w = v.rgba;
+      u8* const w = (u8*)v.rgba;
+      const u32 sh = v.split() ? 2 : 4;
       const u32* const stamp = t.stamp.data();
       const u32* const tab = t.table.data();
       const u32* const cver = t.cver.data();
@@ -4016,13 +4063,13 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
               written += c;
               if (!keep) {
                 for (const u16* const end = p + c; p < end; p++) {
-                  __builtin_prefetch(w + p[CtrLightLists::kPad], 1);
-                  w[*p] = rgb;
+                  __builtin_prefetch(w + ((u32)p[CtrLightLists::kPad] << sh), 1);
+                  *(tod_word*)(w + ((u32)*p << sh)) = rgb;
                 }
               } else {
                 for (const u16* const end = p + c; p < end; p++) {
-                  __builtin_prefetch(w + p[CtrLightLists::kPad], 1);
-                  tod_word* const x = w + *p;
+                  __builtin_prefetch(w + ((u32)p[CtrLightLists::kPad] << sh), 1);
+                  tod_word* const x = (tod_word*)(w + ((u32)*p << sh));
                   *x = (*x & keep) | rgb;
                 }
               }
@@ -4080,11 +4127,12 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
         ps.fresh = true;
       }
       if (end > first) {
-        const u16* ents = ps.fresh && gr.plain && t.fast_day && !t.keep_alpha
+        // (interleaved: the entry is in the line the color is written to)
+        const u16* ents = ps.fresh && gr.plain && t.fast_day && !t.keep_alpha && v.split()
                               ? tod_entries(t, ci, v, n, ps.frame)
                               : nullptr;
         if (ents) {
-          tod_write_entries(t.table.data(), ents, v.rgba, first, end);
+          tod_write_entries(t.table.data(), ents, v.rgba, first, end);  // (split only)
         } else if (ps.fresh && gr.plain) {
           tod_write_fresh(t, v, first, end);
         } else {
@@ -4127,7 +4175,7 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
     }
   }
   if (fhi >= flo) {
-    tod_dirty().emplace_back((uintptr_t)(v.rgba + flo), (uintptr_t)(v.rgba + fhi + 1));
+    tod_dirty().emplace_back((uintptr_t)v.col((u32)flo), (uintptr_t)v.col((u32)fhi) + 4);
   }
   return looked;
 }
@@ -4444,7 +4492,7 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
         continue;
       }
       verts++;
-      const u32 rgb = v.rgba[i];
+      const u32 rgb = *v.col((u32)i);
       int e = 0, s = 0;
       for (int ch = 0; ch < 3; ch++) {
         const int a = (int)((rgb >> (8 * ch)) & 0xff), b = (int)((now[idx] >> (8 * ch)) & 0xff);
@@ -5727,6 +5775,7 @@ void load_stream_info(c3l::Reader& f,
 void make_run_spheres(CtrLevelData* out,
                       u32 ci,
                       const u8* rec,
+                      u32 rec_stride,
                       const u16* indices,
                       u32 idx_first,
                       u32 idx_end) {
@@ -5744,7 +5793,7 @@ void make_run_spheres(CtrLevelData* out,
         ok = v < ch.vertex_count;
         s16 pos[3];
         if (ok) {
-          memcpy(pos, rec + 12 * v, sizeof(pos));
+          memcpy(pos, rec + rec_stride * v, sizeof(pos));
         }
         for (int c = 0; ok && c < 3; c++) {
           mn[c] = std::min<int>(mn[c], pos[c]);
@@ -6889,7 +6938,11 @@ bool CtrLevels::load_file(const fs::path& path,
     }
     if (mesh >= 0) {
       MeshBuild mb(mesh);  // (AI-assisted, streammem)
-      ctr_gpu_mesh_split_colors(mesh);
+      const bool split = ctr_settings().color_stream;
+      if (split) {
+        ctr_gpu_mesh_split_colors(mesh);
+      }
+      const TodVerts vv = tod_verts_at(vdst, (int)ch.vertex_count, split);
       bool read_ok = true;
       if (chunk_indices) {
         read_ok = f.read(hdr.index_data_offset + first * (u32)sizeof(u16), idst,
@@ -6898,8 +6951,8 @@ bool CtrLevels::load_file(const fs::path& path,
         memcpy(idst, indices.data() + first, (end - first) * sizeof(u16));
       }
       read_ok = read_ok &&
-                read_split_vertices(f, hdr.vertex_data_offset + ch.first_vertex * sizeof(c3l::Vertex),
-                                    ch.vertex_count, vdst);
+                read_vertices(f, hdr.vertex_data_offset + ch.first_vertex * sizeof(c3l::Vertex),
+                              ch.vertex_count, vdst, split);
       read_ok = read_ok && (!ntail || f.read(out->tail_file(ci),
                                              (u8*)vdst + ch.vertex_count * 16, ntail));
       if (read_ok && !out->run_spheres.empty()) {
@@ -6909,7 +6962,7 @@ bool CtrLevels::load_file(const fs::path& path,
         if (v19 && stream_check_enabled() && ch.vis_run_count) {
           file_sp.assign(out->run_spheres.begin() + r0, out->run_spheres.begin() + r0 + nr);
         }
-        make_run_spheres(out, (u32)out->meshes.size(), (const u8*)vdst, idst, first, end);
+        make_run_spheres(out, (u32)out->meshes.size(), vv.rec, vv.rs, idst, first, end);
         for (u32 k = 0; k < file_sp.size(); k++) {
           const auto& a = file_sp[k];
           const auto& b = out->run_spheres[r0 + k];
@@ -6920,11 +6973,11 @@ bool CtrLevels::load_file(const fs::path& path,
       if (read_ok) {
         // (AI-assisted) fog_alpha (CTR_TCC_ALPHA80): which draws have vertex alpha 0x80 everywhere.
         // The chunk's vertices first (nearly always all 0x80), the draws' indices only if not
-        const u8* const va =
-            (const u8*)vdst + ctr_gpu_mesh_color_offset((int)ch.vertex_count) + 3;
+        const u8* const va = (const u8*)vv.rgba + 3;
+        const u32 vs = vv.cs;
         bool all = true;
         for (u32 v = 0; v < ch.vertex_count && all; v++) {
-          all = va[4 * v] == 0x80;
+          all = va[vs * v] == 0x80;
         }
         out->draw_alpha80.resize(out->draws.size(), 0);
         for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
@@ -6936,7 +6989,7 @@ bool CtrLevels::load_file(const fs::path& path,
             // the reader's window mode (chunk_indices), the default
             for (u32 i = dr.first_index; i < dr.first_index + dr.index_count && ok; i++) {
               const u16 ix = idst[i - first];
-              ok = ix < ch.vertex_count && va[4 * ix] == 0x80;
+              ok = ix < ch.vertex_count && va[vs * ix] == 0x80;
             }
           }
           if (v19 && stream_check_enabled()) {
@@ -6956,13 +7009,11 @@ bool CtrLevels::load_file(const fs::path& path,
       if (read_ok && out->tod) {
         auto& t = *out->tod;
         CtrLevelData::Tod::LightList lights;
-        const TodVerts vv{(u8*)vdst,
-                          (tod_word*)((u8*)vdst + ctr_gpu_mesh_color_offset((int)ch.vertex_count))};
         tod_mask = tod_scan(t, vv, (int)ch.vertex_count, &lights);
         tod_state = tod_mask ? 2 : 0;
         if (tod_mask) {
           tod_mark_plain(t, (u32)out->meshes.size(), vv, (int)ch.vertex_count);
-          if (entry_room > 0) {
+          if (entry_room > 0 && split) {
             tod_load_entries(t, ci, vv, (int)ch.vertex_count, &entry_room);
           }
         }
@@ -9042,24 +9093,25 @@ void CtrLevels::run_stream_job(const Job& job, Done* d, c3l::Reader::Buffers* bu
         break;  // (its piece back below)
       }
       live = mesh;
-      ctr_gpu_mesh_split_colors(mesh);
+      const bool split = ctr_settings().color_stream;
+      if (split) {
+        ctr_gpu_mesh_split_colors(mesh);
+      }
       const bool ok =
           f.read(job.index_data_offset + p.index_first * (u32)sizeof(u16), idst,
                  icount * sizeof(u16)) &&
-          read_split_vertices(f,
-                              job.vertex_data_offset + p.first_vertex * (u32)sizeof(c3l::Vertex),
-                              p.vertex_count, vdst) &&
+          read_vertices(f, job.vertex_data_offset + p.first_vertex * (u32)sizeof(c3l::Vertex),
+                        p.vertex_count, vdst, split) &&
           (!ntail || f.read(p.normals_offset, ndst, ntail));
       Done::StreamOut o;
       o.unit = p.unit;
-      const TodVerts sv{
-          (u8*)vdst, (tod_word*)((u8*)vdst + ctr_gpu_mesh_color_offset((int)p.vertex_count))};
+      const TodVerts sv = tod_verts_at(vdst, (int)p.vertex_count, split);
       if (ok && p.layout) {
         stream_tod_layout(this, p.vertex_count, icount, p.draws, p.runs, idst, sv, job.tod_ntab,
                           &o.groups, &o.run_group);
         o.layout = true;
       }
-      if (ok && entry_room >= 4 + 2 * (s64)p.vertex_count) {
+      if (ok && split && entry_room >= 4 + 2 * (s64)p.vertex_count) {
         // the title's entry copy, taken with the mesh (CtrLevels::take)
         o.entries.reset(tod_copy_entries(sv, (int)p.vertex_count));
         entry_room = o.entries ? entry_room - (4 + 2 * (s64)p.vertex_count) : 0;
@@ -9233,7 +9285,7 @@ void CtrLevels::stream_take_pending(u64 frame) {
           t.chunk_min_ver[ci] = t.ver;
           t.chunk_min_dver[ci] = t.dver;
           t.chunk_light_ver[ci] = t.ver;
-          ctr_gpu_flush_range(v.rgba, (u32)n * 4u);
+          ctr_gpu_flush_range(v.rgba, (u32)(n - 1) * v.cs + 4u);
           m_sst.colored++;
         }
         t.chunk_mesh[ci] = o.mesh;  // (colored: tod_recolor keeps it)
