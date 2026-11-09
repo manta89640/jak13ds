@@ -48,6 +48,39 @@ struct CtrMercModEffect {
   s16 st_lut[256] = {};  // lump byte -> MercVertex::st (* 1024)
 };
 
+// What changes or is missing in view (CtrTfragRenderer::draw_level counts, CtrLevels::stream_log
+// logs): a pop is a chunk or group on screen that appears, goes or switches its version between
+// two frames with no morph, fade or fog over it; a hole is a chunk the config would draw with
+// nothing drawn in its place.
+namespace ctr_pop {
+enum Cause : u8 {
+  kCtl,     // the detail controller moved
+  kUrgent,  // ... and gave up a hold in view
+  kLine,    // a distance limit the relief pulled in was crossed
+  kLimit,   // a distance limit of the config was crossed
+  kEvict,   // near data was freed
+  kLate,    // near data came late
+  kLod,     // a version switch without a morph
+  kFar,     // far mode, or a mesh read back
+  kShrub,   // a shrub's fade jumped
+  kVista,   // the vista distance
+  kCauses
+};
+constexpr const char* kNames[kCauses] = {"controller", "urgent", "relief limit", "config limit",
+                                         "freed",      "late",   "lod switch",   "far mode",
+                                         "shrub fade", "vista"};
+enum HoleKind : u8 { kHoleTfrag, kHoleTie, kHoleVista, kHoleKinds };
+constexpr u32 kHoleFrames = 15;  // a hole this long is counted (0.5 s)
+struct Stats {
+  u32 pops[kCauses] = {};
+  u32 hole_frames[kHoleKinds] = {};  // chunk frames
+  u32 hole_mesh_frames = 0;          // of them: its mesh isn't there
+  u32 copy_frames = 0;               // chunk frames drawn by a vista copy nearer than the config's
+  u32 holes = 0, hole_longest = 0;   // holes of kHoleFrames or more that ended; frames
+  u32 frames = 0;
+};
+}  // namespace ctr_pop
+
 struct CtrMercModelData {
   std::string name;
   int mesh = -1;
@@ -256,6 +289,14 @@ struct CtrLevelData {
   static constexpr u8 kClPlain = 1, kClTier12 = 2, kClHas = 4, kClNoOwn = 32;  // kClHas << kind
   std::vector<CullCluster> chunk_clusters, lod_clusters;
   std::vector<u32> vista_chunks;  // the CHUNK_KIND_VISTA chunks, in index order
+  // ctr_pop: per chunk the frames it was last chosen / drawn (low 16 bits), the chunks drawn last
+  // frame, the chunks with a vista copy, the camera of the last draw, open holes (first, last frame)
+  std::vector<u16> pop_sel, pop_drawn_at;
+  std::vector<u32> pop_drawn;
+  std::vector<u8> vista_copy;
+  float pop_cam[4] = {0, 0, 0, 0};
+  u8 pop_far = 0;
+  std::vector<u32> hole_since, hole_last;
   bool cull_made = false;
   size_t cull_sizes[3] = {0, 0, 0};  // chunks, tie LOD groups, chunk_unit when made
   bool dormant_requested = false;  // a read of its freed chunks is queued
@@ -795,6 +836,7 @@ class CtrLevels {
   }
   /*! (AI-assisted, streaming) the streaming statistics, logged (render thread) */
   void stream_log();
+  void pop_log();
   /*! (AI-assisted, j2-mem) the levels' memory, the free linear memory and heap (render thread) */
   void log_memory();
   /*! (AI-assisted, streaming) host check (env CTR_STREAM_CHECK): the counts of this frame's draw
@@ -810,6 +852,7 @@ class CtrLevels {
     u64 dorm_missing = 0, dorm_switch_in_view = 0;
   };
   StreamCheck& stream_check() { return m_scheck; }
+  ctr_pop::Stats& pop_stats() { return m_pop; }
   /*! (AI-assisted, streaming) a unit needed (draw_level): late statistics */
   void stream_late(CtrLevelData& lev, u32 unit, u64 frame);
   /*! (AI-assisted, streaming) a level drawn: its groups drawn far because their data was late */
@@ -1160,6 +1203,7 @@ class CtrLevels {
   math::Vector4f m_planes[4];  // the view's planes (as CtrBackgroundCamera::planes)
   u64 m_cut_frame = 0;         // the last camera cut (a jump of > kCutMeters, or of the factor)
   u64 m_lv_frame = 0;  // (AI-assisted, j2intro) note_late_in_view
+  ctr_pop::Stats m_pop;
   u32 m_lv_count = 0;
   u32 m_lv_ring0 = 0;
   bool m_lv_recent = false;
@@ -1245,6 +1289,8 @@ void ctr_level_set_detail_urgent(bool urgent);
 // host A/B, env CTR_ARRIVAL_OFF: the arrival changes off (load order, faster reading, holds)
 bool ctr_arrival_off();
 #ifndef __3DS__
+// host, pad script "set cam_path ...": the levels drawn from a camera on a path (CtrLevel.cpp)
+bool ctr_level_host_cam_path(const char* spec);
 // host, CTR_STREAM_SIM: the loader thread's jobs and the render thread's frames one at a time
 // (the soft GPU backend is not thread safe)
 extern std::mutex g_host_gpu_mutex;
@@ -1397,6 +1443,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // (AI-assisted, titlemove) per chunk of the level drawn: a shrub chunk's distance limit (game
   // units, its runs' limit)
   std::vector<float> m_shrub_lim;
+  std::vector<u8> m_pop_why;  // ctr_pop: per chunk, this draw: why its distance decision changed
   u64 m_shrub_run_hid = 0;  // (statistics) shrub runs hidden by their distance
   // (AI-assisted) vista tier: per chunk, its vista copies are drawn this frame (it isn't, because
   // of its distance)

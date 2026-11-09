@@ -308,6 +308,11 @@ bool pad_set(const char* key, const char* value) {
     s.fog = on;
     return true;
   }
+#ifndef __3DS__
+  if (!strcmp(key, "cam_path")) {
+    return ctr_level_host_cam_path(value);
+  }
+#endif
   if (!strcmp(key, "cmd_dump")) {
     ctr_gpu_cmd_dump_next();  // (AI-assisted) "set cmd_dump on": the next frame's command list
     return true;
