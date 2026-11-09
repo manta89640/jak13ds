@@ -1033,15 +1033,10 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
                  secs(ctr_detail::kLodDistance), secs(ctr_detail::kTieDistance),
                  rl.stage[ctr_detail::kShrubFar] < 0
                      ? std::string()
-                     : fmt::format(", shrubs x{:.2f} ({}), far ties {} ({}), vista {} ({}), "
-                                   "tfrag {} ({})",
+                     : fmt::format(", shrubs x{:.2f} ({}), ties by their vista copies from {} ({})",
                                    kn.shrub_far, secs(ctr_detail::kShrubFar),
                                    kn.tie_far > 0 ? fmt::format("{:.0f} m", kn.tie_far) : "-",
-                                   secs(ctr_detail::kTieFar) + " / " + secs(ctr_detail::kTieFar2),
-                                   kn.vista_far > 0 ? fmt::format("{:.0f} m", kn.vista_far) : "-",
-                                   secs(ctr_detail::kVista),
-                                   kn.tfrag_far > 0 ? fmt::format("{:.0f} m", kn.tfrag_far) : "-",
-                                   secs(ctr_detail::kTfragFar)),
+                                   secs(ctr_detail::kTieFar) + " / " + secs(ctr_detail::kTieFar2)),
                  c.sheds, c.sheds_cpu, c.restores);
         m_auto.ctl.sheds = m_auto.ctl.sheds_cpu = m_auto.ctl.restores = 0;
         m_auto.time = ctr_detail::KnobTime();
@@ -1174,7 +1169,7 @@ void CtrRenderer::auto_detail_frame(float /*gpu_busy_ms*/, float gpu_active_ms,
         cs.shrub_scale_max > cs.shrub_scale ||
         (cs.tie_distance_scale > 0 && cs.tie_distance_scale_max > cs.tie_distance_scale);
     m_auto.relief.init(cs.tie_lod_px, cs.lod_distance, cs.tie_distance_scale, cs.draw_distance,
-                       g_game_version == GameVersion::Jak1, cs.vista_distance);
+                       g_game_version == GameVersion::Jak1);
     m_auto.ctl.range(-(float)m_auto.relief.n, t_range ? 1.f : 0.f);
     if (g_game_version == GameVersion::Jak1) {
       m_auto.ctl.unit_costs(m_auto.relief, ctr_detail::kJak1LeverMs);
@@ -1191,7 +1186,7 @@ void CtrRenderer::auto_detail_frame(float /*gpu_busy_ms*/, float gpu_active_ms,
     const float x = std::clamp((float)atof(fx), m_auto.ctl.lo, m_auto.ctl.hi);
     if (m_auto.ctl.x != x || m_rs.frame_idx % 30 == 0) {
       m_auto.ctl.x = x;
-      ctr_level_set_detail(x);
+      ctr_level_set_detail(x, true);
     }
     return;
   }
@@ -1203,11 +1198,11 @@ void CtrRenderer::auto_detail_frame(float /*gpu_busy_ms*/, float gpu_active_ms,
   const double k = cs.fps_cap >= 60 ? 0.5 : 1.0;
   const double target = cs.auto_detail_gpu_ms * k;
   const bool load = m_auto.load_frame && m_rs.frame_idx <= m_auto.load_frame + 2;
-  bool moved = false;
+  bool moved = false, snap = false;
   // the title's relief (its late flight) isn't carried into play: the level starts at the config
   if (m_auto.title && !m_title_loaded && m_auto.ctl.x != 0) {
     m_auto.ctl.reset();
-    moved = true;
+    moved = snap = true;
   }
   m_auto.title = m_title_loaded;
   if (m_auto.area) {
@@ -1216,12 +1211,11 @@ void CtrRenderer::auto_detail_frame(float /*gpu_busy_ms*/, float gpu_active_ms,
   }
   const bool settled = !m_auto.load_frame || m_rs.frame_idx > m_auto.load_frame + 90;
   moved = m_auto.ctl.step((double)gpu_active_ms / gpu_busy_frames, build_tod_ms, !load, target, k,
-                          settled) ||
+                          settled, snap ? 1e9f : ctr_level_detail()) ||
           moved;
 
-  ctr_level_set_detail_urgent(m_auto.ctl.urgent);
   if (moved) {
-    ctr_level_set_detail(m_auto.ctl.x);
+    ctr_level_set_detail(m_auto.ctl.x, snap);
   }
 #ifndef __3DS__
   // host: env CTR_DETAIL_LOG, the controller every 30 frames

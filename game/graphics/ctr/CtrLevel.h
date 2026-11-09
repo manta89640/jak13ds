@@ -48,14 +48,12 @@ struct CtrMercModEffect {
   s16 st_lut[256] = {};  // lump byte -> MercVertex::st (* 1024)
 };
 
-// What changes or is missing in view (CtrTfragRenderer::draw_level counts, CtrLevels::stream_log
-// logs): a pop is a chunk or group on screen that appears, goes or switches its version between
-// two frames with no morph, fade or fog over it; a hole is a chunk the config would draw with
-// nothing drawn in its place.
+// In view (draw_level counts, stream_log logs): a pop is a chunk or group that appears, goes or
+// switches between two frames with no morph, fade or fog over it; a hole is a chunk the config
+// would draw with nothing drawn in its place.
 namespace ctr_pop {
 enum Cause : u8 {
   kCtl,     // the detail controller moved
-  kUrgent,  // ... and gave up a hold in view
   kLine,    // a distance limit the relief pulled in was crossed
   kLimit,   // a distance limit of the config was crossed
   kEvict,   // near data was freed
@@ -66,9 +64,9 @@ enum Cause : u8 {
   kVista,   // the vista distance
   kCauses
 };
-constexpr const char* kNames[kCauses] = {"controller", "urgent", "relief limit", "config limit",
-                                         "freed",      "late",   "lod switch",   "far mode",
-                                         "shrub fade", "vista"};
+constexpr const char* kNames[kCauses] = {"controller", "relief limit", "config limit",
+                                         "freed",      "late",         "lod switch",
+                                         "far mode",   "shrub fade",   "vista"};
 enum HoleKind : u8 { kHoleTfrag, kHoleTie, kHoleVista, kHoleKinds };
 constexpr u32 kHoleFrames = 15;  // a hole this long is counted (0.5 s)
 struct Stats {
@@ -76,6 +74,9 @@ struct Stats {
   u32 hole_frames[kHoleKinds] = {};  // chunk frames
   u32 hole_mesh_frames = 0;          // of them: its mesh isn't there
   u32 copy_frames = 0;               // chunk frames drawn by a vista copy nearer than the config's
+  u32 hole_draw_frames = 0;          // tfrag chunk frames beyond the draw distance, nothing in place
+  u32 hole_groups = 0;               // group frames: kept far or coarse and that version not drawn
+  u32 morph_in = 0, morph_out = 0;   // near chunks that came / went in view under a morph
   u32 holes = 0, hole_longest = 0;   // holes of kHoleFrames or more that ended; frames
   u32 frames = 0;
 };
@@ -289,11 +290,12 @@ struct CtrLevelData {
   static constexpr u8 kClPlain = 1, kClTier12 = 2, kClHas = 4, kClNoOwn = 32;  // kClHas << kind
   std::vector<CullCluster> chunk_clusters, lod_clusters;
   std::vector<u32> vista_chunks;  // the CHUNK_KIND_VISTA chunks, in index order
-  // ctr_pop: per chunk the frames it was last chosen / drawn (low 16 bits), the chunks drawn last
-  // frame, the chunks with a vista copy, the camera of the last draw, open holes (first, last frame)
+  // ctr_pop: per chunk the frames it was last chosen / drawn, the chunks drawn last frame, those
+  // with a vista copy, the last draw's camera, open holes (first, last frame)
   std::vector<u16> pop_sel, pop_drawn_at;
   std::vector<u32> pop_drawn;
   std::vector<u8> vista_copy;
+  std::vector<u16> pop_far_chunk, pop_tf_chunk;  // per tie LOD / tfrag group: its far version's chunk
   float pop_cam[4] = {0, 0, 0, 0};
   u8 pop_far = 0;
   std::vector<u32> hole_since, hole_last;
@@ -489,7 +491,31 @@ struct CtrLevelData {
     u64 resident_frame = 0;  // (AI-assisted, popin2) the frame it was last taken (became there)
     // this frame: needed now by a group whose surface is within ring 0 of the camera
     bool ring0 = false;
+    // the last frame a group of it was drawn far in view for want of it; the frames its morph in
+    // and its morph out began (0: none)
+    u32 late_seen = 0, morph_in = 0, leave = 0;
+    u32 left = 0;  // the frame it was freed at the end of a morph out
   };
+  // a unit's morph floor: its geomorph factors are at least this (1: the far versions' surface)
+  static constexpr u32 kMorphInFrames = 24, kMorphOutFrames = 16;
+  static float unit_floor(const StreamUnit& su, u32 frame) {
+    float a = 0.f;
+    if (su.morph_in && frame - su.morph_in < kMorphInFrames) {
+      a = 1.f - (float)(frame - su.morph_in) / kMorphInFrames;
+    }
+    if (su.leave) {
+      a = std::max(a, std::min(1.f, (float)(frame - su.leave + 1) / kMorphOutFrames));
+    }
+    return a;
+  }
+  // chunk ci's (0 unless it is a unit)
+  float chunk_floor(size_t ci, u32 frame) const {
+    return is_unit(ci) ? unit_floor(stream_units[chunk_unit[ci]], frame) : 0.f;
+  }
+  // chunk ci has geomorph records (the ties' or the tfrag's): a floor moves it
+  bool chunk_morphs(size_t ci) const {
+    return (ci < chunk_morph.size() && chunk_morph[ci] >= 0) || tf_morph(ci);
+  }
   static constexpr u8 kUnitAbsent = 0, kUnitLoading = 1, kUnitResident = 2, kUnitNever = 3;
   std::vector<StreamUnit> stream_units;
   std::vector<u32> chunk_unit;  // per chunk: its unit, UINT32_MAX none (empty: no near chunks)
@@ -1140,7 +1166,8 @@ class CtrLevels {
   static constexpr double kServeShare = 0.25;
   std::atomic<bool> m_stream_urgent_queued{false};
   void take_stream(Done& d, u64 frame);
-  void stream_evict(CtrLevelData& lev, u32 unit);
+  //! frees a unit; unless now, one drawn last frame first morphs out (freed by stream_update): false
+  bool stream_evict(CtrLevelData& lev, u32 unit, bool now = false);
   void stream_idle_fill(u64 frame);
   void stream_take_pending(u64 frame);
   struct StreamTake {
@@ -1152,7 +1179,8 @@ class CtrLevels {
   void stream_late_end(CtrLevelData::StreamUnit& su, double end_ms, u64 end_frame);
   // the units in the arena's growth segments freed (all: a level load needs the memory; else the
   // ones not needed now); returns how many
-  u32 stream_shrink(bool all, bool whole = false);  // (AI-assisted, streammem) whole: every unit
+  // (AI-assisted, streammem) whole: every unit; now false: a unit drawn leaves by its morph out
+  u32 stream_shrink(bool all, bool whole = false, bool now = true);
   static void free_stream_parts(const Job& job);
   u32 m_stream_inflight = 0;  // stream jobs queued, running or not taken (kJobsInFlight)
   // (AI-assisted, streammem) under m_lock: the room_bytes of the parts jobs queued, running or done
@@ -1282,10 +1310,7 @@ static_assert(sizeof(CtrBackgroundCamera) == 16 * 23);
 /*! TFRAG_LEVEL0/1 buckets: draws the whole level background (tfrag + tie) from the .c3l. */
 /*! (AI-assisted) config.ini auto_detail: where the shrub / tie distances are between their near
  * (0) and far (1) values (render thread). */
-void ctr_level_set_detail(float t);
-// (AI-assisted, title-popin) auto_detail: the GPU is over its budget (frames about to miss their
-// vblank): lower distances apply to what is in view too
-void ctr_level_set_detail_urgent(bool urgent);
+void ctr_level_set_detail(float t, bool snap = false);
 // host A/B, env CTR_ARRIVAL_OFF: the arrival changes off (load order, faster reading, holds)
 bool ctr_arrival_off();
 #ifndef __3DS__
@@ -1443,7 +1468,10 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // (AI-assisted, titlemove) per chunk of the level drawn: a shrub chunk's distance limit (game
   // units, its runs' limit)
   std::vector<float> m_shrub_lim;
+  // per chunk, this draw: a tie chunk's fade in its limit's band, its vista copy's
+  std::vector<u8> m_tie_fade, m_copy_fade;
   std::vector<u8> m_pop_why;  // ctr_pop: per chunk, this draw: why its distance decision changed
+  std::vector<u32> m_pop_kept;  // ... the groups in view kept from their distance's version (bit 31: tfrag)
   u64 m_shrub_run_hid = 0;  // (statistics) shrub runs hidden by their distance
   // (AI-assisted) vista tier: per chunk, its vista copies are drawn this frame (it isn't, because
   // of its distance)
@@ -1461,6 +1489,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
     bool vista;   // (AI-assisted) far scenery: drawn first, with the vista fog (lowres_vista)
     bool nofog;   // (AI-assisted) in front of where both fogs start (fog_stage_skip)
     bool tmorph;  // the tfrag geomorph: near or mid versions shown (the morph program)
+    float floor;  // CtrLevelData::chunk_floor
     float clip[16];
     ctr_mesh_matrix gpu;  // clip, converted for the GPU once per frame
   };
