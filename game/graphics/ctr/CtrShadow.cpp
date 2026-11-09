@@ -58,8 +58,9 @@ constexpr float kMaxCamera = 1e8f;
 constexpr float kMaxMatrix = 1e6f;
 // the guard band (clip space |x|, |y| <= kGuard * w): a triangle with a corner beyond it is cut
 // to it on the CPU, as the VU1 program clips to its own. The PICA drops a triangle whose corners
-// are far off screen, and a dropped face leaves its stencil count wherever it covers.
-constexpr float kGuard = 2.f;
+// are far off screen, and a dropped face leaves its stencil count wherever it covers. 1: the
+// screen itself, so what the PICA does with a corner off screen never decides a count.
+constexpr float kGuard = 1.f;
 
 inline u32 sign_bit(float f) {
   return float_bits(f) >> 31;
@@ -911,15 +912,16 @@ void CtrShadowRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
 
 void CtrShadowRenderer::draw() {
   const int nv = m_vol.vert_count(), nf = m_vol.front_count(), nb = m_vol.back_count();
-  if (nf < 3) {
-    // no front faces: the stencil stays 0 (the back faces only take away), nothing to darken
+  if (nf < 3 || nb < 3) {
+    // no front faces: nothing counts up; no back faces: nothing behind one to darken
     ctr_gpu_clip_draw_ranges(nullptr, nullptr, nullptr, 0, 0, 0);
     return;
   }
   // the back list after the front list
   memcpy(m_indices + nf, m_back.data(), (size_t)nb * 2);
-  // the darkening pass draws the front faces again: a pixel whose stencil isn't 0 was counted up
-  // by one of them, so they cover every pixel to darken (each once: the first one clears it)
+  // the darkening pass draws the back faces that lie behind the scene: a counted pixel has one
+  // (each darkened once: it clears the count), and a count the back pass failed to take down
+  // darkens nothing in front of the volume's far side
   u8 rgb[3];
   m_vol.color(rgb);
   const u32 rgba = rgb[0] | ((u32)rgb[1] << 8) | ((u32)rgb[2] << 16) | (0x80u << 24);
@@ -938,9 +940,233 @@ void CtrShadowRenderer::draw() {
   st[0].flags = CTR_STATE_NO_COLOR | CTR_STATE_STENCIL_INCR;
   st[1].flags = CTR_STATE_NO_COLOR | CTR_STATE_STENCIL_DECR;
   st[2].blend = CTR_BLEND_MUL;
-  st[2].ztest = CTR_TEST_ALWAYS;
+  st[2].ztest = CTR_TEST_LESS;
   st[2].flags = CTR_STATE_STENCIL_CLEAR;
-  const int first[3] = {0, nf, 0};
-  const int count[3] = {nf, nb, nf};
+  const int first[3] = {0, nf, nf};
+  const int count[3] = {nf, nb, nb};
   ctr_gpu_clip_draw_ranges(st, first, count, 3, nv, nf + nb);
+}
+
+// ---------------------------------------------------------------------------------------------
+// self-test
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+u32 vif_word(VifCode::Kind kind, u32 num, u32 imm) {
+  return ((u32)kind << 24) | ((num & 0xff) << 16) | (imm & 0xffff);
+}
+
+// the shadow bucket's transfers for one prism, as shadow-execute makes them
+struct TestDma {
+  std::vector<std::vector<u8>> data;
+  std::vector<DmaTransfer> list;
+  void add(u32 vif0, u32 vif1, const void* src, u32 bytes) {
+    data.emplace_back(bytes);
+    if (bytes) {
+      memcpy(data.back().data(), src, bytes);
+    }
+    DmaTransfer t;
+    t.data = data.back().data();
+    t.size_bytes = bytes;
+    t.transferred_tag = (u64)vif0 | ((u64)vif1 << 32);
+    list.push_back(t);
+  }
+  void add_list(const std::vector<std::array<u8, 4>>& entries, u32 mscal, u32 addr) {
+    const u32 n = (u32)entries.size();
+    const u32 num = ((n + 1 + 3) / 4) * 4;
+    std::vector<u8> d(4 * num + 16, 0);
+    memcpy(d.data(), &n, 4);
+    memcpy(d.data() + 4, entries.data(), 4 * n);
+    const u32 call = vif_word(VifCode::Kind::MSCALF, 0, mscal);
+    memcpy(d.data() + 4 * num + 12, &call, 4);
+    add(0, vif_word(VifCode::Kind::UNPACK_V4_8, num, 0x4000 | addr), d.data(), (u32)d.size());
+  }
+};
+
+constexpr int kTestSides = 64;
+constexpr float kTestNear = 0.25f, kTestFar = 1000.f;
+constexpr float kTestA = (kTestNear + kTestFar) / (kTestNear - kTestFar);
+constexpr float kTestB = kTestNear * (1.f - kTestA);
+
+// camera space: x right, y up, z forward (meters); clip = (1.6 x, 2.67 y, A z + B, z)
+void test_prism(TestDma& dma, const float bottom[3]) {
+  u32 consts[13][4] = {};
+  const float hvdf[4] = {2048.f, 2048.f, 8388608.f, 0.f}, pfog = 1.f;
+  memcpy(consts[4], hvdf, 16);
+  memcpy(consts[5], &pfog, 4);
+  dma.add(vif_word(VifCode::Kind::STCYCL, 0, 0x404),
+          vif_word(VifCode::Kind::UNPACK_V4_32, 13, kVuConstants), consts, sizeof(consts));
+  const float matrix[4][4] = {{256.f * 1.6f, 0, 0, 0},
+                              {0, -112.f * 2.67f, 0, 0},
+                              {0, 0, 8388608.f * kTestA, 1.f},
+                              {0, 0, 8388608.f * kTestB, 0}};
+  dma.add(vif_word(VifCode::Kind::STCYCL, 0, 0x404),
+          vif_word(VifCode::Kind::UNPACK_V4_32, 4, kVuMatrix), matrix, sizeof(matrix));
+  dma.add(vif_word(VifCode::Kind::MSCALF, 0, kInitProgram), 0, nullptr, 0);
+
+  const float top[3] = {0.3f, 0.6f, 6.f};
+  const float axis[3] = {bottom[0] - top[0], bottom[1] - top[1], bottom[2] - top[2]};
+  float T[kTestSides][4], D[kTestSides][4];
+  for (int i = 0; i < kTestSides; i++) {
+    const float a = 6.2831853f * (float)i / kTestSides;
+    T[i][0] = top[0] + 0.5f * std::cos(a);
+    T[i][1] = top[1];
+    T[i][2] = top[2] + 0.35f * std::sin(a);
+    T[i][3] = 1.f;
+    for (int c = 0; c < 3; c++) {
+      D[i][c] = T[i][c] + axis[c];
+    }
+    D[i][3] = 1.f;
+  }
+  dma.add(vif_word(VifCode::Kind::FLUSHA, 0, 0),
+          vif_word(VifCode::Kind::UNPACK_V4_32, kTestSides, kVuTop), T, sizeof(T));
+  dma.add(0, vif_word(VifCode::Kind::UNPACK_V4_32, kTestSides, kVuDual), D, sizeof(D));
+  auto cross_dot = [](const float* o, const float* a, const float* b, const float* d) {
+    const float e1[3] = {a[0] - o[0], a[1] - o[1], a[2] - o[2]};
+    const float e2[3] = {b[0] - o[0], b[1] - o[1], b[2] - o[2]};
+    return (e1[1] * e2[2] - e1[2] * e2[1]) * d[0] + (e1[2] * e2[0] - e1[0] * e2[2]) * d[1] +
+           (e1[0] * e2[1] - e1[1] * e2[0]) * d[2];
+  };
+  // every face wound with its normal out of the prism
+  std::vector<std::array<u8, 4>> tris, edges;
+  const float up[3] = {-axis[0], -axis[1], -axis[2]};
+  const bool cap_swap = cross_dot(T[0], T[1], T[2], up) < 0;
+  for (int i = 1; i + 1 < kTestSides; i++) {
+    tris.push_back({0, (u8)(cap_swap ? i + 1 : i), (u8)(cap_swap ? i : i + 1), 1});
+  }
+  for (int i = 0; i < kTestSides; i++) {
+    const int j = (i + 1) % kTestSides;
+    const float out[3] = {T[i][0] - top[0], 0.f, T[i][2] - top[2]};
+    edges.push_back({(u8)i, (u8)j, (u8)(cross_dot(T[i], T[j], D[j], out) > 0), 0});
+  }
+  dma.add_list(tris, 2, 0x158);
+  dma.add_list(edges, 4, 0x258);
+}
+
+struct TestResult {
+  int dark = -1, left = -1;
+};
+
+// one frame: the receiver at distance receiver_z, the prism's three passes, then a quad over the
+// screen where a count is left. uncut: the prism's faces as they are, for the GPU to clip
+TestResult test_frame(const float bottom[3], float receiver_z, bool split, bool uncut) {
+  static CtrShadowVolumes vol;
+  static std::vector<u16> back(CtrShadowVolumes::kMaxIndices);
+  std::vector<CtrShadowVolumes::Prim> prims;
+  TestDma dma;
+  test_prism(dma, bottom);
+  ctr_gpu_set_skip_color_clear(0);
+  ctr_gpu_frame_begin(0, 0, 0);
+  ctr_draw_state rs;
+  memset(&rs, 0, sizeof(rs));
+  rs.tex = -1;
+  rs.atest = CTR_TEST_ALWAYS;
+  rs.ztest = CTR_TEST_ALWAYS;
+  rs.zwrite = 1;
+  const float depth = (kTestA + kTestB / receiver_z + 1.f) * 0.5f;
+  ctr_vertex q[6];
+  const float corner[6][2] = {{-1, -1}, {1, -1}, {-1, 1}, {-1, 1}, {1, -1}, {1, 1}};
+  for (int i = 0; i < 6; i++) {
+    q[i] = ctr_vertex{corner[i][0], corner[i][1], depth, 0.f, 0.f, 0, 0, 16, 0x80};
+  }
+  ctr_gpu_draw(&rs, q, 6);
+  if (split) {
+    ctr_gpu_submit_now();
+  }
+  ctr_clip_vertex* verts = nullptr;
+  u16* indices = nullptr;
+  const bool room = ctr_gpu_clip_reserve(CtrShadowVolumes::kMaxVerts, CtrShadowVolumes::kMaxIndices,
+                                         &verts, &indices) != 0;
+  if (room) {
+    vol.begin(verts, CtrShadowVolumes::kMaxVerts - 4, indices, back.data(),
+              CtrShadowVolumes::kMaxIndices - 6);
+    vol.set_trace(uncut ? &prims : nullptr);
+    for (const auto& t : dma.list) {
+      vol.transfer(t);
+    }
+    vol.end();
+    vol.set_trace(nullptr);
+    const int nv = vol.vert_count();
+    int nf = vol.front_count(), nb = vol.back_count();
+    if (uncut) {
+      nf = nb = 0;
+      for (const auto& pr : prims) {
+        u16* list = pr.front ? indices : back.data();
+        int& n = pr.front ? nf : nb;
+        for (int k = 0; k + 2 < pr.n; k++) {
+          list[n++] = pr.v[0];
+          list[n++] = pr.v[k + 1];
+          list[n++] = pr.v[k + 2];
+        }
+      }
+    }
+    memcpy(indices + nf, back.data(), (size_t)nb * 2);
+    for (int i = 0; i < nv; i++) {
+      verts[i].r = verts[i].g = verts[i].b = 0x80;
+      verts[i].a = 0x80;
+    }
+    static const float kQuad[4][2] = {{-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
+    static const u16 kQuadIndex[6] = {0, 1, 2, 2, 1, 3};
+    for (int i = 0; i < 4; i++) {
+      verts[nv + i] = ctr_clip_vertex{kQuad[i][0], kQuad[i][1], 0.f, 1.f, 0.f, 0.f, 0x40, 0x40,
+                                      0x40, 0x80};
+    }
+    for (int i = 0; i < 6; i++) {
+      indices[nf + nb + i] = (u16)(nv + kQuadIndex[i]);
+    }
+    ctr_draw_state st[4];
+    memset(st, 0, sizeof(st));
+    for (auto& s : st) {
+      s.tex = -1;
+      s.blend = CTR_BLEND_OFF;
+      s.atest = CTR_TEST_ALWAYS;
+      s.ztest = CTR_TEST_GEQUAL;
+    }
+    st[0].flags = CTR_STATE_NO_COLOR | CTR_STATE_STENCIL_INCR;
+    st[1].flags = CTR_STATE_NO_COLOR | CTR_STATE_STENCIL_DECR;
+    st[2].blend = st[3].blend = CTR_BLEND_MUL;
+    st[2].flags = st[3].flags = CTR_STATE_STENCIL_CLEAR;
+    st[2].ztest = CTR_TEST_LESS;
+    st[3].ztest = CTR_TEST_ALWAYS;
+    const int first[4] = {0, nf, nf, nf + nb};
+    const int count[4] = {nf, nb, nb, 6};
+    ctr_gpu_clip_draw_ranges(st, first, count, 4, nv + 4, nf + nb + 6);
+  }
+  ctr_gpu_frame_end();
+  // the receiver is blue 16 (next to black on the screen): 8 where darkened, 4 under the quad
+  TestResult r;
+  unsigned int blue[256];
+  if (room && ctr_gpu_top_histogram(blue)) {
+    r.dark = (int)(blue[7] + blue[8] + blue[9]);
+    r.left = (int)(blue[3] + blue[4] + blue[5]);
+  }
+  return r;
+}
+}  // namespace
+
+void ctr_shadow_selftest() {
+  // the receiver darkened inside the prism on the host's rasterizer
+  constexpr int kHitPixels = 5978, kUncutPixels = 6027;
+  constexpr int kStray = 16;
+  static const float kLong[3] = {-0.6f, -9.f, 6.6f}, kShort[3] = {0.1f, -1.f, 6.2f},
+                     kFar[3] = {-2.f, -30.f, 8.f};
+  const TestResult hit = test_frame(kLong, 6.3f, false, false);
+  const TestResult air = test_frame(kLong, 30.f, false, false);
+  const TestResult split = test_frame(kLong, 30.f, true, false);
+  const TestResult on_screen = test_frame(kShort, 30.f, false, false);
+  const TestResult uncut = test_frame(kFar, 6.3f, false, true);
+  if (hit.dark < 0 || air.dark < 0 || split.dark < 0 || on_screen.dark < 0 || uncut.dark < 0) {
+    lg::info("[ctr] shadow self-test: not run (the top screen can't be read back)");
+    return;
+  }
+  const bool ok = std::abs(hit.dark - kHitPixels) * 10 <= kHitPixels && hit.left <= kStray &&
+                  air.dark + air.left <= kStray && split.dark + split.left <= kStray &&
+                  on_screen.dark + on_screen.left <= kStray;
+  lg::info("[ctr] shadow self-test: inside {} px darkened + {} with a count left (expected {} + "
+           "0); behind {} + {}, after a list split {} + {}, on screen {} + {} (expected 0 + 0) "
+           "-> {}; inside a prism sent uncut, 1080 px past the screen's edge: {} + {} (expected "
+           "{} + 0 if the GPU clips it)",
+           hit.dark, hit.left, kHitPixels, air.dark, air.left, split.dark, split.left,
+           on_screen.dark, on_screen.left, ok ? "pass" : "FAIL", uncut.dark, uncut.left,
+           kUncutPixels);
 }

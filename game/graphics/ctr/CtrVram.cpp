@@ -482,7 +482,18 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
   // skip the upload if this exact page is already there
   const u8* src = ee_mem + seg.block_data_ptr;
   const u64 page_key = ((u64)page.id << 32 | page.name_ptr) ^ ((u64)(uintptr_t)tpage << 7);
-  const u64 hash = sampled_hash(src, words, 256, page_key);
+  u64 hash;
+  HashMemo& hm = m_hash_memo[(((uintptr_t)src >> 12) ^ ((uintptr_t)src >> 18) ^ words) % kHashMemos];
+  const u32 epoch = m_epoch ? *m_epoch : 0;
+  if (m_epoch && hm.src == src && hm.words == words && hm.key == page_key && hm.epoch == epoch) {
+    hash = hm.hash;
+  } else {
+    hash = sampled_hash(src, words, 256, page_key);
+    // (kept only if nothing was linked while the data was read)
+    if (m_epoch && *m_epoch == epoch) {
+      hm = HashMemo{src, words, epoch, page_key, hash};
+    }
+  }
   auto last = m_last_upload.find(dest_block);
   if (last != m_last_upload.end() && last->second.src == src && last->second.words == words &&
       last->second.hash == hash) {

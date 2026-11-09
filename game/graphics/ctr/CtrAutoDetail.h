@@ -2,60 +2,51 @@
 
 // config.ini auto_detail: one slow controller for the level detail, by rings around the camera.
 // Ring 0 (kNearRingMeters) never changes. Over the GPU budget the far ring loses detail first
-// (the tie distance limit; Jak 1 then the shrub distances beyond ring 0, the far tie distance, the
-// vista distance and the tfrag distance), then the middle ring (lod_distance, tie_lod_px); with time
-// to spare the far ring gains detail above the config (the shrub / tie distances toward their _max
-// values). CPU only (test/ctr_render/auto_detail_test.cpp).
+// (Jak 1: the shrub fade bands beyond ring 0, then the distance from which a tie chunk is drawn by
+// its vista copy; else the tie distance limit), then the middle ring (lod_distance, tie_lod_px);
+// with time to spare the far ring gains detail above the config (the shrub / tie distances toward
+// their _max values). A lever only moves what has something drawn in its place or fades: none
+// leaves a hole. CPU only (test/ctr_render/auto_detail_test.cpp).
 //
 // One position x: x in [0, 1] is the near-to-far range of the shrub / tie distances, x < 0 the
-// relief r = -x (one unit per knob that has something to move, in kOrder).
+// relief r = -x (one unit per knob that has something to move, in kOrder). The level renderer
+// follows x at kSlew per frame, so every distance it sets moves a fade band's width in seconds.
 
 #include <algorithm>
 #include <cmath>
 
 namespace ctr_detail {
 
-enum Knob {
-  kTieLodPx,
-  kLodDistance,
-  kTieDistance,
-  kShrubFar,
-  kTieFar,
-  kVista,
-  kTfragFar,
-  kTieFar2,
-  kKnobs
-};
-// far ring first: the tie limit (small ties 150+ m), Jak 1's far levers (the far ties last again,
-// 250 -> 150 m), the coarse tfrag (200+ m), the tie LOD error
-constexpr Knob kOrder[kKnobs] = {kTieDistance, kShrubFar, kTieFar,      kVista,
-                                 kTfragFar,    kTieFar2,  kLodDistance, kTieLodPx};
+enum Knob { kTieLodPx, kLodDistance, kTieDistance, kShrubFar, kTieFar, kTieFar2, kKnobs };
+// far ring first: the tie limit, Jak 1's levers (shrubs, the ties' vista copies from 250 m, then
+// from 150 m), the coarse tfrag (200+ m), the tie LOD error
+constexpr Knob kOrder[kKnobs] = {kTieDistance, kShrubFar,    kTieFar,
+                                 kTieFar2,     kLodDistance, kTieLodPx};
 // nothing nearer than this to the camera changes with the relief (meters)
 constexpr float kNearRingMeters = 40.f;
 constexpr float kOldTieLodPx = 4.f;
 constexpr float kOldLodDistance = 200.f;  // meters
 constexpr float kOldTieScale = 1.5f;
-// Jak 1's relief takes the tie limit to the converter's own distances (small ties 100 m)
-constexpr float kJak1ReliefTieScale = 1.f;
 constexpr float kSmallTieMeters = 100.f;  // the converter's limit of small ties (x the scale)
-// Jak 1's far levers at their floor: shrub distances x this (not under ring 0), ties, vista and
-// tfrag chunks up to these distances (meters)
+// Jak 1's levers at their floor: shrub distances x this (not under ring 0), tie chunks drawn by
+// their vista copies from these distances (meters)
 constexpr float kShrubFarK = 0.5f;
 constexpr float kTieFarMeters = 250.f;
-constexpr float kVistaFarMeters = 1000.f;
-constexpr float kTfragFarMeters = 200.f;
 constexpr float kTieFar2Meters = 150.f;
 constexpr float kReliefMax = (float)kKnobs;
+// a distance limit's fade band: from the limit to this times it
+constexpr float kFadeBand = 1.1f;
+// the drawn position follows the controller's by this per frame; the controller waits for it
+constexpr float kSlew = 0.01f;
+constexpr float kSlewNear = 0.05f;
 // GPU ms each Jak 1 lever saves over its unit (host title flight, triangles x 0.164 ms per 1000;
 // the others: Controller::kMsPerUnit)
 constexpr double kJak1LeverMs[kKnobs] = {
     4.0,   // kTieLodPx (does not move)
     4.0,   // kLodDistance (does not move)
-    0.25,  // kTieDistance
+    0.25,  // kTieDistance (does not move)
     0.25,  // kShrubFar
     0.2,   // kTieFar
-    0.5,   // kVista
-    0.8,   // kTfragFar
     4.5};  // kTieFar2
 
 // a distance limit at the relief (0: none): never under the config's one within ring 0
@@ -71,6 +62,17 @@ inline float far_cap(float d, float cap, float near_ring) {
     return d;
   }
   return d > 0 ? std::max(std::min(d, cap), std::min(d, near_ring)) : std::max(cap, near_ring);
+}
+// how much of a chunk at `dn` is drawn with the limit `lim` (0: none)
+inline float band_alpha(float dn, float lim) {
+  if (!(lim > 0) || dn <= lim) {
+    return 1.f;
+  }
+  return std::max(0.f, (lim * kFadeBand - dn) / (lim * (kFadeBand - 1.f)));
+}
+// the renderer's position, a frame nearer to the controller's
+inline float slew(float now, float target) {
+  return now + std::clamp(target - now, -kSlew, kSlew);
 }
 // a shrub's fade band [x, w] (full detail to x, gone at w) at the shrub lever's factor k: a band
 // that starts beyond ring 0 moves toward it (the same shape), one that starts inside stays
@@ -88,22 +90,19 @@ struct Knobs {
   float lod_distance;        // 0: none
   float tie_distance_scale;  // 0: none
   float shrub_far = 1.f;     // shrub fade bands x this (shrub_band)
-  float tie_far = 0.f;       // ties up to this (meters, 0: the draw distance)
-  float vista_far = 0.f;     // vista up to this (meters, 0: vista_distance)
-  float tfrag_far = 0.f;     // tfrag up to this (meters, 0: the draw distance)
+  float tie_far = 0.f;       // tie chunks by their vista copies from this (meters, 0: never)
 };
 
 struct Relief {
   Knobs base{1.f, 0.f, 0.f};
   float from[kKnobs] = {}, to[kKnobs] = {};
-  int stage[kKnobs] = {-1, -1, -1, -1, -1, -1, -1, -1};  // the knob's unit of r (-1: none)
+  int stage[kKnobs] = {-1, -1, -1, -1, -1, -1};  // the knob's unit of r (-1: none)
   int n = 0;
 
   // a range starts where the knob begins to cut (none -> the draw distance's equal). Jak 1: no
-  // lod_distance (its coarse tfrag is the geomorph's far version), the tie limit down to x1, and
-  // the far levers
-  void init(float px, float lod, float tie, float draw_distance, bool jak1 = false,
-            float vista_distance = 10000.f) {
+  // lod_distance (its coarse tfrag is the geomorph's far version) and no tie limit (a small tie
+  // beyond it has nothing in its place where a level has no vista tier), its own levers instead
+  void init(float px, float lod, float tie, float draw_distance, bool jak1 = false) {
     base = {px, lod, tie};
     const float draw = draw_distance > 0 ? draw_distance : 2000.f;
     from[kTieLodPx] = px;
@@ -111,15 +110,11 @@ struct Relief {
     from[kLodDistance] = lod > 0 ? lod : draw;
     to[kLodDistance] = jak1 ? from[kLodDistance] : kOldLodDistance;
     from[kTieDistance] = tie > 0 ? tie : draw / kSmallTieMeters;
-    to[kTieDistance] = jak1 ? kJak1ReliefTieScale : kOldTieScale;
+    to[kTieDistance] = jak1 ? from[kTieDistance] : kOldTieScale;
     from[kShrubFar] = 1.f;
     to[kShrubFar] = jak1 ? kShrubFarK : 1.f;
     from[kTieFar] = draw;
     to[kTieFar] = jak1 ? std::min(draw, kTieFarMeters) : draw;
-    from[kVista] = vista_distance > 0 ? vista_distance : 10000.f;
-    to[kVista] = jak1 ? std::min(from[kVista], kVistaFarMeters) : from[kVista];
-    from[kTfragFar] = draw;
-    to[kTfragFar] = jak1 ? std::min(draw, kTfragFarMeters) : draw;
     from[kTieFar2] = to[kTieFar];
     to[kTieFar2] = jak1 ? std::min(to[kTieFar], kTieFar2Meters) : to[kTieFar];
     n = 0;
@@ -144,8 +139,7 @@ struct Relief {
   Knobs at(float r) const {
     const float tie2 = value(kTieFar2, r);
     return {value(kTieLodPx, r), value(kLodDistance, r), value(kTieDistance, r),
-            value(kShrubFar, r), tie2 > 0 ? tie2 : value(kTieFar, r), value(kVista, r),
-            value(kTfragFar, r)};
+            value(kShrubFar, r), tie2 > 0 ? tie2 : value(kTieFar, r)};
   }
 };
 
@@ -155,24 +149,22 @@ struct Relief {
 // above target + kBand it sheds a little every kShedGap frames; below target - kBand for
 // kRoomFrames in a row it gives back kRestore, up to the ceiling. A shed puts the ceiling where it
 // went (more didn't fit here); the ceiling rises a step per kCeilFrames without a shed, and is
-// lifted at a new area. Urgent: the mean misses the frame (changes may land in view).
+// lifted at a new area. At its floor with the load still over the band it stays there.
 struct Controller {
   static constexpr int kBuildFrames = 8;  // the build's mean (a camera cut's rewrite is 1/8 of it)
   static constexpr double kGpuLead = 3.0;
   static constexpr double kTau = 45.0;
   static constexpr double kBand = 3.0;
-  static constexpr double kUrgent = 34.0;
   static constexpr double kMsPerUnit = 4.0;  // GPU ms one unit of x is taken to save
   static constexpr int kShedGap = 45, kRoomFrames = 240, kCeilFrames = 1800;
   static constexpr float kShedMin = 0.05f, kShedMax = 0.25f, kRestore = 0.1f;
 
   float x = 0, lo = 0, hi = 0, ceil = 0;
   // GPU ms one unit of the relief saves, by unit (Jak 1: its levers' measured savings)
-  double unit_ms[kKnobs] = {kMsPerUnit, kMsPerUnit, kMsPerUnit, kMsPerUnit,
-                            kMsPerUnit, kMsPerUnit, kMsPerUnit, kMsPerUnit};
+  double unit_ms[kKnobs] = {kMsPerUnit, kMsPerUnit, kMsPerUnit,
+                            kMsPerUnit, kMsPerUnit, kMsPerUnit};
   double mean = 0;
   bool primed = false;
-  bool urgent = false;
   double lead = 0;  // busy - build, averaged
   long frame = 0, last_shed = -1000000, ceil_frame = 0;
   int room = 0;
@@ -200,7 +192,7 @@ struct Controller {
     x = std::clamp(0.f, lo, hi);
     ceil = hi;
     mean = lead = 0;
-    primed = urgent = false;
+    primed = false;
     room = 0;
     std::fill(builds, builds + kBuildFrames, 0.0);
   }
@@ -228,9 +220,10 @@ struct Controller {
   }
   // busy: this frame's GPU ms (active), build: the render thread's (counted false: no
   // measurement, or a level load's frame; build_counts false: a level's first draws); k: 1 at
-  // fps_cap 30, 0.5 at 60. Returns true when x moved.
+  // fps_cap 30, 0.5 at 60; drawn_x: the position the levels were drawn with. Returns true when x
+  // moved.
   bool step(double busy, double build, bool counted, double target, double k = 1.0,
-            bool build_counts = true) {
+            bool build_counts = true, float drawn_x = 1e9f) {
     frame++;
     if (!counted) {
       return false;
@@ -252,9 +245,11 @@ struct Controller {
       primed = true;
     }
     mean += (load - mean) / kTau;
-    urgent = x < 0 && mean > kUrgent * k;
     bool moved = false;
-    if (mean > (target + kBand * k) && x > lo && frame - last_shed >= kShedGap) {
+    const bool caught_up = drawn_x > 1e8f || std::fabs(drawn_x - x) <= kSlewNear;
+    if (!caught_up) {
+      room = 0;
+    } else if (mean > (target + kBand * k) && x > lo && frame - last_shed >= kShedGap) {
       const float s = std::clamp(
           (float)(kShedMin + 0.5 * (mean - target - kBand * k) / (kMsPerUnit * k)), kShedMin,
           kShedMax);

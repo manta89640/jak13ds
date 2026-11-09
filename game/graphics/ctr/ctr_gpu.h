@@ -90,9 +90,9 @@ enum {
   CTR_STATE_STENCIL_OUT = 8,
   /* (AI-assisted) shadow volumes (CtrShadow, only when ctr_gpu_has_stencil): STENCIL_INCR / DECR
    * add / subtract 1 (saturating at 255 / 0) where the draw passes the depth test; STENCIL_CLEAR
-   * draws only where the stencil isn't 0 and sets it back to 0 there (the depth test always
-   * passes: set ztest ALWAYS, zwrite 0); NO_COLOR writes no color (the stencil passes). None of
-   * them may use the early depth test. */
+   * draws only where the stencil isn't 0 and the depth test (ztest, zwrite 0) passes, and sets
+   * the stencil back to 0 there; NO_COLOR writes no color (the stencil passes). None of them may
+   * use the early depth test. */
   CTR_STATE_STENCIL_INCR = 16,
   CTR_STATE_STENCIL_DECR = 32,
   CTR_STATE_STENCIL_CLEAR = 64,
@@ -406,10 +406,12 @@ void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear);
  * it when early depth was asked for before it (ctr_gpu_set_early_depth, _params); then this
  * returns that result. Until it passes the early test stays off. 1: passed. */
 int ctr_gpu_early_depth_selftest(void);
-/* the shadow volumes' stencil passes checked on this console (ctr_gpu_early.c), before the game's
- * first frame; 1: passed. ctr_gpu_stencil_status: its log line */
-int ctr_gpu_stencil_selftest(void);
-const char* ctr_gpu_stencil_status(void);
+/* For the shadow self-test (CtrShadow.cpp). ctr_gpu_submit_now: in a frame, what is built so
+ * far goes to the GPU as a command list of its own. ctr_gpu_top_histogram: outside a frame, once
+ * the GPU has drawn all it was sent, the top screen's pixels by their blue value; 0: can't be
+ * read */
+void ctr_gpu_submit_now(void);
+int ctr_gpu_top_histogram(unsigned int counts[256]);
 /* (AI-assisted) the early test in use (asked for and the self-test passed) */
 int ctr_gpu_early_depth_active(void);
 /* (AI-assisted) the self-test's result, one line ("" before it ran) */

@@ -14,19 +14,23 @@
  * CtrShadowVolumes is that program as native code: each object's vertices are transformed once to
  * OpenGL-style clip space (ctr_clip_vertex), and every triangle the program would draw before its
  * own clipping goes to a front or a back index list, with the program's own facing test. A
- * triangle with a corner outside the guard band (clip space |x|, |y| <= 2 w) or the near / far
- * plane is cut to them on the CPU, as the program cuts to its own (the PICA drops triangles far
- * off screen, and a dropped face leaves its count in the stencil). A triangle with all corners
+ * triangle with a corner outside the guard band (the screen: clip space |x|, |y| <= w) or the
+ * near / far plane is cut to them on the CPU, as the program cuts to its own (the PICA drops
+ * triangles far off screen, and a dropped face leaves its count in the stencil; cut to the
+ * screen, no corner is left for it to judge). A triangle with all corners
  * beyond one edge of the screen covers no pixel and is left out. A side quad whose bottom corners
  * alone leave the band through one guard-band plane is cut along its side edges, at a point made
  * once per bottom vertex (the same pixels as its two triangles cut one by one). CtrShadowRenderer
  * then draws all objects at once (ctr_gpu_clip_draw_ranges):
  *  1. the front list: stencil + 1 where a face passes the depth test, no color or depth writes
  *  2. the back list: stencil - 1 likewise (z-pass, saturating like the PC's GL_INCR / GL_DECR)
- *  3. the front list again: where the stencil isn't 0, the color times the game's shadow color
- *     (as the PC: Cd * 2 * rgb / 255, alpha kept), and the stencil back to 0 (the ocean's marks
- *     after this bucket expect 0 everywhere). Only front faces count up, so they cover every
- *     pixel to darken; the first one there clears it.
+ *  3. the back list again, where the stencil isn't 0 and the face is behind the scene (depth
+ *     test <): the color times the game's shadow color (as the PC: Cd * 2 * rgb / 255, alpha
+ *     kept), and the stencil back to 0 (the ocean's marks after this bucket expect 0 everywhere).
+ *     A pixel whose count stays above 0 has a back face behind it (a closed volume seen from
+ *     outside), the first one there darkens and clears it. So only what lies between a front and
+ *     a back face is ever darkened: a count left over in front of the whole volume (a back pass
+ *     the GPU lost) darkens nothing.
  *
  * The VU1 data memory the program reads (quadwords, the unpacks of shadow-add-verts and
  * shadow-add-facing-single-tris / -single-edges / -double-tris / -double-edges, shadow.cpp):
@@ -213,3 +217,13 @@ class CtrShadowRenderer : public CtrBucketRenderer {
   // object near one of those scores kIncumbent x more: no blinking at the cut)
   std::vector<std::array<float, 3>> m_centers, m_kept_prev;
 };
+
+/*!
+ * The stencil passes checked on the machine the game runs on, between two frames: a 64-sided
+ * prism through CtrShadowVolumes and the frame's own draws, over a flat receiver, in five frames
+ * (the receiver inside the prism; behind it; behind it after a command list split; behind a
+ * prism that stays on screen; inside a prism whose faces go to the GPU uncut, far off screen).
+ * Read back: the pixels the darkening pass darkened, and the ones a count was left on after it.
+ * One log line.
+ */
+void ctr_shadow_selftest();

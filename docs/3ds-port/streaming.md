@@ -169,6 +169,41 @@ arena takes the smallest free piece a unit fits (best fit, the first segment fir
   interrupted. Before, the near chunks needed right after entering a level waited for the whole
   neighbour load (seconds). Log: `<level>: N near chunk jobs read during its load`.
 
+## Near data that comes or goes in view: a morph, not a switch
+
+A unit that arrives while one of its groups is drawn far in view, or is freed while it is drawn,
+used to switch that group's shape on screen (after a hold of at most 1 s for an arrival, at once
+for a unit freed). The geomorph already has what covers it: with both factors at 1 a tie group's
+near and mid versions lie on its far version's surface, and a tfrag group's finer versions on its
+coarser one's.
+
+- **Morph floor** (`CtrLevelData::unit_floor`): a unit's geomorph factors are at least its floor.
+  The tie rows take the larger of each instance's factor and the floor (`morph_rows_of`); the
+  tfrag bands are moved toward the camera by it (`tf_unif_of`: both factors 1 at any depth with
+  floor 1), every run of the chunk goes through the morph program and its groups' morph colors
+  are written meanwhile.
+- **Morph in**: a unit taken within 3 frames of a group of it being drawn far in view
+  (`StreamUnit::late_seen`) starts with floor 1 and comes down to 0 over 24 frames
+  (`kMorphInFrames`). Its groups take their near version at once: the same surface, then it moves
+  to the real one. The 1 s hold stays only for units without moving vertices and for the wind
+  ties (they switch by screen error, no morph).
+- **Morph out**: `stream_evict` of a unit that was drawn last frame and has moving vertices doesn't
+  free it: its floor rises to 1 over 16 frames (`kMorphOutFrames`), then it is freed and its groups
+  draw their far version, the same surface. The scheduler counts the bytes of the units on their
+  way out as room that comes (no more units freed for them, no growth meanwhile). Memory pressure
+  (`stream_shrink`, a level load's room) frees at once as before.
+- **Ring 0's victims**: among the units ring 0 may free, the ones not drawn last frame go first
+  (freed at once), and a unit already on its way out is never picked again.
+- **tfrag units beyond their bound**: a tfrag group chooses its version by view depth, which off the
+  view's axis is less than the distance the unit's bound is in. A tfrag unit that is there is used
+  beyond its bound too; before, the bound's shortcut drew its groups coarse and they switched in
+  view once the camera was within it (61 switches on the Sandover / beach path).
+
+Host, three camera paths through level pairs with the hardware's arena size and SD speed, the
+controller at its floor (`reports/nov09/popin.md`): groups in view that switched for late or freed
+near data 91 / 306 / 371 per path -> 0 / 12 / 2. The near data that is late for want of room is
+the same as before (the arena is as large as it was): it now comes and goes by the morph.
+
 ## Levels not drawn yet, level starts (title3, Oct 22)
 
 - **Hidden levels**: a level that is loaded but not drawn in any mode for 3 frames (Sandover behind
@@ -273,6 +308,22 @@ the file's block directory (16 bytes per block: village1 ~22 KB, lavatube ~50 KB
   (group frames), ms on average, at most (frames); needed now KB on average, at most; read with
   their file neighbours; scheduling ms/frame (most); per level: meshes KB + textures KB, near chunks
   there of all (KB)`.
+- Every stats period, `[ctr] in view over N frames: P pops (per minute): controller, relief limit,
+  config limit, freed, late, lod switch, far mode, shrub fade, vista; holes: tfrag, tie, vista chunk
+  frames (without their mesh), holes of 0.5 s or more ended / open, longest; chunk frames drawn by a
+  vista copy within the config's distance; tfrag chunk frames beyond the draw distance with nothing
+  in place; group frames kept far with that version not drawn; near chunks under a morph: in, out`
+  (`ctr_pop`, CtrLevel.h): a pop is a chunk or group in view, not under 90% fog, that appears, goes
+  or switches its version between two frames with no morph or fade over it, by cause; a hole is a
+  chunk the config would draw with nothing drawn in its place. Not counted in the frame of a camera
+  cut, a level's first frame or while the screen is black. All of the hole counts are 0 by
+  construction unless a mesh is missing (a detail reload after a partial unload, an incomplete
+  load). Host with `CTR_POP_LOG=1`: one `[popE]` line per pop, `[hole]` / `[holeG]` per hole, and
+  no cluster stands for its chunks (every chunk a limit cuts is looked at).
+- Host: pad script `set cam_path x,y,z;x,y,z;...@speed` (meters, m/s): every level is drawn from a
+  camera moving along the points (the game's camera stays where Jak is; use `vis_culling = off`):
+  walks through a level pair without playing it. `CTR_SIZE_HIST=1`: tie triangles by kind, on-screen
+  size of their run and distance.
 - Host: `CTR_POP_LOG=1` (title3): one `[pop]` line per level draw (chunks appearing / going by
   distance in view, tie LOD switches in view, groups late / held far, time of day groups rewritten,
   left behind, waiting, impostor cards and captures, near chunks taken) and `[pop] soft frame N`
