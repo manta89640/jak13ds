@@ -201,7 +201,7 @@ coarser one's.
 
 Host, three camera paths through level pairs with the hardware's arena size and SD speed, the
 controller at its floor (`reports/nov09/popin.md`): groups in view that switched for late or freed
-near data 91 / 306 / 371 per path -> 0 / 12 / 3. The near data that is late for want of room is
+near data 91 / 306 / 371 per path -> 0 / 12 / 2. The near data that is late for want of room is
 the same as before (the arena is as large as it was): it now comes and goes by the morph.
 
 ## Levels not drawn yet, level starts (title3, Oct 22)
