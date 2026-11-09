@@ -408,7 +408,8 @@ void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear);
 int ctr_gpu_early_depth_selftest(void);
 /* For the shadow self-test (CtrShadow.cpp). ctr_gpu_submit_now: in a frame, what is built so
  * far goes to the GPU as a command list of its own. ctr_gpu_top_histogram: outside a frame, once
- * the GPU has drawn all it was sent, the top screen's pixels by their blue value; 0: can't be read */
+ * the GPU has drawn all it was sent, the top screen's pixels by their blue value; 0: can't be
+ * read */
 void ctr_gpu_submit_now(void);
 int ctr_gpu_top_histogram(unsigned int counts[256]);
 /* (AI-assisted) the early test in use (asked for and the self-test passed) */
