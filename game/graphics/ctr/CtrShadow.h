@@ -23,10 +23,13 @@
  * then draws all objects at once (ctr_gpu_clip_draw_ranges):
  *  1. the front list: stencil + 1 where a face passes the depth test, no color or depth writes
  *  2. the back list: stencil - 1 likewise (z-pass, saturating like the PC's GL_INCR / GL_DECR)
- *  3. the front list again: where the stencil isn't 0, the color times the game's shadow color
- *     (as the PC: Cd * 2 * rgb / 255, alpha kept), and the stencil back to 0 (the ocean's marks
- *     after this bucket expect 0 everywhere). Only front faces count up, so they cover every
- *     pixel to darken; the first one there clears it.
+ *  3. the back list again, where the stencil isn't 0 and the face is behind the scene (depth
+ *     test <): the color times the game's shadow color (as the PC: Cd * 2 * rgb / 255, alpha
+ *     kept), and the stencil back to 0 (the ocean's marks after this bucket expect 0 everywhere).
+ *     A pixel whose count stays above 0 has a back face behind it (a closed volume seen from
+ *     outside), the first one there darkens and clears it. So only what lies between a front and
+ *     a back face is ever darkened: a count left over in front of the whole volume (a back pass
+ *     the GPU lost) darkens nothing.
  *
  * The VU1 data memory the program reads (quadwords, the unpacks of shadow-add-verts and
  * shadow-add-facing-single-tris / -single-edges / -double-tris / -double-edges, shadow.cpp):

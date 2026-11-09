@@ -90,9 +90,9 @@ enum {
   CTR_STATE_STENCIL_OUT = 8,
   /* (AI-assisted) shadow volumes (CtrShadow, only when ctr_gpu_has_stencil): STENCIL_INCR / DECR
    * add / subtract 1 (saturating at 255 / 0) where the draw passes the depth test; STENCIL_CLEAR
-   * draws only where the stencil isn't 0 and sets it back to 0 there (the depth test always
-   * passes: set ztest ALWAYS, zwrite 0); NO_COLOR writes no color (the stencil passes). None of
-   * them may use the early depth test. */
+   * draws only where the stencil isn't 0 and the depth test (ztest, zwrite 0) passes, and sets
+   * the stencil back to 0 there; NO_COLOR writes no color (the stencil passes). None of them may
+   * use the early depth test. */
   CTR_STATE_STENCIL_INCR = 16,
   CTR_STATE_STENCIL_DECR = 32,
   CTR_STATE_STENCIL_CLEAR = 64,

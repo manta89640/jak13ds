@@ -606,9 +606,6 @@ void shade_pixel(const ctr_draw_state& st,
     s_early.rej += z < s_early.block_min[px / 32 + (py / 32) * EarlyProbe::kBX];
   }
   if (!test(st.ztest, z, s_target.depth[idx])) {
-    if (sten && (st.flags & CTR_STATE_STENCIL_CLEAR)) {
-      *sten = 0;
-    }
     return;
   }
   if (sten) {

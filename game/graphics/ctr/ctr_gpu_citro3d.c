@@ -6838,9 +6838,9 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     e.alphaTest = 1u | (((u32)map_test(st->atest) & 7) << 4) | ((u32)(ref > 255 ? 255 : ref) << 8);
   }
   /* (AI-assisted) the shadow volume passes (CTR_STATE_STENCIL_INCR / DECR / CLEAR): the depth test
-   * stays enabled (CLEAR: function ALWAYS) so the stencil's depth-pass operation is the one that
-   * runs, and writes are controlled by the write mask only (clearing the enable bit doesn't stop
-   * depth writes on the hardware): no color for NO_COLOR, no alpha for CTR_BLEND_MUL */
+   * stays enabled so the stencil's depth-pass operation is the one that runs, and writes are
+   * controlled by the write mask only (clearing the enable bit doesn't stop depth writes on the
+   * hardware): no color for NO_COLOR, no alpha for CTR_BLEND_MUL */
   const int shadow_pass =
       (st->flags & (CTR_STATE_STENCIL_INCR | CTR_STATE_STENCIL_DECR | CTR_STATE_STENCIL_CLEAR)) &&
       !g_depth16;
@@ -6894,10 +6894,10 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
                   ((u32)((st->flags & CTR_STATE_STENCIL_INCR) ? GPU_STENCIL_INCR : GPU_STENCIL_DECR)
                    << 8);
   } else if ((st->flags & CTR_STATE_STENCIL_CLEAR) && !g_depth16) {
-    /* (AI-assisted) where the stencil isn't 0; set to 0 there (the depth test always passes; the
-     * depth-fail operation zeroes too, should it run) */
+    /* (AI-assisted) where the stencil isn't 0 and the depth test passes; set to 0 there (kept
+     * where the depth test fails: another face of the draw may pass it there) */
     e.stencilMode = 1u | ((u32)GPU_NOTEQUAL << 4) | (0xFFu << 8) | (0xFFu << 24);
-    e.stencilOp = (u32)GPU_STENCIL_KEEP | ((u32)GPU_STENCIL_ZERO << 4) |
+    e.stencilOp = (u32)GPU_STENCIL_KEEP | ((u32)GPU_STENCIL_KEEP << 4) |
                   ((u32)GPU_STENCIL_ZERO << 8);
   } else {
     e.stencilMode &= ~1u;

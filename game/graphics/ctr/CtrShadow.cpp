@@ -911,15 +911,16 @@ void CtrShadowRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
 
 void CtrShadowRenderer::draw() {
   const int nv = m_vol.vert_count(), nf = m_vol.front_count(), nb = m_vol.back_count();
-  if (nf < 3) {
-    // no front faces: the stencil stays 0 (the back faces only take away), nothing to darken
+  if (nf < 3 || nb < 3) {
+    // no front faces: nothing counts up; no back faces: nothing behind one to darken
     ctr_gpu_clip_draw_ranges(nullptr, nullptr, nullptr, 0, 0, 0);
     return;
   }
   // the back list after the front list
   memcpy(m_indices + nf, m_back.data(), (size_t)nb * 2);
-  // the darkening pass draws the front faces again: a pixel whose stencil isn't 0 was counted up
-  // by one of them, so they cover every pixel to darken (each once: the first one clears it)
+  // the darkening pass draws the back faces that lie behind the scene: a counted pixel has one
+  // (each darkened once: it clears the count), and a count the back pass failed to take down
+  // darkens nothing in front of the volume's far side
   u8 rgb[3];
   m_vol.color(rgb);
   const u32 rgba = rgb[0] | ((u32)rgb[1] << 8) | ((u32)rgb[2] << 16) | (0x80u << 24);
@@ -938,9 +939,9 @@ void CtrShadowRenderer::draw() {
   st[0].flags = CTR_STATE_NO_COLOR | CTR_STATE_STENCIL_INCR;
   st[1].flags = CTR_STATE_NO_COLOR | CTR_STATE_STENCIL_DECR;
   st[2].blend = CTR_BLEND_MUL;
-  st[2].ztest = CTR_TEST_ALWAYS;
+  st[2].ztest = CTR_TEST_LESS;
   st[2].flags = CTR_STATE_STENCIL_CLEAR;
-  const int first[3] = {0, nf, 0};
-  const int count[3] = {nf, nb, nf};
+  const int first[3] = {0, nf, nf};
+  const int count[3] = {nf, nb, nb};
   ctr_gpu_clip_draw_ranges(st, first, count, 3, nv, nf + nb);
 }
