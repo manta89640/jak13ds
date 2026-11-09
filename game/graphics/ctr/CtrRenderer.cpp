@@ -631,6 +631,16 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_rs.ee_mem = (const u8*)ee_mem;
   m_rs.offset_of_s7 = s7.offset;
   m_rs.vram = m_vram.get();
+  if (m_rs.frame_idx == 3 && ctr_settings().shadows == CtrSettings::ShadowMode::Full &&
+      ctr_gpu_has_stencil()) {
+#ifdef __3DS__
+    ctr_boot_mark("9a shadow self-test");
+#endif
+    ctr_shadow_selftest();
+#ifdef __3DS__
+    ctr_boot_mark("9b shadow self-test done");
+#endif
+  }
   // No sky renderer yet: clear to the fog color from the default GS registers (the same place
   // OpenGLRenderer reads it), which is close to the sky color at the horizon.
   // (AI-assisted) The last frame's when they can't be read: black would fog everything to black.
@@ -1681,12 +1691,6 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
                                          ctr_gpu_early_depth_status(), passed ? "on" : "off");
     lg::info("[ctr] {}", line);
     ctr_boot_mark(("8a " + line).c_str());
-  }
-  if (ctr_settings().shadows == CtrSettings::ShadowMode::Full && !ctr_settings().depth16) {
-    ctr_boot_mark("8c stencil self-test");
-    const int passed = ctr_gpu_stencil_selftest();
-    lg::info("[ctr] stencil self-test: {} -> {}", ctr_gpu_stencil_status(),
-             passed ? "pass" : "FAIL");
   }
   if (ctr_settings().pica_bench) {
     // (AI-assisted) the GPU microbenchmark, before anything else uses the GPU

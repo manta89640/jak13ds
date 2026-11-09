@@ -2955,11 +2955,13 @@ int ctr_gpu_early_depth_active() {
 const char* ctr_gpu_early_depth_status() {
   return "not run (host)";
 }
-int ctr_gpu_stencil_selftest() {
-  return 0;
-}
-const char* ctr_gpu_stencil_status() {
-  return "not run (host)";
+void ctr_gpu_submit_now() {}
+int ctr_gpu_top_histogram(unsigned int counts[256]) {
+  memset(counts, 0, 256 * sizeof(counts[0]));
+  for (size_t i = 0; i + 3 < g_soft.color.size(); i += 4) {
+    counts[g_soft.color[i + 2]]++;
+  }
+  return 1;
 }
 void ctr_gpu_set_tex_cache_clear(int) {}  // (AI-assisted) no texture cache
 void ctr_gpu_set_mip_bias(float) {}         // (AI-assisted) the soft textures have no mips

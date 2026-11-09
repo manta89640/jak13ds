@@ -4903,39 +4903,38 @@ static int top_target_setup(void) {
   return 0;
 }
 
-static char s_stencil_status[256];
-const char* ctr_gpu_stencil_status(void) {
-  return s_stencil_status;
+void ctr_gpu_submit_now(void) {
+  if (!g.ready || !g.in_frame || s_bd.frame) {
+    return;
+  }
+  if (s_pipeline) {
+    pipeline_submit();
+  } else {
+    flush_vbuf();
+    C3D_FrameSplit(GX_CMDLIST_FLUSH);
+    gxCmdQueueRun(&__C3D_Context.gxQueue);
+  }
 }
 
-int ctr_gpu_stencil_selftest(void) {
-  if (!g.ready || g.in_frame) {
+int ctr_gpu_top_histogram(unsigned int counts[256]) {
+  memset(counts, 0, 256 * sizeof(counts[0]));
+  if (!g.ready || g.in_frame || g_color16 || envIsHomebrew()) {
     return 0;
   }
   apt_gate_enter();
   gpu_drain();
-  CtrEarlyTestIn in;
-  memset(&in, 0, sizeof(in));
-  in.top = &g.top->frameBuf;
-  in.prog = &g.ps->basic;
-  in.uloc_projection = g.ps->uloc_projection;
-  in.emulator = ctr_gpu_is_emulator();
-  const int ok = ctr_stencil_selftest(&in, s_stencil_status, sizeof(s_stencil_status));
-  /* the game's program and state again, as after the early depth test */
-  g.cur_prog = PROG_NONE;
-  use_program(PROG_BASIC);
-  C3D_SetFrameBuf(&g.top->frameBuf);
-  set_top_viewport();
-  C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-  C3D_CullFace(GPU_CULL_NONE);
-  C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0);
-  C3D_StencilOp(GPU_STENCIL_KEEP, GPU_STENCIL_KEEP, GPU_STENCIL_KEEP);
-  g.last_state_valid = 0;
-  g.bound_tex = NULL;
-  s_tex_dirty = 1;
-  tex_units_forget();
+  const int idle = gxCmdQueueWait(&__C3D_Context.gxQueue, 0);
+  if (idle) {
+    /* RGBA8: R in the high byte */
+    const u32* c = (const u32*)g.top->frameBuf.colorBuf;
+    const u32 px = (u32)g.top->frameBuf.width * g.top->frameBuf.height;
+    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)c, px * 4);
+    for (u32 i = 0; i < px; i++) {
+      counts[(c[i] >> 8) & 0xff]++;
+    }
+  }
   apt_gate_leave();
-  return ok;
+  return idle;
 }
 
 void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear) {

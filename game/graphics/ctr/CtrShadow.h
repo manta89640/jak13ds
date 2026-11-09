@@ -217,3 +217,13 @@ class CtrShadowRenderer : public CtrBucketRenderer {
   // object near one of those scores kIncumbent x more: no blinking at the cut)
   std::vector<std::array<float, 3>> m_centers, m_kept_prev;
 };
+
+/*!
+ * The stencil passes checked on the machine the game runs on, between two frames: a 64-sided
+ * prism through CtrShadowVolumes and the frame's own draws, over a flat receiver, in five frames
+ * (the receiver inside the prism; behind it; behind it after a command list split; behind a
+ * prism that stays on screen; inside a prism whose faces go to the GPU uncut, far off screen).
+ * Read back: the pixels the darkening pass darkened, and the ones a count was left on after it.
+ * One log line.
+ */
+void ctr_shadow_selftest();

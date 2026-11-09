@@ -46,6 +46,14 @@ int ctr_gpu_clip_reserve(int, int, ctr_clip_vertex**, uint16_t**) {
   return 0;
 }
 void ctr_gpu_clip_draw_ranges(const ctr_draw_state*, const int*, const int*, int, int, int) {}
+void ctr_gpu_frame_begin(uint8_t, uint8_t, uint8_t) {}
+void ctr_gpu_frame_end(void) {}
+void ctr_gpu_draw(const ctr_draw_state*, const ctr_vertex*, int) {}
+void ctr_gpu_submit_now(void) {}
+void ctr_gpu_set_skip_color_clear(int) {}
+int ctr_gpu_top_histogram(unsigned int*) {
+  return 0;
+}
 namespace ctr_settings_detail {
 const CtrSettings* g_settings = nullptr;
 const CtrSettings& first_use() {
