@@ -45,6 +45,7 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #include "game/kernel/common/kperf.h"
 #include "game/graphics/opengl_renderer/buckets.h"
 #include "game/kernel/common/kboot.h"
+#include "game/kernel/common/klink.h"
 #include "game/kernel/common/kmachine.h"
 #include "game/kernel/common/kscheme.h"
 #include "game/kernel/jak1/kscheme.h"  // (AI-assisted, title3) find_symbol_from_c
@@ -521,6 +522,8 @@ CtrRenderer::CtrRenderer()
   }
 #endif
   using jak1::BucketId;
+  // (Jak 1 only: its texture page data in game memory only changes with a link)
+  m_vram->set_epoch(&g_link_generation);
   m_sprite_bucket = (int)BucketId::SPRITE;
   m_buckets.resize((int)BucketId::MAX_BUCKETS);
   auto set = [&](BucketId id, std::unique_ptr<CtrBucketRenderer> r) {
