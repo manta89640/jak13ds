@@ -5846,6 +5846,7 @@ void set_opaque_alpha(ctr_draw_state* st, const c3l::Draw& d, bool on, int min_a
 }
 
 void build_draw_order(CtrLevelData* out) {
+  out->walk.clear();
   out->draw_states.clear();
   out->draw_chunk.clear();
   out->sorted_draws.clear();
@@ -5954,6 +5955,24 @@ void build_draw_order(CtrLevelData* out) {
     for (u32 p = 0; p < lists[li]->size(); p++) {
       out->draw_list_pos[(*lists[li])[p]] = (li << 30) | p;
     }
+  }
+}
+
+// CtrLevelData::walk from the per-draw arrays (each is empty or holds every draw)
+void build_walk(CtrLevelData& lev) {
+  const size_t n = lev.draws.size();
+  lev.walk.resize(n);
+  const bool morph = lev.draw_morph_rows.size() == n, wind = lev.draw_wind.size() == n;
+  for (size_t di = 0; di < n; di++) {
+    auto& w = lev.walk[di];
+    w.chunk = lev.draw_chunk[di];
+    w.first_index = lev.draws[di].first_index;
+    w.index_count = lev.draws[di].index_count;
+    w.first_run = lev.draw_first_run[di];
+    w.run_count = lev.draw_run_count[di];
+    w.morph_rows = morph ? lev.draw_morph_rows[di] : UINT32_MAX;
+    w.env = lev.draw_env.empty() ? (s16)-1 : lev.draw_env[di];
+    w.wind = wind ? lev.draw_wind[di] : 0;
   }
 }
 
@@ -9652,7 +9671,17 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
   u8* const shown_out = in.shown_out;
   u8* const nomerge_out = in.nomerge_out;
   const bool vista_tier = in.vista_tier;
-  for (u32 r = r0; r < r0 + nr; r++) {
+  // four runs (a cache line of each array) at a time, the lines four ahead asked for early: the
+  // arrays are read once per frame, in order
+  for (u32 r = r0, r_end = r0 + nr; r < r_end;) {
+    __builtin_prefetch(&runs[r + 16]);
+    if (STR) {
+      __builtin_prefetch(&spheres[r + 16]);
+    }
+    if (LOD) {
+      __builtin_prefetch(&run_lod[r + 32]);
+    }
+    for (const u32 blk = std::min(r_end, r + 4); r < blk; r++) {
     const c3l::VisRun& run = runs[r];
     bool s = true;
     if (VIS) {
@@ -9703,6 +9732,7 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
     shown += s;
     if (LOD && s && lod_version) {
       (lod_version == c3l::kRunLodFar ? lod_tris2 : lod_tris1) += run.index_count / 3;
+    }
     }
   }
   out->shown = shown;
@@ -12441,6 +12471,27 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       m_cond_culled += in;
     }
   }
+  if (lev.walk.size() != lev.draws.size()) {
+    build_walk(lev);
+  }
+  const CtrLevelData::WalkDraw* const wdraws = lev.walk.data();
+  if (cull_check_enabled()) {
+    // (host check: the records are the arrays' values)
+    std::vector<CtrLevelData::WalkDraw> now;
+    now.swap(lev.walk);
+    build_walk(lev);
+    bool same = now.size() == lev.walk.size();
+    for (size_t di = 0; same && di < now.size(); di++) {
+      const auto& a = now[di];
+      const auto& b = lev.walk[di];
+      same = a.chunk == b.chunk && a.first_index == b.first_index &&
+             a.index_count == b.index_count && a.first_run == b.first_run &&
+             a.morph_rows == b.morph_rows && a.run_count == b.run_count && a.env == b.env &&
+             a.wind == b.wind;
+    }
+    lev.walk.swap(now);
+    cull_check_count(same, lev.name, "walk records", 0);
+  }
   bool vista_pass = false;  // (AI-assisted) the pass drawing: the vista chunks or the others
   u64 vista_indices = 0;    // (AI-assisted) drawn by the vista pass (statistics)
   // (AI-assisted, j2water2) c3l v21: an envmapped tie draw (its shine in the same draw, drawn
@@ -12624,20 +12675,22 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   };
   // what of a tfrag geomorph draw to draw: all of it, its runs that don't move or those that do
   enum { kPartAll, kPartStill, kPartMoving };
-  auto draw = [&](u32 di, int part = kPartAll) {
-    const int slot = m_visible_slot[lev.draw_chunk[di]];
+  // morph_known: the tie geomorph's answer for this draw when the caller has it (0 / 1), else -1
+  auto draw = [&](u32 di, int part = kPartAll, int morph_known = -1) {
+    const CtrLevelData::WalkDraw& dr = wdraws[di];
+    const int slot = m_visible_slot[dr.chunk];
     if (slot < 0 || m_visible[slot].vista != vista_pass) {
       return;
     }
     const VisibleChunk& vc = m_visible[slot];
-    const auto& dr = lev.draws[di];
-    const int env = lev.draw_env.empty() ? -1 : lev.draw_env[di];  // (AI-assisted, j2water2)
-    const bool wind = wind_on && !vista_pass && env < 0 && lev.draw_wind[di];
+    const int env = dr.env;  // (AI-assisted, j2water2)
+    const bool wind = wind_on && !vista_pass && env < 0 && dr.wind;
     // the tie geomorph: a draw whose vertices move
-    const u32 mlist = morph_draws && !vista_pass && !wind && env < 0 ? lev.draw_morph_rows[di]
-                                                                     : UINT32_MAX;
-    const bool morph = mlist != UINT32_MAX && lev.morph_draw_rows[mlist] &&
-                       m_morph_row_of[slot] >= 0 && morph_moving(mlist, slot);
+    const u32 mlist = morph_draws && !vista_pass && !wind && env < 0 ? dr.morph_rows : UINT32_MAX;
+    const bool morph = morph_known >= 0
+                           ? morph_known != 0
+                           : mlist != UINT32_MAX && lev.morph_draw_rows[mlist] &&
+                                 m_morph_row_of[slot] >= 0 && morph_moving(mlist, slot);
     const float* const mrows = morph ? morph_rows_of(slot) : nullptr;
     const int moff = morph ? (int)lev.normals_offset_in_mesh(vc.chunk) : 0;
     // the tfrag geomorph: a chunk with near or mid versions shown
@@ -12749,7 +12802,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
            nullptr, 0, 0, 0, nullptr, 0});
       m_fade_runs++;
     };
-    if (!lev.draw_run_count[di] || (!vc.partly && !tsplit)) {
+    if (!dr.run_count || (!vc.partly && !tsplit)) {
       if (tmorph && part == kPartStill) {
         return;
       }
@@ -12813,9 +12866,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       open = false;
       gap = 0;
     };
-    const u32 r0 = lev.draw_first_run[di];
+    const u32 r0 = dr.first_run;
     // (AI-assisted, micro-level) in locals: submit's stores would have them loaded again per run
-    const u32 r_end = r0 + lev.draw_run_count[di];
+    const u32 r_end = r0 + dr.run_count;
     const c3l::VisRun* const runs = lev.vis_runs.data();
     const u8* const run_shown = m_run_shown.data();
     const u8* const run_nomerge = m_run_nomerge.data();
@@ -12931,14 +12984,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // ones per list (in their order: the main pass draws them as it drew the whole lists)
     m_vista_draws.clear();
     // (AI-assisted, micro-level) in locals: push_back's stores had them loaded again per draw
-    const u32* const draw_chunk = lev.draw_chunk.data();
     const int* const vslot = m_visible_slot.data();
     const VisibleChunk* const vchunks = m_visible.data();
     for (int li = 0; li < 3; li++) {
       std::vector<u32>& main = m_main_draws[li];
       main.clear();
       for (u32 di : *main_lists[li]) {
-        const int slot = vslot[draw_chunk[di]];
+        const int slot = vslot[wdraws[di].chunk];
         if (slot >= 0) {
           (vchunks[slot].vista ? m_vista_draws : main).push_back(di);
         }
@@ -12963,24 +13015,36 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   m_calls.clear();
   // (AI-assisted, micro-level) the lists hold every draw of the level: the main pass's test of a
   // draw's chunk here, inline (a call of draw for each hidden draw cost ~20 instructions)
-  const u32* const draw_chunk = lev.draw_chunk.data();
   const int* const vslot = m_visible_slot.data();
   const VisibleChunk* const vchunks = m_visible.data();
+  // a list's draws in turn, the record of the one four ahead asked for early
+  constexpr size_t kWalkAhead = 4;
+  auto each = [&](const std::vector<u32>& list, auto&& f) {
+    const u32* const d = list.data();
+    const size_t n = list.size();
+    for (size_t i = 0; i < n; i++) {
+      if (i + kWalkAhead < n) {
+        __builtin_prefetch(&wdraws[d[i + kWalkAhead]]);
+      }
+      f(d[i]);
+    }
+  };
   auto walk = [&](const std::vector<u32>& list) {
     m_ph_walked += list.size();
-    for (u32 di : list) {
-      const int slot = vslot[draw_chunk[di]];
+    each(list, [&](u32 di) {
+      const int slot = vslot[wdraws[di].chunk];
       if (slot >= 0 && !vchunks[slot].vista) {
         draw(di);
       }
-    }
+    });
   };
   // the tie geomorph's draws whose vertices move this frame
-  const u32* const morph_list = morph_draws ? lev.draw_morph_rows.data() : nullptr;
+  const bool morph_list = morph_draws;
   auto is_morph = [&](u32 di, int slot) {
-    return morph_list[di] != UINT32_MAX && lev.morph_draw_rows[morph_list[di]] &&
-           !(wind_on && lev.draw_wind[di]) && (lev.draw_env.empty() || lev.draw_env[di] < 0) &&
-           m_morph_row_of[slot] >= 0 && morph_moving(morph_list[di], slot);
+    const CtrLevelData::WalkDraw& w = wdraws[di];
+    return w.morph_rows != UINT32_MAX && lev.morph_draw_rows[w.morph_rows] &&
+           !(wind_on && w.wind) && w.env < 0 && m_morph_row_of[slot] >= 0 &&
+           morph_moving(w.morph_rows, slot);
   };
   // the tfrag geomorph's draws (a chunk with near or mid versions shown) too, before the tie ones
   bool any_tmorph = false;
@@ -12988,8 +13052,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     any_tmorph = any_tmorph || vc.tmorph;
   }
   auto is_tmorph = [&](u32 di, int slot) {
-    return vchunks[slot].tmorph && !(wind_on && lev.draw_wind[di]) &&
-           (lev.draw_env.empty() || lev.draw_env[di] < 0);
+    return vchunks[slot].tmorph && !(wind_on && wdraws[di].wind) && wdraws[di].env < 0;
   };
   // 0: in its place, 1: the tfrag geomorph's, 2: the tie geomorph's
   auto morph_pass = [&](u32 di, int slot) {
@@ -13001,26 +13064,26 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   auto walk_morph_last = [&](const std::vector<u32>& list) {
     m_morph_later.clear();
     m_tmorph_later.clear();
-    for (u32 di : list) {
-      const int slot = vslot[draw_chunk[di]];
+    each(list, [&](u32 di) {
+      const int slot = vslot[wdraws[di].chunk];
       if (slot < 0 || vchunks[slot].vista) {
-        continue;
+        return;
       }
       const int mp = morph_pass(di, slot);
       if (mp == 2) {
         m_morph_later.push_back(di);
       } else if (mp == 1) {
-        draw(di, kPartStill);
+        draw(di, kPartStill, 0);
         m_tmorph_later.push_back(di);
       } else {
-        draw(di);
+        draw(di, kPartAll, 0);
       }
-    }
+    });
     for (u32 di : m_tmorph_later) {
-      draw(di, kPartMoving);
+      draw(di, kPartMoving, 0);
     }
     for (u32 di : m_morph_later) {
-      draw(di);
+      draw(di, kPartAll, 1);
     }
   };
   auto walk_split = [&](const std::vector<u32>& list) {
@@ -13039,7 +13102,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     m_ph_walked += main_lists[0]->size();
     for (u32 di : *main_lists[0]) {
-      const int slot = vslot[draw_chunk[di]];
+      const int slot = vslot[wdraws[di].chunk];
       if (slot >= 0 && !vchunks[slot].vista) {
         m_band_draws[vchunks[slot].band].push_back(di);
       }

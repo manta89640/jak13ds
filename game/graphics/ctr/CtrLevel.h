@@ -96,6 +96,17 @@ struct CtrLevelData {
   // early_draws, 1 sorted_draws, 2 ordered_draws), for draw_level's walk of only the visible
   // chunks' draws in list order (build_draw_order)
   std::vector<u32> draw_list_pos;
+  // what draw_level's walk reads of a draw, in one cache line: copies of draw_chunk, draws,
+  // draw_first_run, draw_run_count, draw_env, draw_wind and draw_morph_rows (made at the first
+  // level draw after build_draw_order)
+  struct alignas(32) WalkDraw {
+    u32 chunk, first_index, index_count, first_run;
+    u32 morph_rows;  // UINT32_MAX: none
+    u16 run_count;
+    s16 env;  // -1: none
+    u8 wind;
+  };
+  std::vector<WalkDraw> walk;
   // (AI-assisted) c3l v10 visibility runs (c3l::VisRun): all of them, the first of each chunk,
   // and the range of each draw
   std::vector<c3l::VisRun> vis_runs;
