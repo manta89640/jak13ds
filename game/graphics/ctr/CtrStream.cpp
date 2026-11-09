@@ -307,6 +307,16 @@ bool CtrStreamArena::in_growth(const void* p) {
   return false;
 }
 
+u32 CtrStreamArena::piece_bytes(const void* p) {
+  std::lock_guard<std::mutex> lk(m_lock);
+  Seg* s = p ? seg_of(p) : nullptr;
+  if (!s) {
+    return 0;
+  }
+  auto u = s->used.find((u32)((const u8*)p - s->base));
+  return u == s->used.end() ? 0 : u->second;
+}
+
 void CtrStreamArena::new_period() {
   std::lock_guard<std::mutex> lk(m_lock);
   m_peak = m_used_bytes;
