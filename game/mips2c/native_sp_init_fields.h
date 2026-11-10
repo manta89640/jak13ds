@@ -333,7 +333,12 @@ u64 get_particle(u32 sys, u64 group, u64 s7) {
     const u64 idx = first + (u64)a3;
     const u32 word_addr = (u32)((idx << 3) + ld<u32>(m, sys + 32));
     if (ld<u64>(m, word_addr) != 0) {
+#if defined(__GNUC__) || defined(__clang__)
+      // the loop below stops at the lowest set bit
+      for (s64 bit = __builtin_ctzll(ld<u64>(m, word_addr)); bit < 64; bit++) {
+#else
       for (s64 bit = 0; bit < 64; bit++) {
+#endif
         const u64 mask = (u64)1 << bit;
         const u64 w = ld<u64>(m, (u32)((idx << 3) + ld<u32>(m, sys + 32)));
         if ((s64)(mask & w) != 0) {
