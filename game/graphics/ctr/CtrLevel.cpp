@@ -12515,6 +12515,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   float run_po[4], run_pk[4][3];
   run_in.po = run_po;
   run_in.pk = run_pk;
+  if (j2_hidden && lev.chunk_all_vis.size() != lev.chunks.size()) {
+    lev.chunk_all_vis.resize(lev.chunks.size());
+    for (size_t ci = 0; ci < lev.chunks.size(); ci++) {
+      lev.chunk_all_vis[ci] = chunk_hideable(lev, ci);
+    }
+  }
+  const u8* const all_vis = j2_hidden ? lev.chunk_all_vis.data() : nullptr;
   auto emit_chunk = [&](size_t ci, bool vista_chunk) {
     m_ph_emits++;
     const auto& ch = lev.chunks[ci];
@@ -12564,6 +12571,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       const bool lod_chunk = tf_chunk || (tie_lod && lev.chunk_lod[ci] == 1);
       // (AI-assisted, j2vis) c3l v20: runs of prototypes the game hides
       const bool proto_chunk = proto_hide && lev.chunk_proto_hidden[ci];
+      if (all_vis && vis_test && all_vis[ci]) {
+        // the level's string is zero and each run has an id: the run loop would show none
+        m_vis_chunks += !proto_chunk;
+        return;
+      }
       if (vis_test || straddles || vista_tier || lod_chunk || proto_chunk) {
         // (AI-assisted) per run: the visibility bit, then the view test; m_run_shown for the draws
         u32 shown = 0, view_hidden = 0, view_tris = 0, lod_hid = 0;
