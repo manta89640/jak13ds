@@ -2325,7 +2325,10 @@ bool ctr_arrival_ready() {
            now - since,
            !ready ? ", given up" : idle ? ", given up: nothing more can come now" : "", most, late);
   since = 0;
-  g_arrival_done_ms = now;
+  // (Jak II: a wait that saw nothing missing leaves the renderer's hold in place)
+  if (!g_is_jak2 || most > 0) {
+    g_arrival_done_ms = now;
+  }
   return true;
 }
 
