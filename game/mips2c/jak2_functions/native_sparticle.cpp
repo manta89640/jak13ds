@@ -20,7 +20,9 @@
 
 #include "common/log/log.h"
 
+#include "game/kernel/common/kperf.h"
 #include "game/mips2c/jak2_functions/native_functions.h"
+#include "game/mips2c/native_goalc_ops.h"
 
 #if defined(__GNUC__) || defined(__clang__)
 #define NATIVE_ALIGNED4(p) __builtin_assume_aligned((p), 4)
@@ -457,9 +459,513 @@ inline void copy_bytes(u32 dst, u32 src, u32 size) {
   memcpy(NATIVE_ALIGNED4(g_ee_main_mem + dst), NATIVE_ALIGNED4(g_ee_main_mem + src), size);
 }
 
-// host check (OPENGOAL_MIPS2C_VERIFY=1) of what pc-sp-process-block leaves out
+//! a block before its update: the particles in use, the class of each one's callback, and whether
+//! every function the update will call only touches its own particle
+struct BlockScan {
+  u8 valid[kMaxBlock];
+  u8 cls[kMaxBlock];
+  u32 used = 0;
+  bool plain = false;
+  const char* why = "";
+};
+
+//! the specs a relaunch by this launcher applies leave the orbiter flag (64) off
+bool relaunch_no_orbiter(u32 launcher) {
+  u32 spec = gload<u32>(launcher + 8);
+  for (int n = 0; n < 96; n++, spec += 16) {
+    const u32 field = gload<u16>(spec);
+    if (field < 47) {
+      continue;
+    }
+    return field != 47 || (gload<u16>(spec + 2) == 0 && gload<s32>(spec + 8) == 0 &&
+                           !(gload<u32>(spec + 4) & 64));
+  }
+  return false;
+}
+
+void scan_block(const ParticleMem& m,
+                bool is_3d,
+                u32 m_info,
+                u32 count,
+                u32 clocks,
+                BlockScan& s) {
+  static const bool off = native_turned_off("sp-in-place");
+  s.used = 0;
+  s.plain = !off && sp_in_place_ready();
+  s.why = s.plain ? "" : "off";
+  const bool relaunch_ok = s.plain && sp_relaunch_own_data(is_3d);
+  // the classes of the last two functions seen
+  u32 fn_a = 0, fn_b = 0;
+  u8 cls_a = SP_FN_NONE, cls_b = SP_FN_NONE;
+  for (u32 i = 0; i < count; i++) {
+    const u32 info = m_info + kInfoSize * i;
+    const u8 valid = m.base[info + kInfoValid];
+    s.valid[i] = valid;
+    s.cls[i] = SP_FN_NONE;
+    if (!valid) {
+      continue;
+    }
+    s.used++;
+    if (!s.plain) {
+      continue;
+    }
+    const u32 fn = m.u(info + 112);
+    u8 cls = SP_FN_NONE;
+    if (fn == fn_a) {
+      cls = cls_a;
+    } else if (fn == fn_b) {
+      cls = cls_b;
+    } else if (fn != 0) {
+      cls = sp_particle_fn_class(fn);
+      fn_b = fn_a;
+      cls_b = cls_a;
+      fn_a = fn;
+      cls_a = cls;
+    }
+    s.cls[i] = cls;
+    if (cls == SP_FN_FOREIGN) {
+      s.plain = false;
+      s.why = "callback";
+      continue;
+    }
+    // sp-orbiter reads another particle's sprite
+    if (!is_3d && (m.u(info + 104) & 64)) {
+      s.plain = false;
+      s.why = "orbiter";
+      continue;
+    }
+    const u32 launcher = m.u(info + 120);
+    if (launcher == 0) {
+      continue;
+    }
+    if (!relaunch_ok) {
+      s.plain = false;
+      s.why = "relaunch";
+    } else if (!is_3d) {
+      // a 2d relaunch due now must not turn the particle into an orbiter
+      const s64 frames = (s64)(m.u(clocks + (u32)(m.b(info + 129) * 16)) & 255u);
+      if (m.s(info + 116) - frames <= 0 && !relaunch_no_orbiter(launcher)) {
+        s.plain = false;
+        s.why = "relaunch flags";
+      }
+    }
+  }
+}
+
+/*!
+ * sp-process-block-2d on the particle tables themselves, for a block whose scan says plain: the
+ * same steps in the same order as sp_process_block_2d_impl, the callbacks by their class,
+ * add-to-sprite-aux-list and sp-free-particle inline.
+ */
+void block_2d_in_place(const ParticleMem& m,
+                       const NativeArgs& args,
+                       const BlockScan& s,
+                       u64 system,
+                       u32 m_info,
+                       u32 m_vec,
+                       u64 index0,
+                       u32 count,
+                       u32 clocks) {
+  static const u32 orbiter_sym = sym_val_addr("sp-orbiter");
+  static const u32 relaunch_sym = sym_val_addr("sp-relaunch-particle-2d");
+  for (u32 i = 0; i < count; i++) {
+    if (!s.valid[i]) {
+      continue;
+    }
+    const u32 info = m_info + kInfoSize * i;
+    const u32 vec = m_vec + kVecSize * i;
+    const u64 index = index0 + i;
+    const TimeVec tv = time_vec(m, clocks, info);
+    const u64 frames = tv.frames;
+    if (frames == 0) {
+      if (m.u(info + 104) & 0x8080) {
+        sp_aux_list_add(s.cls[i], system, info, vec, index, args);
+      }
+      if (m.s(info + 100) == 0) {
+        sp_free_particle(system, index, info, vec, args);
+      } else {
+        const u32 flags = m.u(info + 104);
+        m.set_u(info + 104, flags & ~32u);
+        if (flags & 32) {
+          m.set_u(vec + 44, m.u(info + 124));
+        }
+      }
+      continue;
+    }
+    bool do_free = false;
+    const s64 timer = m.s(info + 100);
+    if (timer != -1) {
+      if (timer == 0) {
+        do_free = true;
+      } else {
+        m.set_u(info + 100, (u32)std::max((s32)(u32)(timer - (s64)frames), 0));
+      }
+    }
+    if (!do_free) {
+      const u32 flags0 = m.u(info + 104);
+      const u32 flags = flags0 & ~32u;
+      m.set_u(info + 104, flags);
+      if (flags0 & 32) {
+        m.set_u(vec + 44, m.u(info + 124));
+      }
+
+      if (flags & 0x8080) {
+        sp_aux_list_add(s.cls[i], system, info, vec, index, args);
+      } else if (s.cls[i] != SP_FN_NONE) {
+        const u64 a[8] = {system, info, vec, index, 0, 0, 0, 0};
+        sp_run_particle_fn(s.cls[i], m.u(info + 112), a, args);
+      }
+
+      const s64 next_launcher = m.s(info + 120);
+      const s64 next_time = m.s(info + 116) - (s64)frames;
+      if (next_launcher != 0) {
+        m.set_u(info + 116, (u32)next_time);
+        if (next_time - 1 < 0) {
+          const u64 a[8] = {system, (u64)next_launcher, info, vec, 0, 0, 0, 0};
+          sp_call_particle_fn(m.u(relaunch_sym), a, args);
+        }
+      }
+
+      float vx = m.f(info + 16), vy = m.f(info + 20), vz = m.f(info + 24);
+      const float vw = m.f(info + 28);
+      const float rot_vz = m.f(info + 40), rot_vw = m.f(info + 44);
+      const float fade_x = m.f(info + 48), fade_y = m.f(info + 52), fade_z = m.f(info + 56),
+                  fade_w = m.f(info + 60);
+      const float ax = m.f(info + 64) * tv.acc;
+      const float ay = m.f(info + 68) * tv.acc;
+      const float az = m.f(info + 72) * tv.acc;
+      const u32 friction_bits = m.u(info + 96);
+      float px = m.f(vec), py = m.f(vec + 4), pz = m.f(vec + 8), pw = m.f(vec + 12);
+      float rot = m.f(vec + 24), sy = m.f(vec + 28);
+      float cx = m.f(vec + 32), cy = m.f(vec + 36), cz = m.f(vec + 40), cw = m.f(vec + 44);
+      vx = vx + ax;
+      vy = vy + ay;
+      vz = vz + az;
+      if (friction_bits != 0) {
+        const float a = 1.f - u2f(friction_bits);
+        const float b = a * tv.friction;
+        const float c = 1.f - b;
+        vx = vx * c;
+        vy = vy * c;
+        vz = vz * c;
+      }
+      const float ft_vel = tv.vel;
+      const float dpx = vx * ft_vel, dpy = vy * ft_vel, dpz = vz * ft_vel, dpw = vw * ft_vel;
+      const float drot = rot_vz * ft_vel, dsy = rot_vw * ft_vel;
+      const float dcx = fade_x * ft_vel, dcy = fade_y * ft_vel, dcz = fade_z * ft_vel,
+                  dcw = fade_w * ft_vel;
+      px = px + dpx;
+      py = py + dpy;
+      pz = pz + dpz;
+      pw = pw + dpw;
+      cx = cx + dcx;
+      cy = cy + dcy;
+      cz = cz + dcz;
+      cw = cw + dcw;
+      rot = rot + drot;
+      sy = sy + dsy;
+      cx = std::max(cx, 0.f);
+      cy = std::max(cy, 0.f);
+      cz = std::max(cz, 0.f);
+      cw = std::max(cw, 0.f);
+      m.set_f(info + 16, vx);
+      m.set_f(info + 20, vy);
+      m.set_f(info + 24, vz);
+      m.set_f(vec, px);
+      m.set_f(vec + 4, py);
+      m.set_f(vec + 8, pz);
+      m.set_f(vec + 12, pw);
+      m.set_f(vec + 24, (float)(s32)(s16)(s32)rot);
+      m.set_f(vec + 28, sy);
+      m.set_f(vec + 32, cx);
+      m.set_f(vec + 36, cy);
+      m.set_f(vec + 40, cz);
+      m.set_f(vec + 44, cw);
+
+      // not reached in a plain block (the scan rules it out); as the block function has it
+      if (m.u(info + 104) & 64) {
+        const u64 a[8] = {system, info, vec, index, 0, 0, 0, 0};
+        native_call_goal(m.u(orbiter_sym), a, args);
+      }
+
+      do_free = particle_done(m.u(info + 104), m.u(vec + 32), m.u(vec + 36), m.u(vec + 40),
+                              m.u(vec + 44), pw, sy);
+    }
+    if (do_free) {
+      sp_free_particle(system, index, info, vec, args);
+    }
+  }
+}
+
+//! quaternion*! and quaternion-normalize! are GOAL's: their C++ (native_goalc_ops.h) can stand in
+bool quaternion_ops_unchanged() {
+  static const u32 mul_sym = sym_val_addr("quaternion*!");
+  static const u32 normalize_sym = sym_val_addr("quaternion-normalize!");
+  static const u32 mul_fn = gload<u32>(mul_sym);
+  static const u32 normalize_fn = gload<u32>(normalize_sym);
+  return mul_fn != 0 && normalize_fn != 0 && gload<u32>(mul_sym) == mul_fn &&
+         gload<u32>(normalize_sym) == normalize_fn;
+}
+
+/*!
+ * sp-process-block-3d on the particle tables themselves, for a block whose scan says plain: the
+ * same steps in the same order as sp_process_block_3d_impl, with quaternion*! and
+ * quaternion-normalize! as their C++ while the symbols hold GOAL's.
+ */
+void block_3d_in_place(const ParticleMem& m,
+                       const NativeArgs& args,
+                       const BlockScan& s,
+                       u64 system,
+                       u32 m_info,
+                       u32 m_vec,
+                       u64 index0,
+                       u32 count,
+                       u32 clocks) {
+  static const u32 quaternion_mul_sym = sym_val_addr("quaternion*!");
+  static const u32 quaternion_normalize_sym = sym_val_addr("quaternion-normalize!");
+  static const u32 relaunch_sym = sym_val_addr("sp-relaunch-particle-3d");
+  const bool quat_inline = quaternion_ops_unchanged();
+  const u32 quat = args.stack - 16;
+  for (u32 i = 0; i < count; i++) {
+    if (!s.valid[i]) {
+      continue;
+    }
+    const u32 info = m_info + kInfoSize * i;
+    const u32 vec = m_vec + kVecSize * i;
+    const u64 index = index0 + i;
+    const TimeVec tv = time_vec(m, clocks, info);
+    const u64 frames = tv.frames;
+    if (frames == 0) {
+      if (m.s(info + 100) == 0) {
+        sp_free_particle(system, index, info, vec, args);
+      } else {
+        const u32 flags = m.u(info + 104);
+        m.set_u(info + 104, flags & ~32u);
+        if (flags & 32) {
+          m.set_u(vec + 44, m.u(info + 124));
+        }
+      }
+      continue;
+    }
+    bool do_free = false;
+    const s64 timer = m.s(info + 100);
+    if (timer != -1) {
+      if (timer == 0) {
+        do_free = true;
+      } else {
+        m.set_u(info + 100, (u32)std::max((s32)(u32)(timer - (s64)frames), 0));
+      }
+    }
+    if (!do_free) {
+      const u32 flags = m.u(info + 104);
+      m.set_u(info + 104, flags & ~32u);
+      if (flags & 32) {
+        m.set_u(vec + 44, m.u(info + 124));
+      }
+
+      if (s.cls[i] != SP_FN_NONE) {
+        const u64 a[8] = {system, info, vec, index, 0, 0, 0, 0};
+        sp_run_particle_fn(s.cls[i], m.u(info + 112), a, args);
+      }
+
+      const s64 next_launcher = m.s(info + 120);
+      const s64 next_time = m.s(info + 116) - (s64)frames;
+      if (next_launcher != 0) {
+        m.set_u(info + 116, (u32)next_time);
+        if (next_time < 0) {
+          const u64 a[8] = {system, (u64)next_launcher, info, vec, 0, 0, 0, 0};
+          native_call_goal(m.u(relaunch_sym), a, args);
+        }
+      }
+
+      float vx = m.f(info + 16), vy = m.f(info + 20), vz = m.f(info + 24);
+      const float vw = m.f(info + 28);
+      const float rot_vw = m.f(info + 44);
+      const float fade_x = m.f(info + 48), fade_y = m.f(info + 52), fade_z = m.f(info + 56),
+                  fade_w = m.f(info + 60);
+      const float ax = m.f(info + 64) * tv.acc;
+      const float ay = m.f(info + 68) * tv.acc;
+      const float az = m.f(info + 72) * tv.acc;
+      const u32 friction_bits = m.u(info + 96);
+      float px = m.f(vec), py = m.f(vec + 4), pz = m.f(vec + 8), pw = m.f(vec + 12);
+      const float qx = m.f(vec + 16), qy = m.f(vec + 20), qz = m.f(vec + 24);
+      float sy = m.f(vec + 28);
+      float cx = m.f(vec + 32), cy = m.f(vec + 36), cz = m.f(vec + 40), cw = m.f(vec + 44);
+      vx = vx + ax;
+      vy = vy + ay;
+      vz = vz + az;
+      if (friction_bits != 0) {
+        const float a = 1.f - u2f(friction_bits);
+        const float b = a * tv.friction;
+        const float c = 1.f - b;
+        vx = vx * c;
+        vy = vy * c;
+        vz = vz * c;
+      }
+      const float ft_vel = tv.vel;
+      const float dpx = vx * ft_vel, dpy = vy * ft_vel, dpz = vz * ft_vel, dpw = vw * ft_vel;
+      const float dsy = rot_vw * ft_vel;
+      const float dcx = fade_x * ft_vel, dcy = fade_y * ft_vel, dcz = fade_z * ft_vel,
+                  dcw = fade_w * ft_vel;
+      px = px + dpx;
+      py = py + dpy;
+      pz = pz + dpz;
+      pw = pw + dpw;
+      sy = sy + dsy;
+      cx = cx + dcx;
+      cy = cy + dcy;
+      cz = cz + dcz;
+      cw = cw + dcw;
+      cx = std::max(cx, 0.f);
+      cy = std::max(cy, 0.f);
+      cz = std::max(cz, 0.f);
+      cw = std::max(cw, 0.f);
+      m.set_f(info + 16, vx);
+      m.set_f(info + 20, vy);
+      m.set_f(info + 24, vz);
+      m.set_f(vec, px);
+      m.set_f(vec + 4, py);
+      m.set_f(vec + 8, pz);
+      m.set_f(vec + 12, pw);
+      m.set_f(vec + 28, sy);
+      m.set_f(vec + 32, cx);
+      m.set_f(vec + 36, cy);
+      m.set_f(vec + 40, cz);
+      m.set_f(vec + 44, cw);
+
+      float qw;
+      {
+        const float zz = qz * qz;
+        float w = 1.f - zz;
+        const float yy = qy * qy;
+        w = w - yy;
+        const float xx = qx * qx;
+        w = w - xx;
+        qw = std::sqrt(std::abs(w));
+      }
+      float rx, ry, rz, rw;
+      const u32 rot_vel_3d = info + 80;
+      if (quat_inline) {
+        goalc_ops::v4 q = {qx, qy, qz, qw};
+        s64 left = (s64)frames;
+        do {
+          const goalc_ops::v4 rv = {m.f(rot_vel_3d), m.f(rot_vel_3d + 4), m.f(rot_vel_3d + 8),
+                                    m.f(rot_vel_3d + 12)};
+          q = goalc_ops::quaternion_mul(q, rv);
+          left -= 10;
+        } while (left > 0);
+        q = goalc_ops::quaternion_normalize(q);
+        rx = q.x;
+        ry = q.y;
+        rz = q.z;
+        rw = q.w;
+      } else {
+        m.set_f(quat, qx);
+        m.set_f(quat + 4, qy);
+        m.set_f(quat + 8, qz);
+        m.set_f(quat + 12, qw);
+        s64 left = (s64)frames;
+        do {
+          const u64 a[8] = {quat, quat, rot_vel_3d, 0, 0, 0, 0, 0};
+          native_call_goal(m.u(quaternion_mul_sym), a, args);
+          left -= 10;
+        } while (left > 0);
+        const u64 a[8] = {quat, 0, 0, 0, 0, 0, 0, 0};
+        native_call_goal(m.u(quaternion_normalize_sym), a, args);
+        rx = m.f(quat);
+        ry = m.f(quat + 4);
+        rz = m.f(quat + 8);
+        rw = m.f(quat + 12);
+      }
+      if (rw < 0.f) {
+        m.set_f(vec + 16, 0.f - rx);
+        m.set_f(vec + 20, 0.f - ry);
+        m.set_f(vec + 24, 0.f - rz);
+      } else {
+        m.set_f(vec + 16, 0.f + rx);
+        m.set_f(vec + 20, 0.f + ry);
+        m.set_f(vec + 24, 0.f + rz);
+      }
+
+      do_free = particle_done(m.u(info + 104), f2u(cx), f2u(cy), f2u(cz), f2u(cw), pw, sy);
+    }
+    if (do_free) {
+      sp_free_particle(system, index, info, vec, args);
+    }
+  }
+}
+
+struct BlockStats {
+  u32 blocks = 0, in_place = 0, copied = 0, empty = 0, particles = 0;
+  const char* why = "";
+};
+BlockStats g_block_stats;
+
+enum BlockPath { BLOCK_EMPTY, BLOCK_IN_PLACE, BLOCK_COPIED };
+
+/*!
+ * One block's update. A block whose particles' functions only touch their own particle is
+ * updated where it is: no function reads or writes the tables behind the copies then, so the
+ * copy in, the update on the copies and the copy back give the same bytes. Any other block is
+ * updated in copies on the scratchpad as sp-process-block does it, without the copies of free
+ * particles (the copy gets its in-use byte cleared) and of the adgifs.
+ */
+BlockPath process_block(const NativeArgs& args,
+                        u32 count,
+                        bool is_3d,
+                        u32 m_info,
+                        u32 m_vec,
+                        u32 spad) {
+  const ParticleMem m;
+  const u32 s_info = spad + kSpadBlock;
+  const u32 s_vec = s_info + kInfoSize * count;
+  BlockScan s;
+  scan_block(m, is_3d, m_info, count, spad, s);
+  g_block_stats.particles += s.used;
+  if (s.used == 0) {
+    return BLOCK_EMPTY;
+  }
+  if (s.plain) {
+    sp_set_block_range(m_info, m_info + kInfoSize * count);
+    if (is_3d) {
+      block_3d_in_place(m, args, s, args.a[0], m_info, m_vec, args.a[1], count, spad);
+    } else {
+      block_2d_in_place(m, args, s, args.a[0], m_info, m_vec, args.a[1], count, spad);
+    }
+    sp_set_block_range(0, 0);
+    return BLOCK_IN_PLACE;
+  }
+  g_block_stats.why = s.why;
+  for (u32 i = 0; i < count; i++) {
+    if (s.valid[i]) {
+      copy_bytes(s_info + kInfoSize * i, m_info + kInfoSize * i, kInfoSize);
+      copy_bytes(s_vec + kVecSize * i, m_vec + kVecSize * i, kVecSize);
+    } else {
+      MIPS2C_NATIVE_LOG_STORE(s_info + kInfoSize * i + kInfoValid, 1);
+      g_ee_main_mem[s_info + kInfoSize * i + kInfoValid] = 0;
+    }
+  }
+  const u64 a[8] = {args.a[0], s_info, s_vec, args.a[1], args.a[2], args.a[3], 0, 0};
+  const NativeArgs inner{a, args.pp, args.st, args.stack};
+  if (is_3d) {
+    sp_process_block_3d_impl(inner);
+  } else {
+    sp_process_block_2d_impl(inner);
+  }
+  for (u32 i = 0; i < count; i++) {
+    if (s.valid[i]) {
+      copy_bytes(m_info + kInfoSize * i, s_info + kInfoSize * i, kInfoSize);
+      copy_bytes(m_vec + kVecSize * i, s_vec + kVecSize * i, kVecSize);
+    }
+  }
+  return BLOCK_COPIED;
+}
+
+#if MIPS2C_WRITE_LOG
+// host check (OPENGOAL_MIPS2C_VERIFY=1)
 int g_block_verify = -1;
 u64 g_block_verify_blocks = 0, g_block_verify_free = 0, g_block_verify_differ = 0;
+u64 g_block_verify_whole = 0, g_block_verify_path[3] = {0, 0, 0};
 
 bool block_verify_on() {
   if (g_block_verify < 0) {
@@ -467,24 +973,28 @@ bool block_verify_on() {
     g_block_verify = (v && v[0] && v[0] != '0') ? 1 : 0;
     if (g_block_verify) {
       atexit([] {
-        lg::info("sp-process-block verify: {} blocks, {} free particles compared, {} differ",
-                 g_block_verify_blocks, g_block_verify_free, g_block_verify_differ);
+        lg::info("sp-process-block verify: {} blocks by sp-process-block's steps, {} free "
+                 "particles compared, {} differ; {} blocks compared whole with "
+                 "pc-sp-process-block ({} in place, {} in copies, {} empty: see the inline verify "
+                 "line for mismatches)",
+                 g_block_verify_blocks, g_block_verify_free, g_block_verify_differ,
+                 g_block_verify_whole, g_block_verify_path[BLOCK_IN_PLACE],
+                 g_block_verify_path[BLOCK_COPIED], g_block_verify_path[BLOCK_EMPTY]);
       });
     }
   }
   return g_block_verify == 1;
 }
+#endif
 
 /*!
  * (pc-sp-process-block system index count paused?) -> #t: sp-process-block (sparticle.gc) for the
- * count particles from index: they are updated in copies on the scratchpad (the cpuinfos at 208,
- * the sprites after them) and copied back. Left out: the copies of free particles, both ways (the
- * copy gets its in-use byte cleared: the update skips it, callbacks are only given their own
- * particle, and nothing launches into the tables meanwhile: *sp-launcher-lock*), and the adgifs'
- * copy (no function is given its address). #f: the GOAL code runs.
- * Verify mode runs sp-process-block's own steps (the block functions through their symbols, so
- * they are compared with mips2c as before) and checks that the copy back of every free particle
- * would write the bytes that are there.
+ * count particles from index (process_block). #f: the GOAL code runs.
+ * Verify mode: one call in OPENGOAL_SP_BLOCK_VERIFY_EVERY (default 8) runs sp-process-block's own
+ * steps and process_block from the same state and compares all of GOAL memory and the random
+ * generators (native_verify_inline). The other calls run sp-process-block's steps with the block
+ * functions through their symbols (so they are compared with mips2c as before) and check that the
+ * copy back of every free particle would write the bytes that are there.
  */
 u64 pc_sp_process_block_impl(const NativeArgs& args) {
   static const u32 spad_sym = sym_val_addr("*fake-scratchpad-data*");
@@ -500,21 +1010,60 @@ u64 pc_sp_process_block_impl(const NativeArgs& args) {
   const bool is_3d = gload<u32>(sys + kSysIs3d) != (u32)args.st;
   const u32 m_info = gload<u32>(sys + kSysCpuinfo) + kInfoSize * index;
   const u32 m_vec = gload<u32>(sys + kSysVecdata) + kVecSize * index;
-  const u32 s_info = gload<u32>(spad_sym) + kSpadBlock;
-  const u32 s_vec = s_info + kInfoSize * count;
-  const u64 a[8] = {args.a[0], s_info, s_vec, args.a[1], args.a[2], args.a[3], 0, 0};
-  u8 valid[kMaxBlock];
-  for (u32 i = 0; i < count; i++) {
-    valid[i] = g_ee_main_mem[m_info + kInfoSize * i + kInfoValid];
-  }
+  const u32 spad = gload<u32>(spad_sym);
 
+#if MIPS2C_WRITE_LOG
   if (block_verify_on()) {
+    const u32 s_info = spad + kSpadBlock;
+    const u32 s_vec = s_info + kInfoSize * count;
+    const u32 m_adgif = gload<u32>(sys + kSysAdgif) + kAdgifSize * index;
+    const u64 a[8] = {args.a[0], s_info, s_vec, args.a[1], args.a[2], args.a[3], 0, 0};
+    static const u64 every = [] {
+      const char* v = getenv("OPENGOAL_SP_BLOCK_VERIFY_EVERY");
+      return v ? strtoull(v, nullptr, 10) : (u64)8;
+    }();
+    static u64 calls = 0;
+    if (every && (calls++ % every) == 0 && native_verify_inline_on()) {
+      // the scratchpad copies of the reference run (scratch data: made the same after both runs)
+      static u8 ref_copies[0x4000];
+      const u32 copies_size = (kInfoSize + kVecSize + kAdgifSize) * count;
+      BlockPath path = BLOCK_EMPTY;
+      native_verify_inline(
+          "pc-sp-process-block", {},
+          [&]() -> u64 {
+            path = process_block(args, count, is_3d, m_info, m_vec, spad);
+            memcpy(g_ee_main_mem + s_info, ref_copies, copies_size);
+            return 0;
+          },
+          [&]() -> u64 {
+            copy_bytes(s_info, m_info, kInfoSize * count);
+            copy_bytes(s_vec, m_vec, kVecSize * count);
+            copy_bytes(s_vec + kVecSize * count, m_adgif, kAdgifSize * count);
+            const NativeArgs inner{a, args.pp, args.st, args.stack};
+            if (is_3d) {
+              sp_process_block_3d_impl(inner);
+            } else {
+              sp_process_block_2d_impl(inner);
+            }
+            copy_bytes(m_info, s_info, kInfoSize * count);
+            copy_bytes(m_vec, s_vec, kVecSize * count);
+            memcpy(ref_copies, g_ee_main_mem + s_info, copies_size);
+            return 0;
+          },
+          true);
+      g_block_verify_whole++;
+      g_block_verify_path[path]++;
+      return goal_true(args.st);
+    }
     static const u32 fn_2d = sym_val_addr("sp-process-block-2d");
     static const u32 fn_3d = sym_val_addr("sp-process-block-3d");
+    u8 valid[kMaxBlock];
+    for (u32 i = 0; i < count; i++) {
+      valid[i] = g_ee_main_mem[m_info + kInfoSize * i + kInfoValid];
+    }
     copy_bytes(s_info, m_info, kInfoSize * count);
     copy_bytes(s_vec, m_vec, kVecSize * count);
-    copy_bytes(s_vec + kVecSize * count, gload<u32>(sys + kSysAdgif) + kAdgifSize * index,
-               kAdgifSize * count);
+    copy_bytes(s_vec + kVecSize * count, m_adgif, kAdgifSize * count);
     native_call_goal(gload<u32>(is_3d ? fn_3d : fn_2d), a, args);
     g_block_verify_blocks++;
     for (u32 i = 0; i < count; i++) {
@@ -536,32 +1085,21 @@ u64 pc_sp_process_block_impl(const NativeArgs& args) {
     copy_bytes(m_vec, s_vec, kVecSize * count);
     return goal_true(args.st);
   }
+#endif
 
-  u32 used = 0;
-  for (u32 i = 0; i < count; i++) {
-    if (valid[i]) {
-      copy_bytes(s_info + kInfoSize * i, m_info + kInfoSize * i, kInfoSize);
-      copy_bytes(s_vec + kVecSize * i, m_vec + kVecSize * i, kVecSize);
-      used++;
-    } else {
-      MIPS2C_NATIVE_LOG_STORE(s_info + kInfoSize * i + kInfoValid, 1);
-      g_ee_main_mem[s_info + kInfoSize * i + kInfoValid] = 0;
+  const BlockPath path = process_block(args, count, is_3d, m_info, m_vec, spad);
+  BlockStats& stats = g_block_stats;
+  stats.blocks++;
+  stats.in_place += path == BLOCK_IN_PLACE;
+  stats.copied += path == BLOCK_COPIED;
+  stats.empty += path == BLOCK_EMPTY;
+  if (stats.blocks >= 4096) {
+    if (kperf::g_sections_enabled) {
+      lg::info("particles: {} blocks: {} in place, {} in copies ({}), {} empty; {} particles",
+               stats.blocks, stats.in_place, stats.copied, stats.why, stats.empty,
+               stats.particles);
     }
-  }
-  if (used == 0) {
-    return goal_true(args.st);
-  }
-  const NativeArgs inner{a, args.pp, args.st, args.stack};
-  if (is_3d) {
-    sp_process_block_3d_impl(inner);
-  } else {
-    sp_process_block_2d_impl(inner);
-  }
-  for (u32 i = 0; i < count; i++) {
-    if (valid[i]) {
-      copy_bytes(m_info + kInfoSize * i, s_info + kInfoSize * i, kInfoSize);
-      copy_bytes(m_vec + kVecSize * i, s_vec + kVecSize * i, kVecSize);
-    }
+    stats = BlockStats();
   }
   return goal_true(args.st);
 }

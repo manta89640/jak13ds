@@ -42,6 +42,27 @@ u64 pc_sp_init_fields_impl(const NativeArgs& args);
 void sp_call_particle_fn(u32 fn, const u64 a[8], const NativeArgs& caller);
 // birth-func-set-quat inline
 bool sp_birth_set_quat(u32 fn, const u64 a[8], const NativeArgs& caller);
+// native_sp_callbacks.cpp: the block update in place (native_sparticle.cpp)
+enum SpFnClass : u8 {
+  SP_FN_NONE = 0,     //! no function
+  SP_FN_GOAL = 1,     //! a GOAL function that only touches the particle it is given
+  SP_FN_FOREIGN = 2,  //! anything else: its block is updated in copies
+  SP_FN_INLINE = 16,  //! + the kind of its inline version (which touches only its particle too)
+};
+//! sparticle.gc has *sp-block-lo* / -hi, and the functions the update runs inline are GOAL's
+bool sp_in_place_ready();
+//! the cpuinfos being updated in place (sp-kill-particle then only stops their timer); 0 0: none
+void sp_set_block_range(u32 lo, u32 hi);
+u8 sp_particle_fn_class(u32 fn);
+void sp_run_particle_fn(u8 cls, u32 fn, const u64 a[8], const NativeArgs& caller);
+bool sp_relaunch_own_data(bool is_3d);
+void sp_aux_list_add(u8 cls,
+                     u64 system,
+                     u32 info,
+                     u32 vec,
+                     u64 index,
+                     const NativeArgs& caller);
+void sp_free_particle(u64 system, u64 index, u32 info, u32 vec, const NativeArgs& caller);
 // native_sp_spawn.cpp
 extern const NativeImpl sp_spawn;
 // native_shadow.cpp

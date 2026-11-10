@@ -438,4 +438,152 @@ void sp_call_particle_fn(u32 fn, const u64 a[8], const NativeArgs& caller) {
   native_call_goal(fn, a, caller);
 }
 
+// ---------------------------------------------------------------------------
+// The block update in place (native_sparticle.cpp): which functions may run on the particle
+// tables themselves. A function qualifies when it reads and writes only the particle it is given
+// (its cpuinfo, its sprite, its adgif) and state outside the particle tables.
+// ---------------------------------------------------------------------------
+namespace {
+
+// GOAL callbacks of that kind (read in goal_src), called as they are
+FnSym s_tex_animate("sparticle-texture-animate");
+FnSym s_track_root("sparticle-track-root");
+FnSym s_track_root_prim("sparticle-track-root-prim");
+FnSym s_relaunch_3d("sp-relaunch-particle-3d");
+FnSym s_kill("sp-kill-particle");
+// run inline by the block update
+FnSym s_free("sp-free-particle");
+FnSym s_aux_list("add-to-sprite-aux-list");
+FnSym s_paused("paused?");
+
+// *sp-block-lo* / *sp-block-hi* (sparticle.gc): their value addresses once GOAL has defined them
+u32 g_block_lo_val = 0;
+u32 g_block_hi_val = 0;
+
+bool block_range_syms() {
+  if (g_block_lo_val) {
+    return true;
+  }
+  static u32 tries = 0;
+  if ((tries++ & 255) != 0) {
+    return false;
+  }
+  const u32 lo = ::jak2::find_symbol_from_c("*sp-block-lo*").offset;
+  const u32 hi = ::jak2::find_symbol_from_c("*sp-block-hi*").offset;
+  if (lo > 1 && hi > 1) {
+    g_block_lo_val = lo - 1;
+    g_block_hi_val = hi - 1;
+  }
+  return g_block_lo_val != 0;
+}
+
+}  // namespace
+
+bool sp_in_place_ready() {
+  return block_range_syms() && s_free.unchanged() && s_aux_list.unchanged() &&
+         s_paused.unchanged();
+}
+
+void sp_set_block_range(u32 lo, u32 hi) {
+  gstore<u32>(g_block_lo_val, lo);
+  gstore<u32>(g_block_hi_val, hi);
+}
+
+u8 sp_particle_fn_class(u32 fn) {
+  if (fn == 0) {
+    return SP_FN_NONE;
+  }
+  const Kind kind = classify(fn);
+  if (kind == Kind::RELAUNCH_2D) {
+    return SP_FN_FOREIGN;
+  }
+  if (kind == Kind::DROP_CHECK) {
+    // a drop runs the GOAL function: sp-kill-particle on its own particle, queued launches
+    return s_kill.unchanged() ? (u8)(SP_FN_INLINE | (u8)kind) : (u8)SP_FN_FOREIGN;
+  }
+  if (kind != Kind::NONE) {
+    return (u8)(SP_FN_INLINE | (u8)kind);
+  }
+  if ((s_tex_animate.unchanged() && fn == s_tex_animate.fn) ||
+      (s_track_root.unchanged() && fn == s_track_root.fn) ||
+      (s_track_root_prim.unchanged() && fn == s_track_root_prim.fn)) {
+    return SP_FN_GOAL;
+  }
+  return SP_FN_FOREIGN;
+}
+
+void sp_run_particle_fn(u8 cls, u32 fn, const u64 a[8], const NativeArgs& caller) {
+  if ((cls & SP_FN_INLINE) && run_inline((Kind)(cls & 15), a, caller)) {
+    return;
+  }
+  native_call_goal(fn, a, caller);
+}
+
+bool sp_relaunch_own_data(bool is_3d) {
+  if (!s_relaunch_setup.unchanged() || !s_init_fields.unchanged()) {
+    return false;
+  }
+  return is_3d ? s_relaunch_3d.unchanged() : s_relaunch_2d.unchanged();
+}
+
+//! add-to-sprite-aux-list (system info vec index) as its C; the particle's own function (class
+//! cls) runs first unless the game is paused
+void sp_aux_list_add(u8 cls,
+                     u64 system,
+                     u32 info,
+                     u32 vec,
+                     u64 index,
+                     const NativeArgs& caller) {
+  static const u32 master_mode = sym_val_addr("*master-mode*");
+  static const u32 aux_list = sym_val_addr("*sprite-aux-list*");
+  static const u32 sym_pause = sym_val_addr("pause") + 1;
+  static const u32 sym_progress = sym_val_addr("progress") + 1;
+  static const u32 sym_menu = sym_val_addr("menu") + 1;
+  static const u32 sym_freeze = sym_val_addr("freeze") + 1;
+  const u32 fn = gload<u32>(info + 112);
+  if (fn != 0) {
+    const u32 mode = gload<u32>(master_mode);
+    if (mode != sym_pause && mode != sym_progress && mode != sym_menu && mode != sym_freeze) {
+      const u64 a[8] = {system, info, vec, index, 0, 0, 0, 0};
+      sp_run_particle_fn(cls, fn, a, caller);
+    }
+  }
+  const u32 list = gload<u32>(aux_list);
+  const s32 entry = gload<s32>(list + 4);
+  if (entry >= gload<s32>(list)) {
+    return;
+  }
+  const u32 flags = gload<u32>(info + 104);
+  const u32 elem = list + 8 + ((u32)entry << 4);
+  if (flags & 0x80) {
+    gstore<u32>(elem, 0);
+    gstore<u32>(elem + 4, gload<u32>(info));
+    gstore<u32>(list + 4, (u32)(entry + 1));
+    gstore<float>(vec + 44, 0.f);
+  } else if (flags & 0x8000) {
+    gstore<u32>(elem, 1);
+    gstore<u32>(elem + 4, gload<u32>(info));
+    gstore<u32>(elem + 8, gload<u32>(info + 4));
+    gstore<u32>(elem + 12, 0x90u * (u32)index + gload<u32>((u32)system + 36));
+    gstore<u32>(list + 4, (u32)(entry + 1));
+    gstore<u32>(vec + 20, 0xffffffffu);
+  }
+}
+
+//! sp-free-particle (system index info vec) as its C
+void sp_free_particle(u64 system, u64 index, u32 info, u32 vec, const NativeArgs& caller) {
+  const u32 sys = (u32)system;
+  const u32 binding = gload<u32>(info + 136);
+  if (binding != (u32)caller.st && binding != 0) {
+    gstore<u16>(binding + 4, (u16)(gload<u16>(binding + 4) & ~3u));
+  }
+  const s64 idx = (s64)index;
+  const u32 word = (u32)((u64)(idx >> 6) << 3) + gload<u32>(sys + 32);
+  gstore<u64>(word, gload<u64>(word) | ((u64)1 << (idx & 63)));
+  const u32 count = idx < (s64)gload<s32>(sys + 8) ? sys + 16 : sys + 20;
+  gstore<u32>(count, (u32)(gload<s32>(count) - 1));
+  gstore<u8>(info + 128, 0);
+  gstore<float>(vec + 44, 0.f);
+}
+
 }  // namespace Mips2C::jak2::native

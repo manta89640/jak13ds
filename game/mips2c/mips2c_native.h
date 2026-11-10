@@ -133,11 +133,13 @@ bool native_verify_inline_on();
 //! (pc-rand, VU0) and its result, puts the regions and generators back, runs native(), and compares.
 //! One call in OPENGOAL_MIPS2C_VERIFY_INLINE_FULL_EVERY (default 64) compares all of GOAL memory
 //! too (outside the stack around the check). "inline verify MISMATCH" lines, a summary at exit. Returns native()'s result
-//! (its results stay in memory).
+//! (its results stay in memory). full_always: every call compares all of GOAL memory (for code
+//! whose stores can't be listed as regions).
 u64 native_verify_inline(const char* name,
                          std::initializer_list<NativeVerifyRegion> regions,
                          const std::function<u64()>& native,
-                         const std::function<u64()>& goal);
+                         const std::function<u64()>& goal,
+                         bool full_always = false);
 #endif
 
 //! (AI-assisted) the native `name` is turned off for debugging (3DS: config.ini mips2c_native_off
