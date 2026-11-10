@@ -1,6 +1,7 @@
 // Copyright: 2021 - 2024, Ziemas
 // SPDX-License-Identifier: ISC
 #pragma once
+#include <array>
 #include <list>
 #include <memory>
 
@@ -8,6 +9,7 @@
 
 #include "game/sound/common/synth.h"
 #include "game/sound/common/voice.h"
+#include "game/sound/common/voice_alloc.h"
 
 namespace snd {
 
@@ -72,8 +74,25 @@ class VoiceManager {
   void SetPlaybackMode(s32 mode) { mStereoOrMono = mode; }
   s16 AdjustVolToGroup(s16 involume, int group);
 
+  // The SPU2's voices (voice_alloc.h): with the limit on, a tone plays only if 989snd's
+  // allocator has a voice for it, which may end another tone. Off: every tone gets a voice.
+  void SetVoiceLimit(bool on) { mLimitVoices = on; }
+  void SetGroupVoiceRange(int group, int min, int max) { mAlloc.SetGroupRange(group, min, max); }
+  int ExternVoiceAlloc(int group) { return mAlloc.AllocExternal(group); }
+  // tones that took over a playing voice, and tones that got none, so far
+  u32 StolenVoices() const { return mStolen; }
+  u32 RefusedTones() const { return mRefused; }
+
  private:
+  bool TakeVoice(const std::shared_ptr<VagVoice>& voice);
+
   Synth& mSynth;
+
+  VoiceAllocator mAlloc;
+  std::array<std::weak_ptr<VagVoice>, VoiceAllocator::kVoices> mAllocVoices;
+  bool mLimitVoices{false};
+  u32 mStolen{0};
+  u32 mRefused{0};
 
   std::list<std::weak_ptr<VagVoice>> mVoices;
   void CleanVoices() {

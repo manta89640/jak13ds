@@ -80,6 +80,9 @@ void Player::InitCubeb() {
   mHandlerThreadStop = false;
   g_output_active = false;
   mSynth.SetOutputRate(kMixRate);
+#ifdef OG3DS_GAME_JAK2
+  mVmanager.SetVoiceLimit(true);
+#endif
   int core = 1;
   if (ctr_sound_config(&core)) {
     if (ctr_audio_init(kMixRate, kMixFrames, kMixBuffers) == 0) {
@@ -801,6 +804,16 @@ void Player::SetReverbDepth(s16 left, s16 right) {
     lg::info("sound: SPU2 effect depth {} {}", left, right);
   }
   mSynth.SetReverbDepth(left, right);
+}
+
+void Player::SetGroupVoiceRange(s32 group, s32 min, s32 max) {
+  std::scoped_lock lock(mTickLock);
+  mVmanager.SetGroupVoiceRange(group, min, max);
+}
+
+s32 Player::ExternVoiceAlloc(s32 group) {
+  std::scoped_lock lock(mTickLock);
+  return std::max(mVmanager.ExternVoiceAlloc(group), 0);
 }
 
 void Player::StopAllSounds() {

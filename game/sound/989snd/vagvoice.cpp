@@ -53,8 +53,40 @@ void VoiceManager::StartTone(std::shared_ptr<VagVoice> voice) {
     return;
   }
 #endif
+  if (mLimitVoices && !TakeVoice(voice)) {
+    return;
+  }
   mVoices.emplace_front(voice);
   mSynth.AddVoice(voice);
+}
+
+bool VoiceManager::TakeVoice(const std::shared_ptr<VagVoice>& voice) {
+  u64 keyed_off = 0;
+  for (int i = 0; i < VoiceAllocator::kVoices; i++) {
+    if (!mAlloc.Used(i)) {
+      continue;
+    }
+    auto v = mAllocVoices[i].lock();
+    if (v == nullptr || v->StoppedPublished()) {
+      mAlloc.Free(i);
+    } else if (v->KeyedOff()) {
+      keyed_off |= 1ull << i;
+    }
+  }
+  bool stolen = false;
+  const int slot = mAlloc.Allocate(voice->group, voice->tone.Priority, keyed_off, &stolen);
+  if (slot < 0) {
+    mRefused++;
+    return false;
+  }
+  if (stolen) {
+    if (auto v = mAllocVoices[slot].lock()) {
+      v->Stop();
+    }
+    mStolen++;
+  }
+  mAllocVoices[slot] = voice;
+  return true;
 }
 VolPair VoiceManager::MakeVolume(int vol1, int pan1, int vol2, int pan2, int vol3, int pan3) {
   // Scale up as close as we can to max positive 16bit volume

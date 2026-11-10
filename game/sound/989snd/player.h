@@ -112,6 +112,10 @@ class Player {
   // libsd effect attributes; the port mixes both SPU2 cores as one, so any core sets the one unit
   void SetReverbMode(u32 mode);
   void SetReverbDepth(s16 left, s16 right);
+  // 989snd's voice allocator (VoiceManager): a volume group's SPU voices, and a voice kept from
+  // the tones for the caller (its number)
+  void SetGroupVoiceRange(s32 group, s32 min, s32 max);
+  s32 ExternVoiceAlloc(s32 group);
   void InitCubeb();
   void DestroyCubeb();
   s32 GetTick() { return mTick; };

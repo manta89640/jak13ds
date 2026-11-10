@@ -47,6 +47,11 @@ void InitSound_overlord() {
   // streams end and their play position moves (see Player::HandlerTickThread)
   snd_RunStreamsWithoutOutput(true);
 
+  // the stream voices come out of the SPU2's 48, 989snd's tones share the other 44 (as Jak 1's
+  // overlord does for its one; this decompilation left the calls out)
+  for (int i = 0; i < N_VAG_CMDS; i++) {
+    snd_ExternVoiceAlloc(2, 0x7f);
+  }
   StreamVoice[0] = SD_VOICE(0, 0);
   StreamVoice[1] = SD_VOICE(0, 1);
   StreamVoice[2] = SD_VOICE(0, 2);
