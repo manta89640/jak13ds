@@ -27,6 +27,15 @@ u64 execute(void* ctxt) {
   bool bc = false;
   c->load_symbol2(v1, cache.cos_poly_vec);          // lw v1, *cos-poly-vec*(s7)
   c->lqc2(vf7, 0, v1);                              // lqc2 vf7, 0(v1)
+  // the table (only written here) depends on nothing but *cos-poly-vec*: kept while that holds
+  static u8 made_for[16];
+  static bool made = false;
+  if (made && !memcmp(made_for, &c->vfs[vf7], 16)) {
+    c->gprs[v0].du64[0] = 0;
+    return 0;
+  }
+  memcpy(made_for, &c->vfs[vf7], 16);
+  made = true;
   c->lui(v1, 15561);                                // lui v1, 15561
   c->ori(v1, v1, 4058);                             // ori v1, v1, 4058
   c->mtc1(f0, v1);                                  // mtc1 f0, v1
