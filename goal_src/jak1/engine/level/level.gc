@@ -315,9 +315,15 @@
 
 (define *print-login* #t)
 
+(#when TARGET_3DS
+  (define-extern pc-3ds-load-begin (function symbol))
+  (define-extern pc-3ds-load-end (function none))
+  (define-extern pc-3ds-load-time? (function symbol))
+  (define-extern pc-3ds-load-time-for? (function int symbol)))
+
 (defun level-load-continue-step ((this level))
   "Continue loading a level from where we left off last time: the original load-continue.
-   (AI-assisted) Returns #f if it had nothing to do (the next object isn't loaded yet)."
+   Returns #f if it had nothing to do (the next object isn't loaded yet)."
   ;; see if we are still linking some file
   (when (-> this linking)
     ;; do some more linking
@@ -335,6 +341,9 @@
     (return #t))
   ;; otherwise, copy stuff that needs copying
   (when (-> *texture-relocate-later* memcpy)
+    ;; 3DS: up to 1 MB moved, first in a frame's load budget or not in this frame
+    (#when TARGET_3DS
+      (if (not (pc-3ds-load-time-for? 3000)) (return #t)))
     (relocate-later)
     (dgo-load-continue (the pointer (align64 (-> this heap current))))
     (return #t))
@@ -375,27 +384,33 @@
          (else (set! (-> this linking) #t))))))
   #t)
 
-;; (AI-assisted) 3DS: time budget (__read-ee-timer ticks, 300 per microsecond) for load-continue
-;; in one frame, and how long it waits for the next object when there is nothing to link.
-(defconstant LOAD_CONTINUE_BUDGET (* 5 300000))
+;; 3DS: how long load-continue waits for the next object when there is nothing to link
+;; (__read-ee-timer ticks, 300 per microsecond)
 (defconstant LOAD_CONTINUE_WAIT (* 300 500))
+
+(defun level-load-continue-steps ((this level))
+  "3DS: steps while the object files keep coming and the frame's load budget lasts. One step per
+   frame (as on the PS2) made loading wait for the frame rate; the IOP loads the next object while
+   one is linked and hands it over as soon as it's told to continue. The linker and the login stop
+   by the same budget (pc-3ds-load-time?) and go on in the next frame."
+  (let ((last-progress (__read-ee-timer)))
+    (loop
+      (let ((login (= (-> this status) 'login)))
+        (if (level-load-continue-step this) (set! last-progress (__read-ee-timer)))
+        (if (or login
+                (not (or (= (-> this status) 'loading) (= (-> this status) 'loading-bt) (= (-> this status) 'login)))
+                (not (pc-3ds-load-time?))
+                (>= (- (__read-ee-timer) last-progress) LOAD_CONTINUE_WAIT))
+          (return #f))))))
 
 (defmethod load-continue ((this level))
   "Continue loading a level from where we left off last time."
   (#if TARGET_3DS
-    ;; (AI-assisted) Keep going while the object files keep coming, up to a time budget. One step
-    ;; per frame (as on the PS2) made loading wait for the frame rate: village1's first 54
-    ;; objects took ~2.4 s for ~0.8 s of reading. The IOP loads the next object while one is
-    ;; linked and hands it over as soon as it's told to continue.
-    (let* ((start (__read-ee-timer))
-           (last-progress start))
-      (loop
-        (if (level-load-continue-step this) (set! last-progress (__read-ee-timer)))
-        (let ((now (__read-ee-timer)))
-          (if (or (not (or (= (-> this status) 'loading) (= (-> this status) 'loading-bt)))
-                  (>= (- now start) LOAD_CONTINUE_BUDGET)
-                  (>= (- now last-progress) LOAD_CONTINUE_WAIT))
-            (return this)))))
+    (when (or (= (-> this status) 'loading) (= (-> this status) 'loading-bt) (= (-> this status) 'login))
+      ;; (level-status-set! calls this again for a level's last object: inside the same budget)
+      (let ((begun (pc-3ds-load-begin)))
+        (level-load-continue-steps this)
+        (if begun (pc-3ds-load-end))))
     (level-load-continue-step this))
   this)
 
@@ -473,6 +488,11 @@
   (let ((level-drawable-trees (-> loaded-level bsp drawable-trees)))
     ;;(.mfc0 initial-timer Count)
     (label cfg-1)
+    ;; 3DS: the PS2's time limit below, by the frame's load budget
+    (#when TARGET_3DS
+      (when (not (pc-3ds-load-time?))
+        (set! loaded-level loaded-level)
+        (goto cfg-78)))
     ;;(.mfc0 current-timer Count)
     ;; this would quit the login function after some amount of time elapsed.
     #|
@@ -513,13 +533,17 @@
                (+! (-> level-login-state elts) 1))
               (else
                ;;(load-dbg " other actual login: ~A~%" (method-of-object current-drawable login))
-               (login current-drawable))))
+               (with-profiler "ll-tree"
+                 (login current-drawable)))))
           (+! (-> level-login-state pos) 1)
           (goto cfg-1))
         ;; this makes the art groups go at the end.
         (let ((v1-39 (- (the-as uint current-login-pos) (the-as uint (-> level-drawable-trees length)))))
           (when (< (the-as int v1-39) (-> loaded-level art-group art-group-array length))
-            (let ((s2-2 (-> loaded-level art-group art-group-array v1-39))) (login s2-2) (if (needs-link? s2-2) (link-art! s2-2)))
+            (let ((s2-2 (-> loaded-level art-group art-group-array v1-39)))
+              (with-profiler "ll-art"
+                (login s2-2)
+                (if (needs-link? s2-2) (link-art! s2-2))))
             (+! (-> level-login-state pos) 1)
             (goto cfg-1)))
         ;; if we got here, we're done with state -1!
@@ -536,11 +560,14 @@
              ;; (load-dbg " login drawable-inline-array-tfrag: ~A~%" s1-1)
              (cond
                ((< current-login-pos (-> (the-as drawable-inline-array-tfrag s1-1) length))
+                (profiler-start-event "ll-tfrag")
                 (dotimes (s0-0 200)
-                  (when (< current-login-pos (-> (the-as drawable-inline-array-tfrag s1-1) length))
+                  (when (and (< current-login-pos (-> (the-as drawable-inline-array-tfrag s1-1) length))
+                             (#if TARGET_3DS (or (nonzero? (logand s0-0 15)) (pc-3ds-load-time?)) #t))
                     ;; (load-dbg " login from drawable-inline-array-tfrag: ~A~%" (-> (the-as drawable-inline-array-tfrag s1-1) data (the-as uint current-login-pos)))
                     (login (-> (the-as drawable-inline-array-tfrag s1-1) data (the-as uint current-login-pos)))
                     (set! current-login-pos (the-as int (+ (the-as uint current-login-pos) 1)))))
+                (profiler-end-event)
                 (set! (-> level-login-state pos) (the-as uint current-login-pos)))
                (else
                 (set! (-> level-login-state pos) (the-as uint 0))
@@ -597,7 +624,8 @@
             (else
              (let ((a0-36 (-> v1-115 actors data (the-as uint current-login-pos) actor)))
                ;; (load-dbg "entity nav login: ~A~%" a0-36)
-               (entity-nav-login a0-36))
+               (with-profiler "ll-nav"
+                 (entity-nav-login a0-36)))
              (+! (-> level-login-state pos) 1))))
         (goto cfg-1))
       (when (zero? (the-as uint current-login-pos))
@@ -1231,6 +1259,16 @@
 
 ;; method 16 level-group (debug text stuff)
 
+(#when TARGET_3DS
+  (defun level-load-work ((this level-group))
+    "The levels' load steps. The display loop runs them last before it waits for the render
+     thread: the frame's other work is done, so the time the frame has left is known, and a step
+     that needs the render thread idle (a texture upload) waits where the frame would wait anyway."
+    (with-profiler "lu-load-continue"
+      (dotimes (i 2)
+        (load-continue (-> this level i))))
+    (none)))
+
 (defmethod level-update ((this level-group))
   ;; this does nothing...
   (camera-pos)
@@ -1242,10 +1280,11 @@
   (with-profiler "lu-art-control"
     (update *art-control* #t)
     (clear-rec *art-control*))
-  ;; run level loading!
-  (with-profiler "lu-load-continue"
-    (dotimes (s5-0 2)
-      (load-continue (-> this level s5-0))))
+  ;; run level loading! (3DS: level-load-work, later in the frame)
+  (#unless TARGET_3DS
+    (with-profiler "lu-load-continue"
+      (dotimes (s5-0 2)
+        (load-continue (-> this level s5-0)))))
   ;; compute inside for each level
   (profiler-start-event "lu-inside")
   (dotimes (s5-1 (-> this length))
@@ -1282,6 +1321,7 @@
                 (set! s1-0 (the-as continue-point (car s4-2)))))
             (set-continue! *game-info* s3-0))))))
   (profiler-end-event)
+  (profiler-start-event "lu-vis")
   ;; determine vis info idx for each level
   (dotimes (v1-67 (-> this length))
     (let ((a0-26 (-> this level v1-67)))
@@ -1420,6 +1460,7 @@
                     (-> s4-5 upload-size 3)
                     (-> s4-5 upload-size 4)))
           (if *display-split-box-info* (debug-print-splitbox s4-5 (-> *math-camera* trans) *stdcon*))))))
+  (profiler-end-event)
   ;; tell PC port about our levels
   (__pc-set-levels (if (symbol-member? (-> this level0 status) '(active alive loaded)) (symbol->string (bsp-name (-> this level0))) "none")
                    (if (symbol-member? (-> this level1 status) '(active alive loaded)) (symbol->string (bsp-name (-> this level1))) "none"))

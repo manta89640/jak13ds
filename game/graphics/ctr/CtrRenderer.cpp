@@ -632,6 +632,8 @@ CtrRenderer::CtrRenderer()
 
 CtrRenderer::~CtrRenderer() = default;
 
+// config.ini hitch_ms below 100: the render thread's frames this long are logged with their parts
+constexpr double kRenderLongMs = 26.0;
 void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
 #ifndef __3DS__
   std::lock_guard<std::mutex> host_gpu(g_host_gpu_mutex);
@@ -696,11 +698,12 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     ctr_boot_mark(m_rs.frame_idx == 1 ? "9 first game frame" : "10 300 game frames");
   }
 #endif
+  double load_ms = 0;
   {
     const double tl = ctr_gpu_time_ms();
     ctr_gpu_diag_stage("level loads (process_pending_loads)");
     m_levels->process_pending_loads(m_rs.frame_idx);
-    const double load_ms = ctr_gpu_time_ms() - tl;
+    load_ms = ctr_gpu_time_ms() - tl;
     if (load_ms >= 4.0) {
       m_auto.load_frame = m_rs.frame_idx;  // (AI-assisted, levellod) auto_detail: a load frame
     }
@@ -790,6 +793,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_level_set_screen_black(
       m_hold_black ||
       (m_shown_alp < 0.01f && g_pmode_alp.load(std::memory_order_relaxed) < 0.01f));
+  const bool long_frame_log = kperf::g_hitch_diag.load(std::memory_order_relaxed);
+  static std::vector<double> bucket_ms_before;
+  if (long_frame_log) {
+    bucket_ms_before = m_bucket_ms;
+  }
   if (m_jak2) {
     dispatch_buckets_jak2(DmaFollower(ee_mem, chain_offset));
   } else {
@@ -858,6 +866,19 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   // (AI-assisted) the time of day work isn't GPU load: auto_detail counts it only for stepping
   // down (levellod: see auto_detail_frame)
   const double tod_ms = ctr_level_tod_take_ms();
+  m_levels->note_frame_ms(t3 - t0);
+  if (long_frame_log && t3 - t0 >= kRenderLongMs) {
+    std::string by;
+    for (size_t i = 0; i < m_buckets.size() && i < bucket_ms_before.size(); i++) {
+      const double d = m_bucket_ms[i] - bucket_ms_before[i];
+      if (d >= 1.0) {
+        by += fmt::format(" {} {:.1f}", m_buckets[i]->name(), d);
+      }
+    }
+    lg::warn("[rhitch] render frame {}: {:.0f} ms = level loads {:.1f} + begin {:.1f} + build "
+             "{:.1f} + end {:.1f}; time of day {:.1f}; buckets:{}",
+             m_rs.frame_idx, t3 - t0, load_ms, t1 - t0 - load_ms, t2 - t1, t3 - t2, tod_ms, by);
+  }
   m_timing.tod_ms += tod_ms;
   m_timing.tod_max_ms = std::max(m_timing.tod_max_ms, tod_ms);
   m_timing.tod_over += tod_ms > 2.0;
@@ -997,6 +1018,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
         // (AI-assisted) of the level renderers' time: the time of day's
         lg::info("[ctr] time of day ms/frame {:.2f}, most {:.2f} in one frame, {} frames over 2 ms",
                  m_timing.tod_ms / n, m_timing.tod_max_ms, m_timing.tod_over);
+      }
+      if (const auto sw = m_levels->take_tod_sweep_stats(); sw.frames) {
+        lg::info("[ctr] time of day catch-up of what isn't drawn: {} vertices in {} frames, "
+                 "{:.2f} ms in each, most {:.2f} (before the frame, not in its build)",
+                 sw.verts, sw.frames, sw.ms / sw.frames, sw.max_ms);
       }
       {
         // (AI-assisted, gpu-rt) gpu_breakdown, gpu_micro's statistics
@@ -1640,6 +1666,17 @@ double g_wait_render_mark = 0;
 double g_upload_total = 0, g_upload_mark = 0;  // same for texture uploads / relocates
 int g_upload_count_total = 0, g_upload_count_mark = 0;
 
+// game thread: the level list of ctr_set_levels until the frame's hand-over
+std::vector<std::string> g_levels_pending;
+bool g_levels_pending_set = false;
+
+void apply_levels(const std::vector<std::string>& levels) {
+  kperf::SectionScope section("set-levels");
+  g_ctr->levels().set_wanted(levels);
+  g_ctr->note_levels(levels);
+  CtrOceanFull::note_levels(levels);  // (AI-assisted) its log: once per level
+}
+
 void render_job(void*) {
   g_ctr->render_frame(g_job_mem, g_job_offset);
 }
@@ -1647,6 +1684,7 @@ void render_job(void*) {
 // before touching renderer state from the game thread
 void wait_render_idle() {
   if (g_async) {
+    kperf::SectionScope section("wait-render-idle");
     const double w = ctr_gpu_async_wait();
     g_ee.wait_render_ms += w;
     g_wait_render_total += w;
@@ -1910,6 +1948,10 @@ void ctr_send_chain(const void* data, u32 offset) {
   }
   if (g_async) {
     wait_render_idle();
+    if (g_levels_pending_set) {
+      g_levels_pending_set = false;
+      apply_levels(g_levels_pending);
+    }
     if (have_game_cam) {
       g_ctr->levels().note_game_camera(game_cam);  // (AI-assisted, title3; render thread idle)
     }
@@ -1974,6 +2016,7 @@ void ctr_send_chain(const void* data, u32 offset) {
 void ctr_texture_upload_now(const u8* tpage, int mode, u32 s7_ptr) {
   if (g_ctr) {
     kperf::Stage stage("texture upload");
+    kperf::SectionScope section("tex-upload");
     wait_render_idle();
     const double t0 = ctr_gpu_time_ms();
     g_ctr->vram().upload_texture_page_now(tpage, mode, g_ee_main_mem, s7_ptr);
@@ -1998,14 +2041,21 @@ void ctr_texture_relocate(u32 destination, u32 source, u32 format) {
   }
 }
 
+// With a render thread the list is taken at the frame's hand-over (ctr_send_chain), where the
+// render thread is idle anyway: the frames drawn see the same list as when the game waited for
+// the render thread here, in the middle of its frame.
 void ctr_set_levels(const std::vector<std::string>& levels) {
-  if (g_ctr) {
-    kperf::Stage stage("set-levels (the renderer's level list)");
-    wait_render_idle();
-    g_ctr->levels().set_wanted(levels);
-    g_ctr->note_levels(levels);
-    CtrOceanFull::note_levels(levels);  // (AI-assisted) its log: once per level
+  if (!g_ctr) {
+    return;
   }
+  if (g_async && !g_is_jak2) {
+    g_levels_pending = levels;
+    g_levels_pending_set = true;
+    return;
+  }
+  kperf::Stage stage("set-levels (the renderer's level list)");
+  wait_render_idle();
+  apply_levels(levels);
 }
 void ctr_set_active_levels(const std::vector<std::string>&) {}
 void ctr_force_reload_all() {}
@@ -2022,6 +2072,16 @@ void ctr_set_pmode_alp(float alp) {
 // the level's .c3l is loaded, so the player doesn't start in a level with nothing drawn yet. Gives
 // up after kMaxWaitMs per level (then the level appears when its load is done, as before).
 // (AI-assisted) the 60 Hz vblanks the last frame took (g_frame_vblanks; Jak II's kmachine.cpp)
+// Game thread: the time left until the frame's flip (the last one plus the frame cap's vblanks);
+// negative when the game is behind or draws no frames, large before the first frame.
+double ctr_frame_ms_left() {
+  if (!g_ctr_ready || g_last_vsync_ms == 0) {
+    return 1e9;
+  }
+  const double period = (ctr_settings().fps_cap <= 30 ? 2 : 1) * (1000.0 / 59.8261);
+  return g_last_vsync_ms + period - ctr_gpu_time_ms();
+}
+
 u32 ctr_frame_vblanks() {
   return g_frame_vblanks;
 }
@@ -2049,6 +2109,12 @@ bool ctr_level_ready(const char* name) {
   // (AI-assisted) a parked prefetch the game gave up on holds memory (the loader waits for it to
   // go), or the loader ran out of memory: the render thread sees to it at its next frame, but the
   // game may wait here without drawing frames (both level slots empty: it loads in a loop)
+  if (g_levels_pending_set) {
+    // (no frame since ctr_set_levels: the game loops for a level)
+    g_levels_pending_set = false;
+    wait_render_idle();
+    apply_levels(g_levels_pending);
+  }
   if (g_ctr->levels().needs_service()) {
     wait_render_idle();
     g_ctr->levels().service();
