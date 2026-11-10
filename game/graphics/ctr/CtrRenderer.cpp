@@ -1219,11 +1219,13 @@ void CtrRenderer::auto_detail_frame(float /*gpu_busy_ms*/, float gpu_active_ms,
         (cs.tie_distance_scale > 0 && cs.tie_distance_scale_max > cs.tie_distance_scale);
     m_auto.relief.init(cs.tie_lod_px, cs.lod_distance, cs.tie_distance_scale, cs.draw_distance,
                        g_game_version == GameVersion::Jak1, g_game_version == GameVersion::Jak2);
-    m_auto.ctl.range(-(float)m_auto.relief.n, t_range ? 1.f : 0.f);
+    // fixed: the relief's floor is the position, the controller has no range to move in
+    const float relief_floor = -(float)m_auto.relief.n;
+    m_auto.ctl.range(relief_floor, cs.auto_detail_fixed ? relief_floor : (t_range ? 1.f : 0.f));
     if (g_game_version == GameVersion::Jak1) {
       m_auto.ctl.unit_costs(m_auto.relief, ctr_detail::kJak1LeverMs);
     }
-    ctr_level_set_detail(m_auto.ctl.x);
+    ctr_level_set_detail(m_auto.ctl.x, cs.auto_detail_fixed);
     m_auto.last_ms = now;
   }
   m_auto.time.add(m_auto.relief, m_auto.ctl.r(), now - m_auto.last_ms);
@@ -1278,7 +1280,7 @@ void CtrRenderer::auto_detail_frame(float /*gpu_busy_ms*/, float gpu_active_ms,
   if (moved) {
     ctr_level_set_detail(m_auto.ctl.x, snap);
   }
-  if (m_jak2 && m_auto.relief.n > 0) {
+  if (m_jak2 && m_auto.relief.n > 0 && !cs.auto_detail_fixed) {
     // Jak II's relief (the far levers, under the config's detail): its begin, each lever as it
     // starts to move, its end
     const float r = m_auto.ctl.r();

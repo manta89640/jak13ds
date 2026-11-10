@@ -11,6 +11,7 @@
 // One position x: x in [0, 1] is the near-to-far range of the shrub / tie distances, x < 0 the
 // relief r = -x (one unit per knob that has something to move, in kOrder). The level renderer
 // follows x at kSlew per frame, so every distance it sets moves a fade band's width in seconds.
+// auto_detail = fixed (the default): x stays at the relief's floor, -n; nothing moves with the load.
 
 #include <algorithm>
 #include <cmath>
