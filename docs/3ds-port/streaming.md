@@ -191,7 +191,11 @@ coarser one's.
   free it: its floor rises to 1 over 16 frames (`kMorphOutFrames`), then it is freed and its groups
   draw their far version, the same surface. The scheduler counts the bytes of the units on their
   way out as room that comes (no more units freed for them, no growth meanwhile). Memory pressure
-  (`stream_shrink`, a level load's room) frees at once as before.
+  (`stream_shrink`, a level load's room) morphs a drawn unit out too; only `make_room` (a load
+  whose allocation failed) frees at once.
+- **Held in view**: a unit drawn within the last 3 frames without moving vertices (all of Jak II's)
+  has no morph to leave by: no victim choice, drain or level load's room frees it
+  (`CtrLevels::stream_held`); it goes once it is out of view, or at `make_room`.
 - **Ring 0's victims**: among the units ring 0 may free, the ones not drawn last frame go first
   (freed at once), and a unit already on its way out is never picked again.
 - **tfrag units beyond their bound**: a tfrag group chooses its version by view depth, which off the
