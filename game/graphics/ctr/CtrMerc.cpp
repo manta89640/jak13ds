@@ -106,7 +106,7 @@ struct BoneRows {
   u32 stamp;  // the instance they were made for
   u32 mirrors;
   float rows[12];
-  u32 f24[9];
+  uint32_t f24[9];
 };
 BoneRows g_bone_rows[256];
 u32 next_bone_rows_stamp() {
@@ -1461,7 +1461,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       if (bone_cache) {
         // each bone's words, laid out as pack_skin_rows_f24 does
         for (int p = 0; p < n; p++) {
-          const u32* w = g_bone_rows[rows_of->palette[p]].f24;
+          const uint32_t* w = g_bone_rows[rows_of->palette[p]].f24;
           uint32_t* o = palette_f24 + 3 * p;
           for (int row = 0; row < 3; row++, o += 3 * n, w += 3) {
             o[0] = w[0];
