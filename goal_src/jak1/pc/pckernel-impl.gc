@@ -122,7 +122,7 @@
   (set! (-> obj text-language) (the pc-language (scf-get-language)))
   (set! (-> obj subtitle-language) (the pc-language (scf-get-language)))
   (set! (-> obj skip-movies?) #t)
-  (set! (-> obj subtitles?) *debug-segment*)
+  (set! (-> obj subtitles?) (#if TARGET_3DS #f *debug-segment*))
   (cond
     ((and (= *default-territory* GAME_TERRITORY_SCEE) (= (-> obj text-language) (pc-language english)))
      (set! (-> obj text-language) (pc-language uk-english))

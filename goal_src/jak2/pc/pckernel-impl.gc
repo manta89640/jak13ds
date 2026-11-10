@@ -175,7 +175,8 @@
   (set! (-> obj memcard-volume-dialog) 0.75)
   (set! (-> obj memcard-vibration?) #t)
   (set! (-> obj memcard-subtitles?) #f)
-  (set! (-> obj hinttitles?) #t)
+  ;; 3DS: no subtitles by default
+  (set! (-> obj hinttitles?) (#if TARGET_3DS #f #t))
   (set! (-> obj subtitle-speaker?) 'auto)
   0)
 
