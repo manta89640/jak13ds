@@ -492,7 +492,8 @@ void scan_block(const ParticleMem& m,
                 BlockScan& s) {
   static const bool off = native_turned_off("sp-in-place");
   s.used = 0;
-  s.plain = !off && sp_in_place_ready();
+  // the natives load quadwords of the particle (aligned like the scratchpad's copies)
+  s.plain = !off && ((m_info | m_vec) & 15) == 0 && sp_in_place_ready();
   s.why = s.plain ? "" : "off";
   const bool relaunch_ok = s.plain && sp_relaunch_own_data(is_3d);
   const bool orbiter_ok = s.plain && !is_3d && sp_orbiter_own_data();
