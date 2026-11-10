@@ -9,6 +9,7 @@
 #include "game/overlord/common/dma.h"
 #include "game/overlord/common/iso.h"
 #include "game/overlord/common/srpc.h"
+#include "game/overlord/jak2/dma.h"
 #include "game/overlord/jak2/iso_api.h"
 #include "game/overlord/jak2/iso_cd.h"
 #include "game/overlord/jak2/iso_queue.h"
@@ -167,6 +168,8 @@ u32 InitISOFS() {
     printf("IOP: ======================================================================\n");
     return 1;
   }
+  SetMbxNotifyThread(iso_mbx, iso_thread);
+  SetMbxNotifyThread(sync_mbx, iso_thread);
   StartThread(iso_thread, 0);
   StartThread(dgo_thread, 0);
   StartThread(str_thread, 0);
@@ -420,6 +423,45 @@ void IsoPlayVagStream(VagCmd* param_1, int param_2) {
 
 u32 _not_on_stack_sync = 0;
 u32 IsoThreadCounter = 0;
+
+void NotifyISOThread() {
+  if (iso_thread > 0) {
+    NotifyThread(iso_thread);
+  }
+}
+
+// nothing queued, no stream allocated, no SPU DMA to finish: the loop has nothing to poll for
+// until a message (iso_mbx) or a stream request list (NotifyISOThread) comes
+static bool IsoThreadIdle() {
+  if (pending_dma || StopPluginStreams || ActiveVagStreams > 0 ||
+      RequestedStreamsList.unk2_init0) {
+    return false;
+  }
+  for (const auto& pri : gPriStack) {
+    if (pri.count) {
+      return false;
+    }
+  }
+  for (const auto& cmd : VagCmds) {
+    if (cmd.id) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// the loop's wait with no read in progress
+static u32 IsoThreadWaitUs() {
+  if (IsoThreadIdle()) {
+    return 100000;
+  }
+  // only streams queued, no SPU DMA to finish: their file data is read a chunk (0.3 s) ahead
+  if (!pending_dma && !StopPluginStreams && !gPriStack[0].count && !gPriStack[1].count &&
+      !gPriStack[2].count) {
+    return 4000;
+  }
+  return 1000;
+}
 
 u32 ISOThread() {
   bool bVar1;
@@ -736,7 +778,7 @@ u32 ISOThread() {
       }
 
       if (should_sleep) {
-        DelayThread(1000);
+        DelayThreadNotifiable(IsoThreadWaitUs());
       }
     }
   } while (true);

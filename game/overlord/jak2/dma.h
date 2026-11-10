@@ -5,6 +5,7 @@
 namespace jak2 {
 struct VagCmd;
 void dma_init_globals();
+extern int pending_dma;
 bool DMA_SendToSPUAndSync(uint8_t* iop_mem,
                           int size_one_side,
                           int spu_addr,

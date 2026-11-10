@@ -26,6 +26,7 @@ inline u64 goal_true(u64 st) {
 extern const NativeImpl cspace_parented_transformq_joint;
 // native_bones.cpp (a GOAL function's loop: pc-new-bones-mtx-calc, no mips2c version)
 extern const NativeImpl pc_new_bones_mtx_calc;
+extern const NativeImpl pc_new_bones_tmtx_calc;
 // native_sparticle.cpp
 extern const NativeImpl sp_process_block_2d;
 extern const NativeImpl sp_process_block_3d;

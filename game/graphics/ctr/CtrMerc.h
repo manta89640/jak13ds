@@ -214,7 +214,9 @@ class CtrMercRenderer : public CtrBucketRenderer {
     const CtrMercMat& operator[](size_t i) const { return buf[i]; }
   };
   SnapBuf m_snap;
-  size_t m_snap_pos = 0, m_snap_first = 0;
+  static constexpr size_t kNoSnap = ~(size_t)0;
+  std::vector<size_t> m_snap_at;  // per model in DMA order: where its copy starts, or kNoSnap
+  size_t m_snap_first = kNoSnap;
   // (AI-assisted) rewritten vertices: gather_mod's copies, made with the bone snapshot (game
   // thread) for the models (in DMA order: m_model_ordinal) that have them
   struct ModSnap {

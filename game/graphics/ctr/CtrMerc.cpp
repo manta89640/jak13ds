@@ -255,6 +255,7 @@ void CtrMercRenderer::hud_clip(float* out, float y_scale) const {
 
 void CtrMercRenderer::snapshot_bones(DmaFollower& dma, CtrRenderState& rs) {
   m_snap.clear();
+  m_snap_at.clear();
   m_mod_snaps.clear();
   m_mod_bytes.clear();
   m_snapshot_mode = true;
@@ -264,7 +265,6 @@ void CtrMercRenderer::snapshot_bones(DmaFollower& dma, CtrRenderState& rs) {
 }
 
 void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
-  m_snap_pos = 0;
   m_model_ordinal = 0;
   m_mod_cursor = 0;
   m_mod_frame_counted = false;
@@ -935,11 +935,24 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       n++;
     }
     if (m_snapshot_mode) {
-      MercMat* dst = m_snap.grow(n);
-      for (int b = 0; b < n; b++) {
-        u32 addr;
-        memcpy(&addr, &ma[b * 4], 4);
-        memcpy(&dst[b], rs.ee_mem + addr, sizeof(MercMat));  // (AI-assisted) tmat only
+      // Jak II's matrices are in the frame's DMA buffer, like the model packets: drawn from there.
+      // Copied only where the copy is changed (ripple) or used here (Keira's pose).
+      MercMat* dst = nullptr;
+      size_t snap_at = kNoSnap;
+      const auto copy_bones = [&]() {
+        if (dst) {
+          return;
+        }
+        snap_at = m_snap.size();
+        dst = m_snap.grow(n);
+        for (int b = 0; b < n; b++) {
+          u32 addr;
+          memcpy(&addr, &ma[b * 4], 4);
+          memcpy(&dst[b], rs.ee_mem + addr, sizeof(MercMat));  // (AI-assisted) tmat only
+        }
+      };
+      if (!m_jak2) {
+        copy_bones();
       }
       // (AI-assisted) vertices the game rewrites (ripple, texture scroll): the game changes them
       // during the next frame's logic, so they're copied now too. Only models with an effect
@@ -966,6 +979,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
           m_mod_snaps.push_back({m_model_ordinal, m_mod_bytes.size()});
           gather_mod(rs.ee_mem, ptrs, ec, *model);
           if (mod_covers_all(*model)) {
+            copy_bones();
             ModSnap& ms = m_mod_snaps.back();
             bool first = true;
             for (int b = 0; b < n; b++) {
@@ -989,6 +1003,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
         const CtrLevelData* lev = nullptr;
         const CtrMercModelData* model = find_model(input, &lev);
         if (model && model->keira_rig) {
+          copy_bones();
           const float* jak[128];
           u64 sent[2] = {0, 0};
           static const float kZero[16] = {};
@@ -1006,12 +1021,13 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
           }
         }
       }
+      m_snap_at.push_back(snap_at);
       m_model_ordinal++;
       return;
     }
+    m_snap_first = m_snap_valid && m_model_ordinal < m_snap_at.size() ? m_snap_at[m_model_ordinal]
+                                                                      : kNoSnap;
     m_model_ordinal++;
-    m_snap_first = m_snap_pos;
-    m_snap_pos += n;
   }
   if (!m_have_camera) {
     return;
@@ -1061,7 +1077,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     memcpy(&addr, &matrix_array[i * 4], 4);
     if (slots[i] < 128) {
       sent[slots[i] >> 6] |= 1ull << (slots[i] & 63);
-      if (m_snap_valid && m_snap_first + i < m_snap.size()) {
+      if (m_snap_first != kNoSnap && m_snap_first + i < m_snap.size()) {
         g_bones.set(slots[i], &m_snap[m_snap_first + i]);
       } else if (!(addr & 3)) {
         g_bones.set(slots[i], (const MercMat*)(rs.ee_mem + addr));

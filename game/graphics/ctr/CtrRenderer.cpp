@@ -1812,8 +1812,10 @@ void ctr_exit() {
 // (AI-assisted) 60 Hz vblanks between the last two ctr_vsync returns, 1 to 4: how long the frame
 // the game just finished was on screen. Jak II's pc-maybe-vsync (TARGET_3DS) gives it to the game
 // as its dog-ratio, the PS2's lag ratio, so a 30 fps frame (2 vblanks) moves its clocks by 1/30 s.
+// Counted on the vblank counter the frames are released by, so the game's time is the screen's.
 static u32 g_frame_vblanks = 1;
 static double g_last_vsync_ms = 0;
+static u32 g_last_vsync_vblank = 0;
 
 u32 ctr_vsync() {
   if (MasterExit == RuntimeExitStatus::RUNNING) {
@@ -1822,10 +1824,11 @@ u32 ctr_vsync() {
     ctr_gpu_wait_vblank(ctr_settings().fps_cap <= 30 ? 2 : 1);
     const double t1 = ctr_gpu_time_ms();
     g_ee.vsync_ms += t1 - t0;
+    const u32 vblank = ctr_gpu_release_now();
     if (g_last_vsync_ms != 0) {
-      const double vblanks = (t1 - g_last_vsync_ms) * (59.8261 / 1000.0);
-      g_frame_vblanks = (u32)std::clamp(std::lround(vblanks), 1L, 4L);
+      g_frame_vblanks = (u32)std::clamp<s32>((s32)(vblank - g_last_vsync_vblank), 1, 4);
     }
+    g_last_vsync_vblank = vblank;
     g_last_vsync_ms = t1;
   }
   g_frame_idx++;
@@ -2095,6 +2098,11 @@ double ctr_frame_ms_left() {
 
 u32 ctr_frame_vblanks() {
   return g_frame_vblanks;
+}
+
+// the 3DS renderer draws the frames (not the null or the OpenGL renderer)
+bool ctr_renderer_draws() {
+  return g_ctr_ready.load(std::memory_order_relaxed);
 }
 
 void ctr_game_watchdog_tick(void) {

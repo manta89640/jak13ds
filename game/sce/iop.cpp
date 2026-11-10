@@ -183,6 +183,10 @@ void SetMbxNotifyThread(s32 mbx, s32 thid) {
   iop->kernel.SetMbxNotifyThread(mbx, thid);
 }
 
+void NotifyThread(s32 thid) {
+  iop->kernel.NotifyThread(thid);
+}
+
 void SetOverlordStateHook(void (*hook)()) {
   iop->kernel.set_overlord_state_hook(hook);
 }
