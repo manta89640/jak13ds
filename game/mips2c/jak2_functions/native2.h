@@ -29,6 +29,10 @@ extern const NativeImpl render_sky_tri;
 extern const NativeImpl render_sky_quads;
 extern const NativeImpl method_32_sky_work;
 extern const NativeImpl method_33_sky_work;
+extern const NativeImpl pc_sky_3ds_on;
+extern const NativeImpl pc_sky_3ds_stars;
+extern const NativeImpl pc_sky_3ds_haze;
+extern const NativeImpl pc_sky_3ds_clouds;
 
 // native2_spatial_hash.cpp
 extern const NativeImpl method_18_grid_hash;

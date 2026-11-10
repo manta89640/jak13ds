@@ -1031,8 +1031,30 @@ void CtrDirect::set_record(bool on) {
   m_record = on;
 }
 
-void CtrDirect::replay_recorded(bool depth_tested) {
+void CtrDirect::record_mark(int id) {
+  flush();
+  if (m_record) {
+    m_rec.push_back({m_draw_state, false, (u32)m_rec_verts.size(), 0, id});
+  }
+}
+
+bool CtrDirect::prim_state(u64 prim, ctr_draw_state* out) {
+  handle_prim(prim);
+  if (m_state_dirty) {
+    update_draw_state();
+  }
+  *out = m_draw_state;
+  return !m_skip_prims;
+}
+
+void CtrDirect::replay_recorded(bool depth_tested, MarkFn at_mark, void* arg) {
   for (const auto& b : m_rec) {
+    if (b.mark >= 0) {
+      if (at_mark) {
+        at_mark(arg, b.mark, depth_tested);
+      }
+      continue;
+    }
     ctr_draw_state st = b.st;
     if (depth_tested) {
       // (AI-assisted, gpuopt) as CtrSky's deferred sky: only where the opaque draws left the

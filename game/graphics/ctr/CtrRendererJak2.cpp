@@ -30,6 +30,7 @@
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/CtrShadow.h"
 #include "game/graphics/ctr/CtrShadowJak2.h"
+#include "game/graphics/ctr/CtrSky.h"
 #include "game/graphics/ctr/CtrSprite.h"
 #include "game/graphics/ctr/CtrTexAnimJak2.h"
 #include "game/graphics/ctr/CtrVram.h"
@@ -227,9 +228,15 @@ class CtrJak2DirectRenderer : public CtrBucketRenderer {
     if (id == (int)jak2::BucketId::PROGRESS) {
       m_direct->enable_minimap();
     }
+    if (id == (int)jak2::BucketId::SKY_DRAW) {
+      m_sky = std::make_unique<CtrSkyJak2>();
+    }
   }
   void render(DmaFollower& dma, CtrRenderState& rs) override {
     m_direct->reset_state();
+    if (m_sky) {
+      m_sky->begin(rs.log_now);
+    }
     // (AI-assisted, gpuopt) sky_last for Jak II's sky (sky-work's GIF packets): its batches are
     // kept and drawn by the sky hook after the opaque level and models, depth tested against them
     // (as Jak 1's CtrSky): the ~3 screens of sky behind the city fail the depth test instead of
@@ -255,7 +262,7 @@ class CtrJak2DirectRenderer : public CtrBucketRenderer {
           // (AI-assisted, gpuopt) a texture upload after kept batches: they are drawn now, in
           // order (they may read what it changes), and the rest of the bucket as usual
           m_direct->set_record(false);
-          m_direct->replay_recorded(false);
+          m_direct->replay_recorded(false, &CtrJak2DirectRenderer::sky_item, this);
           defer = false;
         }
         dma.read_and_advance();
@@ -263,6 +270,23 @@ class CtrJak2DirectRenderer : public CtrBucketRenderer {
         continue;
       }
       auto data = dma.read_and_advance();
+      u64 prim;
+      if (m_sky && vif0.kind == VifCode::Kind::PC_PORT &&
+          CtrSkyJak2::packet_prim(vif0.immediate, data.data, data.size_bytes, &prim)) {
+        // the stars, the haze or the clouds as a packet: drawn by CtrSkyJak2 with the state the
+        // GS registers give its polygons, in the bucket's order
+        ctr_draw_state st;
+        if (m_direct->prim_state(prim, &st)) {
+          const int item = m_sky->add(vif0.immediate, data.data, st);
+          if (defer) {
+            m_direct->record_mark(item);
+          } else {
+            m_direct->flush();
+            m_sky->draw(item, false);
+          }
+        }
+        continue;
+      }
       if (data.size_bytes) {
         m_direct->render_vif(data.vif0(), data.vif1(), data.data, data.size_bytes);
       }
@@ -291,14 +315,20 @@ class CtrJak2DirectRenderer : public CtrBucketRenderer {
     ctr_gpu_soft_bucket("sky");
 #endif
     ctr_gpu_set_depth_far(1);
-    self->m_direct->replay_recorded(true);
+    self->m_direct->replay_recorded(true, &CtrJak2DirectRenderer::sky_item, self);
     ctr_gpu_set_depth_far(0);
 #ifndef __3DS__
     ctr_gpu_soft_bucket(keep.c_str());
 #endif
   }
 
+  // a sky packet's place among the kept batches (CtrDirect::record_mark)
+  static void sky_item(void* arg, int item, bool depth_tested) {
+    static_cast<CtrJak2DirectRenderer*>(arg)->m_sky->draw(item, depth_tested);
+  }
+
   std::unique_ptr<CtrDirect> m_direct;
+  std::unique_ptr<CtrSkyJak2> m_sky;  // the sky bucket's
 };
 
 // this frame ends with the menu's frozen frame drawn over it (ctr_jak2_menu_hold_draw)

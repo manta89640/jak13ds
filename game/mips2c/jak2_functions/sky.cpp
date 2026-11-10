@@ -894,6 +894,14 @@ void link() {
   gLinkedFunctionTable.reg("render-sky-quad", execute, 1024, &native2::render_sky_quad);
   gLinkedFunctionTable.reg("render-sky-quads", native2::render_sky_quads.as_exec, 64,
                            &native2::render_sky_quads);
+  gLinkedFunctionTable.reg("pc-sky-3ds?", native2::pc_sky_3ds_on.as_exec, 64,
+                           &native2::pc_sky_3ds_on);
+  gLinkedFunctionTable.reg("pc-sky-3ds-stars", native2::pc_sky_3ds_stars.as_exec, 64,
+                           &native2::pc_sky_3ds_stars);
+  gLinkedFunctionTable.reg("pc-sky-3ds-haze", native2::pc_sky_3ds_haze.as_exec, 64,
+                           &native2::pc_sky_3ds_haze);
+  gLinkedFunctionTable.reg("pc-sky-3ds-clouds", native2::pc_sky_3ds_clouds.as_exec, 64,
+                           &native2::pc_sky_3ds_clouds);
 }
 
 } // namespace render_sky_quad
