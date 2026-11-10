@@ -5810,9 +5810,12 @@ static void apt_gate_hook(APT_HookType type, void* param) {
          (unsigned long)s_apt.abandoned);
 }
 
-/* main thread, after every aptMainLoop (ctr_port.c ctr_main_loop): open a closed gate */
+/* main thread, after every aptMainLoop (ctr_port.c ctr_main_loop): open a closed gate. Not when
+ * the HOME Menu closes the app: the GPU stays the HOME Menu's (no ONRESTORE), and a frame or
+ * texture copy sent now would run on top of it and hang the console; the process ends with the
+ * render thread still waiting at the gate. */
 static void apt_gate_after(void) {
-  if (!s_apt.gate) {
+  if (!s_apt.gate || aptShouldClose()) {
     return;
   }
   if (ctr_vprobe_on) {
