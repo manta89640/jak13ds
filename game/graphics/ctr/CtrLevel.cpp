@@ -12245,6 +12245,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       lev.lod_detail_q.assign(lev.lod_groups.size(), 0xff);
     }
     u8* const lod_q = lev.lod_detail_q.data();
+    if (lev.lod_switch_at.size() != lev.lod_groups.size()) {
+      lev.lod_switch_at.assign(lev.lod_groups.size(), 0);
+    }
+    u16* const lod_sw = lev.lod_switch_at.data();
+    const u16 f16 = (u16)rs.frame_idx;
+    constexpr u16 kLodDwellFrames = 45;
     if (has_units && lev.lod_hold_since.size() != lev.lod_groups.size()) {
       lev.lod_hold_since.assign(lev.lod_groups.size(), 0);
     }
@@ -12530,6 +12536,31 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       } else if (!n) {
         keep_far = false;  // (beyond its distance: far anyway)
       }
+      // ctr_pop: these switch without a morph
+      const bool forced = n != n_nat && lev.group_unit_count.size() > g && lev.group_unit_count[g];
+      // in view, a switch back within kLodDwellFrames of the last one waits while the version
+      // drawn is there and not plainly wrong (a camera swinging across a switch distance)
+      if ((st & 2) && ((st & 1) != 0) != n && !forced && !keep_far && !g_screen_black &&
+          (u16)(f16 - lod_sw[g]) < kLodDwellFrames && sphere_in_view(cam, lg.bsphere)) {
+        if (n) {
+          const float e = by_error ? lev.lod_error[g] : lg.dist;
+          const float lim = e * k / 1.5f + lg.bsphere[3];
+          n = d2 < lim * lim;
+        } else {
+          bool ok = !has_units;
+          if (has_units && g < lev.group_unit_count.size() && lev.group_unit_count[g]) {
+            ok = true;
+            const u32* gu = &lev.group_units[lev.group_unit_first[g]];
+            for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
+              ok = ok && lev.unit_ok[gu[j]] == 1;
+            }
+          }
+          n = ok;
+        }
+      }
+      if ((st & 2) && ((st & 1) != 0) != n) {
+        lod_sw[g] = f16;
+      }
 #ifndef __3DS__
       // (AI-assisted, lodnear) host log, env CTR_LOD_LOG: every switch of a group in view, its
       // distance, the PS2 far-plane and the screen-error distance, and why it is far
@@ -12550,8 +12581,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                  std::sqrt(d2) / 4096.f, (sw * k) / 4096.f, lg.bsphere[3] / 4096.f,
                  keep_far ? 1 : 0);  // (titlemove: which group, why)
       }
-      // ctr_pop: these switch without a morph
-      const bool forced = n != n_nat && lev.group_unit_count.size() > g && lev.group_unit_count[g];
       if (forced && pop_on && !far_level) {
         m_pop_kept.push_back((u32)g);
       }

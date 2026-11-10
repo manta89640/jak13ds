@@ -309,6 +309,7 @@ struct CtrLevelData {
   // is out of view, or when the old and the new decide alike.
   std::vector<u8> chunk_detail_q;
   std::vector<u8> lod_detail_q;
+  std::vector<u16> lod_switch_at;  // per tie LOD group: the frame (u16) it last switched version
   // (AI-assisted, title-popin) per chunk of tiers 1/2: a sphere around its lod_center holding both
   // versions of the cell (the same for both: their in-view tests agree), x y z r
   std::vector<float> lod_cell_sphere;
