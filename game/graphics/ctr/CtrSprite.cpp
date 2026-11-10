@@ -291,6 +291,14 @@ void CtrSpriteRenderer::log_slow_frame(CtrRenderState& rs,
     }
   }
   if (rs.log_now) {
+    if (m_jak2 && m_stats.sprites_3d && m_rgb3d_frames) {
+      lg::info("[ctr] 3d sprites: {:.1f} per frame, depth as the PICA's z; {:.1f}% of those also "
+               "drawn the frame before changed brightness by over a quarter (the game's own color "
+               "per frame: neon, signs at night)",
+               (double)m_stats.sprites_3d / m_rgb3d_frames,
+               m_rgb3d_seen ? 100.0 * m_rgb3d_swings / m_rgb3d_seen : 0.0);
+    }
+    m_rgb3d_frames = m_rgb3d_seen = m_rgb3d_swings = 0;
     lg::debug("[ctr] sprite: {} 2d ({} made smaller), {} hud, {} 3d sprites, {} distort, {} faint "
               "big ones left out, {} with no visible texel, {} trimmed, {} draws (since the last "
               "stats)",
@@ -320,6 +328,9 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
   m_last_tex_valid = false;
   m_resolved_gen++;
   m_have_last_ad = false;
+  m_frame_seq++;
+  m_chunk3d = 0;
+  m_rgb3d_frames++;
   // (AI-assisted) the settings looked up once per frame (each ctr_settings() call is a function
   // call with a memory barrier for its static's guard)
   const CtrSettings& cs = ctr_settings();
@@ -882,7 +893,11 @@ void CtrSpriteRenderer::flush(bool hud) {
       }
     }
     if (!b.clip.empty()) {
-      ctr_gpu_draw_clip(&b.state, b.clip.data(), (int)b.clip.size());
+      if (m_jak2) {
+        ctr_gpu_draw_clip_pz(&b.state, b.clip.data(), (int)b.clip.size());
+      } else {
+        ctr_gpu_draw_clip(&b.state, b.clip.data(), (int)b.clip.size());
+      }
       m_stats.draws++;
     }
     b.verts.clear();
@@ -1013,6 +1028,22 @@ void CtrSpriteRenderer::resolve_state(const AdGif& ad, Mode mode) {
   }
 }
 
+void CtrSpriteRenderer::note_rgb3d(int slot, int sum) {
+  if (slot >= kRgbSlots) {
+    return;
+  }
+  if (!m_rgb3d) {
+    m_rgb3d.reset(new u32[kRgbSlots]());
+  }
+  const u32 prev = m_rgb3d[slot];
+  if ((prev >> 16) == ((m_frame_seq - 1) & 0xffffu)) {
+    const int p = (int)(prev & 0xffffu), hi = std::max(p, sum), d = hi - std::min(p, sum);
+    m_rgb3d_seen++;
+    m_rgb3d_swings += hi >= 48 && 4 * d > hi;
+  }
+  m_rgb3d[slot] = (m_frame_seq & 0xffffu) << 16 | (u32)sum;
+}
+
 void CtrSpriteRenderer::resolve_level(Resolved& r, int j) {
   float* box = r.box[j];
   const bool level = r.trim_ok && (j == 0 || r.alpha_levels);
@@ -1138,8 +1169,10 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
   // position that times w, so the division cancels: c = t * k + w * o (see the corner loop)
   const float k3x = m_pfog0 * (1.f / 256.f), o3x = (m_hvdf_offset.x() - 2048.f) * (1.f / 256.f);
   const float k3y = -m_pfog0 * kInvY, o3y = (2048.f - m_hvdf_offset.y()) * kInvY;
-  const float k3z = m_pfog0 * (1.f / 8388607.5f),
-              o3z = m_hvdf_offset.z() * (1.f / 8388607.5f) - 1.f;
+  // Jak II: z as the PICA's, -(GS z / (2^24 - 1)) * w, in float32 here (ctr_gpu_draw_clip_pz)
+  const float k3z = m_jak2 ? m_pfog0 * (-1.f / 16777215.f) : m_pfog0 * (1.f / 8388607.5f);
+  const float o3z = m_jak2 ? m_hvdf_offset.z() * (-1.f / 16777215.f)
+                           : m_hvdf_offset.z() * (1.f / 8388607.5f) - 1.f;
   // (AI-assisted) the frame's values in locals: the vertex stores could be to any float as far as
   // the compiler knows, which made it load the matrix and these again for every sprite
   float m[16];
@@ -1156,6 +1189,7 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
     m_have_last_ad = false;
   }
   const int fill = m_particle_fill;
+  const int slot0 = mode == MODE_3D ? kSpritesPerChunk * m_chunk3d++ : 0;
   // (AI-assisted) particle_fill pair thinning: the keeper drawn last (its index in the chunk) and
   // how much of its partner's alpha it took
   u32 pair_keeper = ~0u;
@@ -1452,6 +1486,9 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
       cv[3] = clip[3];
       cv[4] = clip[1];
       cv[5] = clip[2];
+      if (jak2) {
+        note_rgb3d(slot0 + (int)i, r + g + b);
+      }
       continue;
     }
 #ifndef __3DS__
