@@ -27,3 +27,7 @@ void ctr_jak2_background_buckets(const CtrJak2BucketSet& set, CtrLevels* levels,
 /*! (AI-assisted, j2gaps) bucket 3 of this frame (DMA tags first_tag..end_tag) asks for a copy of
  * the screen (a menu opens): the frame then clears only the depth (CtrJak2BlitRenderer) */
 bool ctr_jak2_frame_copies_screen(const void* ee_mem, u32 first_tag, u32 end_tag);
+
+/*! Draws the menu's frozen frame over a frame the game holds the display in (bucket 3's 0x11),
+ * after all buckets. */
+void ctr_jak2_menu_hold_draw();

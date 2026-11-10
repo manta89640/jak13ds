@@ -245,6 +245,14 @@ int ctr_gpu_copy_screen_part(float x0, float x1);
 /* (AI-assisted, j2gaps) frees the screen copy's texture (the next copy makes it again): Jak II's
  * menu keeps a copy of the game's last frame only while the menu shows it */
 void ctr_gpu_screen_copy_release(void);
+/* A copy of the whole screen that is kept (Jak II's menu background can't be copied again): in
+ * linear memory when there is room (VRAM may be gone after the HOME Menu or sleep), and pinned at
+ * level 2. -1 if not available.
+ * ctr_gpu_screen_copy_pin: 2: the other copy functions return -1 and leave it as it is; 1: they
+ * copy into it again; 1 and 2: no texture pool takes its memory; 0: not pinned.
+ * ctr_gpu_screen_copy_release unpins. */
+int ctr_gpu_copy_screen_keep(void);
+void ctr_gpu_screen_copy_pin(int level);
 /* (AI-assisted) Render to texture (ocean env map, minimap): an RGBA8 texture the GPU draws into,
  * in VRAM when there is room (else linear memory: make it before the level texture pools fill
  * VRAM), and a D16 depth buffer for

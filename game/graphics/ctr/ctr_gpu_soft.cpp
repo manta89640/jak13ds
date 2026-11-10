@@ -2165,8 +2165,14 @@ int ctr_gpu_copy_screen_part(float x0, float x1) {
 }
 
 static int s_screen_copy = -1;  // (AI-assisted) ctr_gpu_copy_screen's texture
+static int s_screen_copy_pinned = 0;
+
+void ctr_gpu_screen_copy_pin(int level) {
+  s_screen_copy_pinned = s_screen_copy >= 0 ? level : 0;
+}
 
 void ctr_gpu_screen_copy_release(void) {
+  s_screen_copy_pinned = 0;
   if (s_screen_copy >= 0) {
     ctr_gpu_tex_delete(s_screen_copy);
     s_screen_copy = -1;
@@ -2174,6 +2180,9 @@ void ctr_gpu_screen_copy_release(void) {
 }
 
 int ctr_gpu_copy_screen(void) {
+  if (s_screen_copy_pinned == 2) {
+    return -1;
+  }
   sky_hook(nullptr);
   if (softstats::enabled()) softstats::cur->copy_rows += 50;
   int& handle = s_screen_copy;
@@ -2184,6 +2193,13 @@ int ctr_gpu_copy_screen(void) {
   }
   g_soft.textures[handle].rgba = g_soft.color;
   return handle;
+}
+
+int ctr_gpu_copy_screen_keep(void) {
+  s_screen_copy_pinned = 0;
+  const int h = ctr_gpu_copy_screen();
+  s_screen_copy_pinned = h >= 0 ? 2 : 0;
+  return h;
 }
 
 double ctr_gpu_take_screen_copy_ms(void) {

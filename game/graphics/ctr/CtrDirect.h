@@ -28,7 +28,7 @@ class CtrVram;
  */
 void ctr_direct_set_menu_screen(int handle);
 int ctr_direct_menu_screen();
-/*! drawn since the last call (the copy is freed once the menu no longer draws it) */
+/*! drawn since the last call (the copy stands for tbp 0x3300 while the menu draws it) */
 bool ctr_direct_take_menu_screen_drawn();
 
 #ifndef __3DS__
