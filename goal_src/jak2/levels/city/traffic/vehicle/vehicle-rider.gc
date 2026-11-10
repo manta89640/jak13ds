@@ -368,6 +368,12 @@ This commonly includes things such as:
   (logior! (-> this flags) 1)
   (set! (-> this draw lod-set lod 0 dist) 122880.0)
   (set! (-> this draw lod-set lod 1 dist) 286720.0)
+  ;; og:preserve-this 3DS: a rider has no collision and nothing reads its joints but its drawing
+  (#when TARGET_3DS
+    (if (nonzero? (-> this skel))
+        (logior! (-> this skel status) (joint-control-status pc-late-math))
+        )
+    )
   (vehicle-rider-method-33 this)
   0
   (none)
@@ -407,6 +413,11 @@ This commonly includes things such as:
   (logior! (-> this flags) 9)
   (set! (-> this draw lod-set lod 0 dist) 122880.0)
   (set! (-> this draw lod-set lod 1 dist) 286720.0)
+  (#when TARGET_3DS
+    (if (nonzero? (-> this skel))
+        (logior! (-> this skel status) (joint-control-status pc-late-math))
+        )
+    )
   (vehicle-rider-method-33 this)
   0
   (none)
