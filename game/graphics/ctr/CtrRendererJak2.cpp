@@ -664,6 +664,7 @@ void CtrRenderer::prepare_textures(const void* ee_mem, u32 chain_offset) {
 }
 
 void CtrRenderer::tex_frame_done_jak2() {
+  m_vram->prewarm(4.0);  // the large font's page, behind the boot logos
   auto& anim = tex_anim();
   anim.frame_done();
   if (m_rs.log_now) {
