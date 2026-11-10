@@ -540,6 +540,10 @@ void ctr_heap_set_linear_floor(size_t bytes) {
   g_linear_floor.store(bytes < kLinearFloorMin ? kLinearFloorMin : bytes);
 }
 
+uint32_t ctr_heap_linear_bytes() {
+  return g_linear_bytes.load();
+}
+
 void* ctr_heap_malloc_optional(size_t n) {
 #ifdef OG3DS_HEAP_TRACE
   __malloc_lock(_REENT);

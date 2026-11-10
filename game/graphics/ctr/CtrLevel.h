@@ -911,6 +911,7 @@ class CtrLevels {
   void pop_log();
   /*! (AI-assisted, j2-mem) the levels' memory, the free linear memory and heap (render thread) */
   void log_memory();
+  void log_linear(u32 arena_used);
   /*! (AI-assisted, streaming) host check (env CTR_STREAM_CHECK): the counts of this frame's draw
    * of a level (CtrTfragRenderer::draw_level) */
   struct StreamCheck {

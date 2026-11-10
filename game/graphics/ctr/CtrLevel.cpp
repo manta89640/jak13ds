@@ -9837,6 +9837,84 @@ void CtrLevels::log_memory() {
            "heap KB){}",
            m_render_frame.load(), level_mem_text(all), as.capacity / 1024, ctr_vram_copy_kb(), per,
            free);
+  log_linear(as.used);
+}
+
+// the linear heap by what holds it, each part as the heap counts it (the levels' by the GPU
+// layer's sizes of their meshes and pools, not level_mem's model)
+void CtrLevels::log_linear(u32 arena_used) {
+  ctr_gpu_linear_account a;
+  ctr_gpu_linear_account_get(&a);
+  s64 lev_meshes = 0, lev_pools = 0, pre = 0, share = 0;
+  auto held = [](const CtrLevelData& lev, s64* meshes, s64* pools) {
+    for (const int m : lev.meshes) {
+      *meshes += ctr_gpu_mesh_linear_bytes(m);
+    }
+    *meshes += ctr_gpu_mesh_linear_bytes(lev.wind_mesh) +
+               ctr_gpu_mesh_linear_bytes(lev.normals_mesh);
+    for (const auto& mm : lev.merc_models) {
+      *meshes += ctr_gpu_mesh_linear_bytes(mm.mesh);
+    }
+    for (const int p : lev.tex_pools) {
+      *pools += ctr_gpu_pool_linear_bytes(p);
+    }
+  };
+  if (m_common) {
+    held(*m_common, &lev_meshes, &lev_pools);
+  }
+  for (const auto& [name, lev] : m_levels) {
+    held(*lev, &lev_meshes, &lev_pools);
+  }
+  for (const auto& [name, lev] : m_extras) {
+    held(*lev, &lev_meshes, &lev_pools);
+  }
+  s64 pre_meshes = 0, pre_pools = 0;
+  for (const auto& [name, p] : m_prefetched) {
+    held(*p.lev, &pre_meshes, &pre_pools);
+  }
+  pre = pre_meshes + pre_pools;
+  {
+    std::lock_guard<std::mutex> lk(m_share_lock);
+    for (const auto& [id, grp] : m_share_groups) {
+      for (const int p : grp.pools) {
+        share += ctr_gpu_pool_linear_bytes(p);
+      }
+    }
+  }
+  std::string loading;
+  {
+    std::lock_guard<std::mutex> lk(m_lock);
+    if (!m_loading.empty()) {
+      loading = fmt::format("; the loader is at work on {} (what it made so far counts as outside "
+                            "the levels)",
+                            m_loading);
+    }
+  }
+  s64 sound = 0, heap_blocks = 0;
+#ifdef __3DS__
+  sound = ctr_audio_linear_bytes();
+  heap_blocks = ctr_heap_linear_bytes();
+#endif
+  const s64 tex = (s64)a.tex_compact + a.tex_plain + a.tex_target + a.tex_screen + a.tex_copies;
+  const s64 waiting = (s64)a.mesh_pending + a.pool_pending + a.tex_pending + a.staging;
+  auto kb = [](s64 b) { return b / 1024; };
+  lg::info("[ctr] linear (frame {}): {} KB = free {} + levels' meshes {} + levels' texture pools "
+           "{} (shared groups' {} of it) + stream arena {} ({} used) + prefetched levels {} + "
+           "textures outside the pools {} (compact {} in {}, plain {} in {}, of the plain {} the "
+           "animation slots'; render targets {}, screen copy {}, second copies {}) + meshes "
+           "outside the levels {} (of {} in {} meshes) + their second vertex buffers {} + pools "
+           "outside the levels {} + waiting for their free {} (meshes {}, pools {}, textures {}, "
+           "staging {}) + fixed buffers {} + before the renderer {} + sound {} + heap blocks {} + "
+           "unknown {}{}",
+           m_render_frame.load(), kb(a.heap), kb(a.free), kb(lev_meshes), kb(lev_pools + share),
+           kb(share), kb(a.blocks), kb(arena_used), kb(pre), kb(tex), kb(a.tex_compact),
+           a.tex_compact_count, kb(a.tex_plain), a.tex_plain_count, kb(a.tex_anim),
+           kb(a.tex_target), kb(a.tex_screen), kb(a.tex_copies),
+           kb((s64)a.meshes - lev_meshes - pre_meshes), kb(a.meshes), a.mesh_count,
+           kb(a.mesh_copies), kb((s64)a.pools - lev_pools - share - pre_pools), kb(waiting),
+           kb(a.mesh_pending), kb(a.pool_pending), kb(a.tex_pending), kb(a.staging), kb(a.fixed),
+           kb(a.before), kb(sound), kb(heap_blocks), kb((s64)a.other - sound - heap_blocks),
+           loading);
 }
 
 void CtrLevels::pop_log() {
