@@ -140,7 +140,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.distort_copy_rows = v != "full";  // (AI-assisted) rows | full
     } else if (key == "shadows") {
       // (AI-assisted) full | blob | off (on = full)
-      if (v == "full" || parse_bool(v)) {
+      if (v == "full" || v == "all" || parse_bool(v)) {
         s.shadows = CtrSettings::ShadowMode::Full;
       } else if (v == "blob") {
         s.shadows = CtrSettings::ShadowMode::Blob;
@@ -148,7 +148,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
         s.shadows = CtrSettings::ShadowMode::Off;
       } else {
         if (!s_quiet) {
-          lg::warn("[ctr] {}:{}: shadows = {}: expected full, blob or off", path.string(), n, v);
+          lg::warn("[ctr] {}:{}: shadows = {}: expected full, all, blob or off", path.string(), n, v);
         }
       }
     } else if (key == "shadow_casters") {
@@ -312,7 +312,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
                key == "mips2c_native_off" || key == "perf_sections" || key == "hitch_ms" ||
                key == "args" ||
                key == "listener" || key == "screenshots" || key == "pad_script" ||
-               key == "debug_log" || key == "particle_density" ||
+               key == "debug_log" || key == "particle_density" || key == "traffic_density" ||
                key == "shield_density" ||
                key == "io_checksum" || key == "anim_lod" || key == "io_cache" ||
                key == "log_async" || key == "c3l_read_buffer" || key == "text_scale" ||
@@ -426,7 +426,7 @@ CtrSettings load() {
   // (AI-assisted) the preset and the user keys' values
   const char* preset_name = file_get(&fl, "preset");
   if (preset_name && preset_name[0] && !ctr_cfg_preset_named(preset_name)) {
-    lg::warn("[ctr] config.ini: preset = {}: expected normal, safe, bench or breakdown; normal",
+    lg::warn("[ctr] config.ini: preset = {}: expected normal, full, safe, bench or breakdown; normal",
              preset_name);
   }
   for (const auto& k : fl.keys) {
