@@ -702,6 +702,21 @@
     )
   )
 
+;; og:preserve-this 3DS (config.ini button_art): the font's pad symbols are the 3DS buttons'
+;; letters (game/graphics/ctr/CtrButtonArt.h), in the New 3DS's colors with the game's own
+;; values: Y (pad-square) the triangle's green, X (pad-triangle) the cross's blue, B (pad-x)
+;; progress-old-yellow; A (pad-circle) stays red
+(#when TARGET_3DS
+  (define-extern *pc-3ds-button-art* symbol)
+  (when *pc-3ds-button-art*
+    (dotimes (j 4)
+      (set! (-> *font-work* color-table 24 color j) (the-as rgba #x804c6510))
+      (set! (-> *font-work* color-table 26 color j) (the-as rgba #x80784a46))
+      (set! (-> *font-work* color-table 27 color j) (the-as rgba #x80337b7f))
+      )
+    )
+  )
+
 (defun font-set-tex0 ((arg0 (pointer gs-tex0)) (arg1 texture) (arg2 int) (arg3 int) (arg4 int))
   "Write the TEX0 parameters for a font"
   (set! (-> arg0 0) (new 'static 'gs-tex0
