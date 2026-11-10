@@ -163,6 +163,10 @@ class CtrVram {
   void clear_cache();
   // (AI-assisted) drop the cached textures ctr_button_art::patch may change
   void drop_art_textures();
+  // Frees the decoded textures no lookup asked for since the last call: the ones kept aside go,
+  // and every cached one is kept aside until its next lookup takes it back (no decode). The
+  // relocated ones (the font pages) stay. Between frames (no texture of a frame in use).
+  void trim();
 
   struct Stats {
     int uploads = 0;          // texture page uploads

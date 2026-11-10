@@ -329,6 +329,7 @@ typedef struct {
   int ext;
   u32 tail_off, tail_bytes; /* ctr_gpu_mesh_begin_tail / _ext_tail: at verts + tail_off */
   u32 col_off; /* ctr_gpu_mesh_split_colors: the colors' buffer at verts + col_off (0: none) */
+  u32 lin_bytes; /* the linear heap's bytes of verts and indices (0: ext) */
 } MeshSlot;
 static void (*s_ext_free)(void* mem); /* (AI-assisted, streaming) ctr_gpu_set_ext_free */
 
@@ -887,6 +888,7 @@ static int reserve_mesh_slot(void) {
     if (g.meshes[i].used == 0) {
       g.meshes[i].used = 3;
       g.meshes[i].col_off = 0;
+      g.meshes[i].lin_bytes = 0;
       slot = i;
       break;
     }
@@ -1811,10 +1813,15 @@ static void flush_selftest(void) {
 
 static int top_target_setup(void);
 static void vprobe_boot(void);
+extern u32 __ctru_linear_heap_size;
+static u32 s_lin_before; /* the linear heap's bytes in use when ctr_gpu_init began */
 int ctr_gpu_init(void) {
   if (g.ready) {
     return 0;
   }
+  ctr_linear_lock();
+  s_lin_before = __ctru_linear_heap_size - (u32)linearSpaceFree();
+  ctr_linear_unlock();
   ctr_vprobe_enable(ctr_config_bool("vram_probe", 0));
   if (!C3D_Init(CMDBUF_BYTES)) {
     return -1;
@@ -8533,6 +8540,7 @@ int ctr_gpu_mesh_begin_tail(int vertex_count, int tail_bytes, int index_count, v
     ctr_linear_unlock();
     return -1;
   }
+  g.meshes[slot].lin_bytes = linearGetSize(v) + linearGetSize(ix);
   ctr_linear_unlock();
   g.meshes[slot].verts = v;
   g.meshes[slot].ext = 0; /* (AI-assisted, streaming) */
@@ -8551,9 +8559,14 @@ void ctr_gpu_set_ext_free(void (*fn)(void* mem)) {
   s_ext_free = fn;
 }
 
+static u32 s_block_bytes; /* ctr_gpu_linear_block's, as the linear heap counts them */
+
 void* ctr_gpu_linear_block(unsigned int bytes) {
   ctr_linear_lock();
   void* p = linearAlloc(bytes);
+  if (p) {
+    s_block_bytes += linearGetSize(p);
+  }
   ctr_linear_unlock();
   return p;
 }
@@ -8563,6 +8576,7 @@ void ctr_gpu_linear_block_free(void* p) {
     return;
   }
   ctr_linear_lock();
+  s_block_bytes -= linearGetSize(p);
   linearFree(p);
   ctr_linear_unlock();
 }
@@ -9537,6 +9551,7 @@ int ctr_gpu_skinned_mesh_create(const void* verts, int vertex_count, const uint1
     ctr_linear_unlock();
     return -1;
   }
+  g.meshes[slot].lin_bytes = linearGetSize(v) + linearGetSize(ix);
   ctr_linear_unlock();
   memcpy(v, verts, vbytes);
   memcpy(ix, indices, ibytes);
@@ -10598,4 +10613,142 @@ void ctr_gpu_bench_restore(void) {
   g.skin_bl_valid = 0;
   g.bound_tex = NULL;
   g.proc_radial = -1;
+}
+
+/* ---------------- the linear heap's account ---------------- */
+
+unsigned int ctr_gpu_mesh_linear_bytes(int mesh) {
+  return mesh >= 0 && mesh < MAX_MESHES && g.meshes[mesh].used ? g.meshes[mesh].lin_bytes : 0;
+}
+
+unsigned int ctr_gpu_pool_linear_bytes(int pool) {
+  unsigned int n = 0;
+  if (pool >= 0 && pool < MAX_POOLS) {
+    ctr_linear_lock();
+    if (g.pools[pool].used && g.pools[pool].linear) {
+      n = linearGetSize(g.pools[pool].linear);
+    }
+    ctr_linear_unlock();
+  }
+  return n;
+}
+
+static u32 lin_size(const void* p) {
+  return p ? linearGetSize((void*)p) : 0;
+}
+
+void ctr_gpu_linear_account_get(ctr_gpu_linear_account* out) {
+  /* a texture slot is 1 for a render target's texture, 2 for an animation slot's */
+  static uint8_t mark[MAX_TEXTURES];
+  memset(out, 0, sizeof(*out));
+  if (!g.ready) {
+    return;
+  }
+  ctr_linear_lock();
+  out->heap = __ctru_linear_heap_size;
+  out->free = (unsigned int)linearSpaceFree();
+  out->before = s_lin_before;
+  out->blocks = s_block_bytes;
+  out->fixed = lin_size(__C3D_Context.cmdBuf) + lin_size(s_vbufs[0] ? s_vbufs[0] : g.vbuf) +
+               lin_size(s_vbufs[1]) + lin_size(g.quad_indices) + lin_size(s_grid_idx) +
+               lin_size(s_pres.fence) + lin_size(s_pres.ids) + lin_size(s_bd.probe) +
+               lin_size(s_bd.scis) + lin_size(s_vcheck.buf) + lin_size(s_b32_strip);
+  for (int i = 0; i < PRESENT_BUFS; i++) {
+    out->fixed += lin_size(s_pres.buf[i]);
+  }
+  if (g.fog_tex_valid) {
+    out->fixed += lin_size(g.fog_tex.data);
+    for (int i = 0; i < FOG_RAMP_COPIES; i++) {
+      if (s_fog_ramp_cur >= 0 && s_fog_ramp[i].data != g.fog_tex.data) {
+        out->fixed += lin_size(s_fog_ramp[i].data);
+      }
+    }
+  }
+  if (s_ocean_fade_ok > 0) {
+    out->fixed += lin_size(s_ocean_fade[0].data) + lin_size(s_ocean_fade[1].data);
+  }
+  for (int i = 0; i < g.pending_staging_count; i++) {
+    out->staging += lin_size(g.pending_staging[i]);
+  }
+  for (int i = 0; i < g.held_staging_count; i++) {
+    out->staging += lin_size(g.held_staging[i]);
+  }
+  for (int i = 0; i < MAX_MESHES; i++) {
+    const MeshSlot* m = &g.meshes[i];
+    if (!m->used) {
+      continue;
+    }
+    /* (lin_bytes is 0 for a mesh in a caller's block; 3: being made, verts_alt not set yet) */
+    const u32 alt = m->used == 3 ? 0 : lin_size(m->verts_alt);
+    if (m->used == 2 || m->used == 4) {
+      out->mesh_pending += m->lin_bytes + alt;
+    } else {
+      out->meshes += m->lin_bytes;
+      out->mesh_count += m->lin_bytes != 0;
+      out->mesh_copies += alt;
+    }
+  }
+  for (int i = 0; i < MAX_POOLS; i++) {
+    const TexPool* p = &g.pools[i];
+    if (p->used == 2 || p->used == 4) {
+      out->pool_pending += lin_size(p->linear);
+    } else if (p->used) {
+      out->pools += lin_size(p->linear);
+      out->pool_count++;
+    }
+  }
+  memset(mark, 0, sizeof(mark));
+  for (int i = 0; i < CTR_ANIM_SLOTS; i++) {
+    if (s_anim_slot_next[i] > 0 && s_anim_slot_next[i] <= MAX_TEXTURES) {
+      mark[s_anim_slot_next[i] - 1] = 2;
+    }
+  }
+  for (int i = 0; i < MAX_RT; i++) {
+    if (s_rt[i].depth && !s_rt[i].depth_vram) {
+      out->tex_target += lin_size(s_rt[i].depth);
+    }
+    if (!s_rt[i].tex1) {
+      continue;
+    }
+    mark[s_rt[i].tex1 - 1] = 1;
+    for (int l = 0; l < RT_MIP_MAX; l++) {
+      if (s_rt[i].mip[l] >= 0 && s_rt[i].mip[l] < MAX_TEXTURES) {
+        mark[s_rt[i].mip[l]] = 1;
+      }
+    }
+  }
+  for (int i = 0; i < MAX_TEXTURES; i++) {
+    const TexSlot* t = &g.textures[i];
+    /* (3: being made, its fields not all set; a pool's texture has no memory of its own) */
+    if ((t->used != 1 && t->used != 2 && t->used != 4) || t->pool >= 0) {
+      continue;
+    }
+    const u32 own = lin_size(t->arena_off >= 0 ? t->home : t->tex.data);
+    const u32 alt = lin_size(t->alt);
+    if (t->used != 1) {
+      out->tex_pending += own + alt;
+    } else if (i == g.screen_tex) {
+      out->tex_screen += own;
+    } else if (mark[i] == 1) {
+      out->tex_target += own;
+    } else {
+      if (t->compact) {
+        out->tex_compact += own;
+        out->tex_compact_count++;
+      } else {
+        out->tex_plain += own;
+        out->tex_plain_count += own != 0;
+      }
+      out->tex_copies += alt;
+      if (mark[i] == 2) {
+        out->tex_anim += own + alt;
+      }
+    }
+  }
+  ctr_linear_unlock();
+  out->other = (int)(out->heap - out->free) -
+               (int)(out->before + out->fixed + out->meshes + out->mesh_copies + out->mesh_pending +
+                     out->pools + out->pool_pending + out->tex_compact + out->tex_plain +
+                     out->tex_target + out->tex_screen + out->tex_copies + out->tex_pending +
+                     out->staging + out->blocks);
 }

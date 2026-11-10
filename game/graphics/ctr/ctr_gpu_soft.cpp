@@ -2675,6 +2675,38 @@ unsigned int ctr_gpu_linear_free(void) {
 unsigned int ctr_gpu_linear_largest(void) {
   return ctr_gpu_linear_free();  // (the model has no pieces)
 }
+unsigned int ctr_gpu_mesh_linear_bytes(int mesh) {
+  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used ||
+      g_soft.meshes[mesh].ext) {
+    return 0;
+  }
+  const auto& m = g_soft.meshes[mesh];
+  return (unsigned int)(m.verts.size() + m.indices.size() * 2);
+}
+unsigned int ctr_gpu_pool_linear_bytes(int pool) {
+  return pool >= 0 && pool < (int)g_soft.pools.size() && g_soft.pools[pool].used
+             ? (unsigned int)g_soft.pools[pool].data.size()
+             : 0;
+}
+// the model's parts: pools, meshes, blocks (the textures made one by one are not in it)
+void ctr_gpu_linear_account_get(ctr_gpu_linear_account* out) {
+  *out = ctr_gpu_linear_account();
+  for (size_t i = 0; i < g_soft.pools.size(); i++) {
+    const unsigned int b = ctr_gpu_pool_linear_bytes((int)i);
+    out->pools += b;
+    out->pool_count += b != 0;
+  }
+  for (size_t i = 0; i < g_soft.meshes.size(); i++) {
+    const unsigned int b = ctr_gpu_mesh_linear_bytes((int)i);
+    out->meshes += b;
+    out->mesh_count += b != 0;
+  }
+  for (const auto& [p, n] : s_soft_blocks) {
+    out->blocks += n;
+  }
+  out->free = ctr_gpu_linear_free();
+  out->heap = out->free + out->pools + out->meshes + out->blocks;
+}
 static void soft_mesh_free(int mesh) {
   void* ext = g_soft.meshes[mesh].ext;
   if (life::on() && mesh < life::kMax) {

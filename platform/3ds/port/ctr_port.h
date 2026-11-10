@@ -146,6 +146,8 @@ int ctr_core1_enable(void);
  * ctr_audio_init returns 0 on success, or a negative error (nothing was started). */
 int ctr_audio_init(unsigned int rate, unsigned int frames, unsigned int nbufs);
 void ctr_audio_exit(void);
+/* the linear memory the sound holds (ndspInit and its buffers; 0 while it is off) */
+unsigned int ctr_audio_linear_bytes(void);
 /* (AI-assisted) The app is closing (HOME Menu / power button): stop the output and release the
  * DSP right away. Doesn't wait for the mixer thread or take locks; the process exits next. */
 void ctr_audio_close_for_exit(void);

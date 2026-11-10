@@ -628,6 +628,34 @@ void ctr_gpu_linear_block_free(void* p);
 unsigned int ctr_gpu_linear_free(void);
 /* the largest block of linear memory one allocation can get now (probes: not every frame) */
 unsigned int ctr_gpu_linear_largest(void);
+/* The linear heap by what holds it, in bytes as the heap counts them (the host: its model). The
+ * GPU layer's tables, walked under the linear lock: once per statistics line. other: the heap's
+ * bytes in use that nothing here holds (the sound's buffers, the malloc heap's last-resort
+ * blocks, a texture or mesh being made). */
+typedef struct {
+  unsigned int heap, free;
+  unsigned int before;                    /* in use before ctr_gpu_init (the screens' buffers) */
+  unsigned int fixed;                     /* command, vertex, present and probe buffers, ramps */
+  unsigned int meshes, mesh_count;        /* static meshes (not the ones in a linear block) */
+  unsigned int mesh_copies;               /* second vertex buffers of meshes rewritten per frame */
+  unsigned int mesh_pending;              /* deleted, waiting for the GPU to be done with them */
+  unsigned int pools, pool_count;         /* texture pools */
+  unsigned int pool_pending;
+  unsigned int tex_compact, tex_compact_count; /* ctr_gpu_tex_create_compact's own formats */
+  unsigned int tex_plain, tex_plain_count;     /* the other textures with memory of their own */
+  unsigned int tex_anim;                  /* of tex_plain and tex_copies: the animation slots' */
+  unsigned int tex_target;                /* render targets: color, mip levels, depth */
+  unsigned int tex_screen;                /* the screen copy */
+  unsigned int tex_copies;                /* second copies of textures rewritten per frame */
+  unsigned int tex_pending;
+  unsigned int staging;                   /* buffers of queued copies to VRAM */
+  unsigned int blocks;                    /* ctr_gpu_linear_block */
+  int other;
+} ctr_gpu_linear_account;
+void ctr_gpu_linear_account_get(ctr_gpu_linear_account* out);
+/* the linear heap's bytes of a mesh (0: none, or in a caller's block) and of a pool */
+unsigned int ctr_gpu_mesh_linear_bytes(int mesh);
+unsigned int ctr_gpu_pool_linear_bytes(int pool);
 /* (AI-assisted) Free the deleted textures, pools and meshes now instead of at the next frame
  * begin, once the GPU has finished what it was given (a level was unloaded and the next one loads
  * on another thread: with no frames drawn meanwhile its memory stayed taken). Only while no frame

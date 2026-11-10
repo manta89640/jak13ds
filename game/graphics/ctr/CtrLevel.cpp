@@ -469,8 +469,12 @@ bool ctr_arrival_off() {
 
 // under m_lock: a whole level load the game will wait for (not a prefetch of a level it gave up on)
 bool CtrLevels::arrival_job(const Job& j) const {
-  return g_game_version == GameVersion::Jak1 && !ctr_arrival_off() && !j.parts() && !j.common &&
-         (!j.prefetch || j.name == m_dgo_level) && can_start(j);
+  // (Jak II: while its screen is black; in play the reads by need of where Jak is go on first)
+  const bool on = g_game_version == GameVersion::Jak1
+                      ? !ctr_arrival_off()
+                      : g_game_version == GameVersion::Jak2 &&
+                            m_game_black.load(std::memory_order_relaxed);
+  return on && !j.parts() && !j.common && (!j.prefetch || j.name == m_dgo_level) && can_start(j);
 }
 
 void CtrLevels::loader_main() {
@@ -490,6 +494,9 @@ void CtrLevels::loader_main() {
     // a black screen is a continue or load the game waits for: its level first
     const bool black = m_game_black.load(std::memory_order_relaxed);
     const bool playing = df && df + 3 >= rf && !black;
+    // (Jak II: a chunk read by need that is not there is a hole, a near chunk a coarser version)
+    const bool need_first = g_game_version == GameVersion::Jak2;
+    auto by_need = [&](const Job& j) { return need_first && j.dormant && !j.stream && can_start(j); };
     // Jak 1: every arrival first, the level load the game will wait for (its DGO is loading)
     auto it = pick([&](const Job& j) { return arrival_job(j); });
     if (it != m_queue.end()) {
@@ -499,11 +506,17 @@ void CtrLevels::loader_main() {
         it = pick([&](const Job& j) { return !j.parts() && !j.prefetch && can_start(j); });
       }
       if (it == m_queue.end()) {
+        it = pick(by_need);
+      }
+      if (it == m_queue.end()) {
         it = pick([](const Job& j) { return j.stream && j.urgent; });
       }
     } else if (m_hold_black.load(std::memory_order_relaxed)) {
       // the renderer keeps the screen black for what is missing in view: that first
-      it = pick([](const Job& j) { return j.stream && j.urgent; });
+      it = pick(by_need);
+      if (it == m_queue.end()) {
+        it = pick([](const Job& j) { return j.stream && j.urgent; });
+      }
     }
     if (playing && it == m_queue.end()) {
       // (AI-assisted, streammem) aging (kAgeMs): the other jobs don't wait behind the urgent stream
@@ -1667,28 +1680,83 @@ bool need_level_far(const CtrLevelData& lev, const float pos[][3], int np) {
 }  // namespace
 
 int CtrLevels::need_positions(float pos[kNeedPos][3]) const {
-  if (!m_cam_valid) {
-    return 0;
-  }
-  for (int c = 0; c < 3; c++) {
-    pos[0][c] = m_cam[c];
-    pos[1][c] = m_cam[c] + m_cam_vel[c] * kDistLeadFrames * 0.5f;
-    pos[2][c] = m_cam[c] + m_cam_vel[c] * kDistLeadFrames;
-  }
-  int n = 3;
-  if (m_target_frame + 3 >= m_cam_frame) {
+  int n = 0;
+  if (m_cam_valid) {
     for (int c = 0; c < 3; c++) {
-      pos[n][c] = m_target[c];
+      pos[0][c] = m_cam[c];
+      pos[1][c] = m_cam[c] + m_cam_vel[c] * kDistLeadFrames * 0.5f;
+      pos[2][c] = m_cam[c] + m_cam_vel[c] * kDistLeadFrames;
     }
-    n++;
+    n = 3;
+    if (m_target_frame + 3 >= m_cam_frame) {
+      for (int c = 0; c < 3; c++) {
+        pos[n][c] = m_target[c];
+      }
+      n++;
+    }
+    if (m_cont_valid && m_game_black.load(std::memory_order_relaxed)) {
+      for (int c = 0; c < 3; c++) {
+        pos[n][c] = m_cont_cam[c];
+      }
+      n++;
+    }
   }
-  if (m_cont_valid && m_game_black.load(std::memory_order_relaxed)) {
+  // Jak II: where a continue in progress puts Jak and the camera (before any camera too)
+  for (int i = 0; i < m_cont_place_n; i++, n++) {
     for (int c = 0; c < 3; c++) {
-      pos[n][c] = m_cont_cam[c];
+      pos[n][c] = m_cont_place[i][c];
     }
-    n++;
   }
   return n;
+}
+
+void CtrLevels::note_continue_place(const float (*pos)[3], int n, int want_levels) {
+  n = std::clamp(n, 0, 2);
+  const bool same = n == m_cont_place_n && (!n || !memcmp(m_cont_place, pos, n * sizeof(pos[0])));
+  if (same && want_levels == m_cont_want) {
+    return;
+  }
+  if (n) {
+    memcpy(m_cont_place, pos, n * sizeof(pos[0]));
+  }
+  m_cont_place_n = n;
+  // a level load that starts before the render thread's next frame takes its positions from here
+  float snap[kNeedPos][3];
+  const int np = need_positions(snap);
+  std::lock_guard<std::mutex> lk(m_lock);
+  memcpy(m_need_snap, snap, sizeof(snap));
+  m_need_snap_n = np;
+  m_need_snap_cont = n;
+  m_cont_want = want_levels;
+}
+
+bool CtrLevels::coming() {
+  if (m_stream_inflight || !m_take.empty()) {
+    return true;
+  }
+  for (const auto& [name, lev] : m_levels) {
+    if (lev->dormant_requested || lev->detail_requested || lev->repair_requested) {
+      return true;
+    }
+  }
+  std::lock_guard<std::mutex> lk(m_lock);
+  for (const auto& key : m_requested) {
+    if (key.find('#') == std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool CtrLevels::take_tex_trim() {
+  constexpr u64 kTrimFrames = 900;
+  const u64 frame = m_render_frame.load();
+  if (!m_tex_trim_left || (m_tex_trim_frame && frame < m_tex_trim_frame + kTrimFrames)) {
+    return false;
+  }
+  m_tex_trim_left--;
+  m_tex_trim_frame = std::max<u64>(frame, 1);
+  return true;
 }
 
 void CtrLevels::need_scan(const float pos[kNeedPos][3], int np, float t, u64 frame) {
@@ -1766,9 +1834,11 @@ u64 CtrLevels::need_make_room(u64 want) {
   need_scan(pos, np, ctr_settings().auto_detail ? m_need_cap : 0.f, m_render_frame.load());
   std::sort(m_need_have.begin(), m_need_have.end(),
             [](const NeedCand& a, const NeedCand& b) { return a.e > b.e; });
+  // (the game black: nothing is on screen, the ones in range of a continue's place go too)
+  const bool black = m_game_black.load(std::memory_order_relaxed);
   u64 got = 0;
   for (const auto& h : m_need_have) {
-    if (!(h.e > 0) || (want && got >= want + kNeedLoadMargin)) {
+    if ((!(h.e > 0) && !black) || (want && got >= want + kNeedLoadMargin)) {
       break;
     }
     need_free(*h.lev, h.chunk);
@@ -1792,6 +1862,7 @@ void CtrLevels::need_update(u64 frame, u32 free_now, u64 parts_room, bool level_
     std::lock_guard<std::mutex> lk(m_lock);  // (for the loader: load_file)
     memcpy(m_need_snap, pos, sizeof(pos));
     m_need_snap_n = np;
+    m_need_snap_cont = m_cont_place_n;
   }
   if (!np || frame < m_need_frame + kNeedEvery) {
     return;
@@ -1836,7 +1907,11 @@ void CtrLevels::need_update(u64 frame, u32 free_now, u64 parts_room, bool level_
     hi++;
     return true;
   };
-  while (room + coming < 0 && evict(claim ? 0.f : kNeedKeepMeters * kM)) {
+  // (a level load while the game is black: nothing is on screen, its claim takes the ones in
+  // range of a continue's place too, the farthest first; they come back by need)
+  const float load_beyond =
+      level_loading && m_game_black.load(std::memory_order_relaxed) ? -1e30f : 0.f;
+  while (room + coming < 0 && evict(claim ? load_beyond : kNeedKeepMeters * kM)) {
   }
   u64 short_bytes = claim && room + coming < 0 ? (u64)(-(room + coming)) : 0;
   m_need_deficit = short_bytes;
@@ -1974,6 +2049,7 @@ void CtrLevels::need_update(u64 frame, u32 free_now, u64 parts_room, bool level_
   if (short_bytes) {
     m_dst.short_passes++;
     m_need_ok = 0;
+    m_tex_trim_left = 2;
     // (a load's or a repair's wait alone: four times as long before the distances come in)
     m_need_short += short_bytes > m_need_deficit ? 4 : 1;
     if (m_need_short >= 4 * kNeedShortPasses) {
@@ -7048,12 +7124,16 @@ bool CtrLevels::load_file(const fs::path& path,
   std::vector<u8> dist_skip;
   if (g_game_version == GameVersion::Jak2) {
     float pos[kNeedPos][3];
-    int np;
+    int np, ncont, others;
     {
       std::lock_guard<std::mutex> lk(m_lock);
       memcpy(pos, m_need_snap, sizeof(pos));
       np = m_need_snap_n;
+      ncont = std::min(m_need_snap_cont, np);
+      // the continue's levels still to load after this one
+      others = std::max(0, m_cont_want - m_levels_count - (int)m_parked.size() - 1);
     }
+    const int ncam = np - ncont;  // (the continue's place: the last ncont positions)
     const size_t n = out->chunks.size();
     out->chunk_dormant.assign(n, 0);
     out->chunk_hold_since.assign(n, 0);
@@ -7061,6 +7141,12 @@ bool CtrLevels::load_file(const fs::path& path,
     dist_skip.assign(n, 0);
     u64 with = 0, later = 0;
     u32 nlater = 0;
+    struct Place {
+      u32 ci;
+      u32 bytes;
+      float e;
+    };
+    std::vector<Place> place;  // in range of the continue's place only
     for (size_t ci = 0; ci < n; ci++) {
       const auto& ch = out->chunks[ci];
       u32 lo = UINT32_MAX, hi = 0;
@@ -7073,20 +7159,53 @@ bool CtrLevels::load_file(const fs::path& path,
         continue;
       }
       const u64 b = CtrStreamArena::mesh_bytes(ch.vertex_count, hi - lo);
+      const float reach = dist_frees(*out, ci) ? need_reach(*out, ch, 1.f) : 0.f;
       if (dist_frees(*out, ci) &&
-          (!np || need_excess(ch, need_reach(*out, ch, 1.f), pos, np) > kNeedReadMeters * 4096.f)) {
+          (!ncam || need_excess(ch, reach, pos, ncam) > kNeedReadMeters * 4096.f)) {
         dist_skip[ci] = 1;
         later += b;
         nlater++;
+        const float e = ncont ? need_excess(ch, reach, pos + ncam, ncont) : 1e30f;
+        if (e <= kNeedReadMeters * 4096.f) {
+          place.push_back({(u32)ci, (u32)b, e});
+        }
       } else {
         with += b;
       }
     }
+    // A continue in progress: what is in range of its place comes with the load too, the nearest
+    // first, while the heap keeps its floor and the room of the continue's levels still to load
+    u64 at_place = 0;
+    if (!place.empty()) {
+      std::sort(place.begin(), place.end(),
+                [](const Place& a, const Place& b) { return a.e < b.e; });
+      const u64 base = with + hdr.merc_vertex_size + hdr.merc_index_size + hdr.texture_data_size;
+      const u64 keep = std::max<u64>((u64)ctr_settings().stream_reserve_kb * 1024u, kNeedFloor) +
+                       kNeedLoadMargin + (u64)others * kNeedLoadDefault;
+      const u64 free_now = ctr_gpu_linear_free();
+      u64 room = free_now > base + keep ? free_now - base - keep : 0;
+      for (const auto& c : place) {
+        if (c.bytes > room) {
+          break;
+        }
+        room -= c.bytes;
+        dist_skip[c.ci] = 0;
+        at_place += c.bytes;
+        nlater--;
+      }
+      with += at_place;
+      later -= at_place;
+    }
     m_load_left.store(with + hdr.merc_vertex_size + hdr.merc_index_size + hdr.texture_data_size,
                       std::memory_order_relaxed);
-    lg::info("[ctr] {}: {} KB of meshes with the level; {} chunks with a draw distance ({} KB) "
+    lg::info("[ctr] {}: {} KB of meshes with the level{}; {} chunks with a draw distance ({} KB) "
              "not needed now{} come by need",
-             name, with / 1024, nlater, later / 1024, np ? "" : " (no camera yet: all of them)");
+             name, with / 1024,
+             ncont ? fmt::format(" ({} KB of them in range of the continue's place only, {} "
+                                 "levels of the continue still to load)",
+                                 at_place / 1024, others)
+                   : std::string(),
+             nlater, later / 1024, np ? "" : " (no camera yet: all of them)");
   }
 
   load_tod(f, hdr, out);  // (AI-assisted) c3l v16
@@ -8213,6 +8332,9 @@ void CtrLevels::set_wanted(const std::vector<std::string>& names) {
       rebuild_merc_index();
       bump_set_generation();  // (AI-assisted)
       changed = true;
+      if (g_game_version == GameVersion::Jak2) {
+        m_tex_trim_left = 2;  // (the textures decoded for its sprites and effects: take_tex_trim)
+      }
     } else {
       ++it;
     }
@@ -8873,7 +8995,7 @@ void CtrLevels::stream_update(u64 frame) {
     }
     return true;
   };
-  float p[kLeadSteps + 2][3];
+  float p[kLeadSteps + 4][3];
   for (int i = 0; i < kLeadSteps; i++) {
     for (int c = 0; c < 3; c++) {
       p[i][c] = m_cam[c] + m_cam_vel[c] * kLeadFrames * (float)i / (kLeadSteps - 1);
@@ -8901,6 +9023,12 @@ void CtrLevels::stream_update(u64 frame) {
       p[np][c] = m_cont_cam[c];
     }
     np++;
+  }
+  // (Jak II: where a continue in progress puts Jak and the camera)
+  for (int i = 0; i < m_cont_place_n; i++, np++) {
+    for (int c = 0; c < 3; c++) {
+      p[np][c] = m_cont_place[i][c];
+    }
   }
   constexpr float kM = 4096.f;
   // (AI-assisted, title3) the game's camera this frame (note_game_camera) and where its speed takes
@@ -8936,6 +9064,14 @@ void CtrLevels::stream_update(u64 frame) {
         pg[ngp][c] = m_cont_cam[c];
       }
       ngp++;
+    }
+  }
+  // (Jak II: a level loaded for the continue in progress and not drawn yet: around its place)
+  if (!ngp) {
+    for (int i = 0; i < m_cont_place_n; i++, ngp++) {
+      for (int c = 0; c < 3; c++) {
+        pg[ngp][c] = m_cont_place[i][c];
+      }
     }
   }
   for (auto& [name, lp] : m_levels) {
@@ -9170,11 +9306,14 @@ void CtrLevels::stream_update(u64 frame) {
       evicted += bulk;
     }
   }
-  bool burst = g_game_version == GameVersion::Jak1 && !ctr_arrival_off() &&
-                     (m_game_black.load(std::memory_order_relaxed) ||
-                      m_hold_black.load(std::memory_order_relaxed) ||
-                      (m_cut_frame && frame < m_cut_frame + kBurstFrames) ||
-                      (m_lv_recent && m_lv_frame + 3 >= frame));
+  // (Jak II: while the screen is black only)
+  const bool black_now = m_game_black.load(std::memory_order_relaxed) ||
+                         m_hold_black.load(std::memory_order_relaxed);
+  bool burst = g_game_version == GameVersion::Jak1
+                   ? !ctr_arrival_off() &&
+                         (black_now || (m_cut_frame && frame < m_cut_frame + kBurstFrames) ||
+                          (m_lv_recent && m_lv_frame + 3 >= frame))
+                   : g_game_version == GameVersion::Jak2 && black_now;
 #ifndef __3DS__
   static const bool burst_off = getenv("CTR_BURST_OFF") != nullptr;  // (host A/B)
   burst = burst && !burst_off;
@@ -9837,6 +9976,84 @@ void CtrLevels::log_memory() {
            "heap KB){}",
            m_render_frame.load(), level_mem_text(all), as.capacity / 1024, ctr_vram_copy_kb(), per,
            free);
+  log_linear(as.used);
+}
+
+// the linear heap by what holds it, each part as the heap counts it (the levels' by the GPU
+// layer's sizes of their meshes and pools, not level_mem's model)
+void CtrLevels::log_linear(u32 arena_used) {
+  ctr_gpu_linear_account a;
+  ctr_gpu_linear_account_get(&a);
+  s64 lev_meshes = 0, lev_pools = 0, pre = 0, share = 0;
+  auto held = [](const CtrLevelData& lev, s64* meshes, s64* pools) {
+    for (const int m : lev.meshes) {
+      *meshes += ctr_gpu_mesh_linear_bytes(m);
+    }
+    *meshes += ctr_gpu_mesh_linear_bytes(lev.wind_mesh) +
+               ctr_gpu_mesh_linear_bytes(lev.normals_mesh);
+    for (const auto& mm : lev.merc_models) {
+      *meshes += ctr_gpu_mesh_linear_bytes(mm.mesh);
+    }
+    for (const int p : lev.tex_pools) {
+      *pools += ctr_gpu_pool_linear_bytes(p);
+    }
+  };
+  if (m_common) {
+    held(*m_common, &lev_meshes, &lev_pools);
+  }
+  for (const auto& [name, lev] : m_levels) {
+    held(*lev, &lev_meshes, &lev_pools);
+  }
+  for (const auto& [name, lev] : m_extras) {
+    held(*lev, &lev_meshes, &lev_pools);
+  }
+  s64 pre_meshes = 0, pre_pools = 0;
+  for (const auto& [name, p] : m_prefetched) {
+    held(*p.lev, &pre_meshes, &pre_pools);
+  }
+  pre = pre_meshes + pre_pools;
+  {
+    std::lock_guard<std::mutex> lk(m_share_lock);
+    for (const auto& [id, grp] : m_share_groups) {
+      for (const int p : grp.pools) {
+        share += ctr_gpu_pool_linear_bytes(p);
+      }
+    }
+  }
+  std::string loading;
+  {
+    std::lock_guard<std::mutex> lk(m_lock);
+    if (!m_loading.empty()) {
+      loading = fmt::format("; the loader is at work on {} (what it made so far counts as outside "
+                            "the levels)",
+                            m_loading);
+    }
+  }
+  s64 sound = 0, heap_blocks = 0;
+#ifdef __3DS__
+  sound = ctr_audio_linear_bytes();
+  heap_blocks = ctr_heap_linear_bytes();
+#endif
+  const s64 tex = (s64)a.tex_compact + a.tex_plain + a.tex_target + a.tex_screen + a.tex_copies;
+  const s64 waiting = (s64)a.mesh_pending + a.pool_pending + a.tex_pending + a.staging;
+  auto kb = [](s64 b) { return b / 1024; };
+  lg::info("[ctr] linear (frame {}): {} KB = free {} + levels' meshes {} + levels' texture pools "
+           "{} (shared groups' {} of it) + stream arena {} ({} used) + prefetched levels {} + "
+           "textures outside the pools {} (compact {} in {}, plain {} in {}, of the plain {} the "
+           "animation slots'; render targets {}, screen copy {}, second copies {}) + meshes "
+           "outside the levels {} (of {} in {} meshes) + their second vertex buffers {} + pools "
+           "outside the levels {} + waiting for their free {} (meshes {}, pools {}, textures {}, "
+           "staging {}) + fixed buffers {} + before the renderer {} + sound {} + heap blocks {} + "
+           "unknown {}{}",
+           m_render_frame.load(), kb(a.heap), kb(a.free), kb(lev_meshes), kb(lev_pools + share),
+           kb(share), kb(a.blocks), kb(arena_used), kb(pre), kb(tex), kb(a.tex_compact),
+           a.tex_compact_count, kb(a.tex_plain), a.tex_plain_count, kb(a.tex_anim),
+           kb(a.tex_target), kb(a.tex_screen), kb(a.tex_copies),
+           kb((s64)a.meshes - lev_meshes - pre_meshes), kb(a.meshes), a.mesh_count,
+           kb(a.mesh_copies), kb((s64)a.pools - lev_pools - share - pre_pools), kb(waiting),
+           kb(a.mesh_pending), kb(a.pool_pending), kb(a.tex_pending), kb(a.staging), kb(a.fixed),
+           kb(a.before), kb(sound), kb(heap_blocks), kb((s64)a.other - sound - heap_blocks),
+           loading);
 }
 
 void CtrLevels::pop_log() {
@@ -13320,9 +13537,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   m_ph_skipped += cl_skipped;
   if (m_jak2_slot >= 0) {
     // (AI-assisted, j2intro) Jak II: what is missing in view (late tie LOD groups, dormant chunks
-    // not back yet), for the renderer's black hold after a reveal or a cut
+    // not back yet), for the renderer's black hold after a reveal or a cut; of it ring 0: the
+    // groups within it and every chunk not back
     m_levels->note_late_in_view(rs.frame_idx, m_late_in_view,
-                                lev.shown_frame && rs.frame_idx < lev.shown_frame + 90);
+                                lev.shown_frame && rs.frame_idx < lev.shown_frame + 90,
+                                ring0_late + (m_late_in_view - late0));
   }
   // (AI-assisted) the vista tier: where its source chunks aren't drawn, up to vista_distance
   if (lev.has_vista && vista_dist > 0) {

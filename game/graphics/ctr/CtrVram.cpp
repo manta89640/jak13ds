@@ -1755,3 +1755,17 @@ void CtrVram::clear_stale() {
   }
   m_stale.clear();
 }
+
+void CtrVram::trim() {
+  clear_stale();
+  for (auto it = m_cache.begin(); it != m_cache.end();) {
+    const u32 psm = (u32)(it->first >> 20) & 0x3f;
+    if (find_relocation(GsTex0(data_tex0(it->first)).tbp0(), psm)) {
+      ++it;
+      continue;
+    }
+    m_stale.emplace(it->first, it->second);
+    it = m_cache.erase(it);
+  }
+  m_cache_gen++;  // the front cache may point at erased entries
+}

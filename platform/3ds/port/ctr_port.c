@@ -1659,6 +1659,7 @@ int ctr_sound_config(int* core) {
 #define AUDIO_MAX_BUFS 4
 static int s_audio_on = 0;
 static short* s_audio_mem = NULL; /* linear memory: nbufs * frames * 2 samples */
+static unsigned int s_audio_linear; /* the linear heap's bytes ndspInit and s_audio_mem took */
 static ndspWaveBuf s_audio_wbuf[AUDIO_MAX_BUFS];
 static unsigned int s_audio_frames = 0;
 static unsigned int s_audio_nbufs = 0;
@@ -1719,6 +1720,7 @@ int ctr_audio_init(unsigned int rate, unsigned int frames, unsigned int nbufs) {
   }
   /* ndspInit allocates linear memory too (the IOP thread runs this while the renderer loads) */
   ctr_linear_lock();
+  const u32 linear_before = linearSpaceFree();
   Result rc = ndspInit();
   if (R_FAILED(rc)) {
     ctr_linear_unlock();
@@ -1734,6 +1736,7 @@ int ctr_audio_init(unsigned int rate, unsigned int frames, unsigned int nbufs) {
     printf("[ctr] audio: linearAlloc(%u) failed\n", (unsigned int)bytes);
     return -2;
   }
+  s_audio_linear = (unsigned int)(linear_before - linearSpaceFree());
   ctr_linear_unlock();
   memset(s_audio_mem, 0, bytes);
   DSP_FlushDataCache(s_audio_mem, bytes);
@@ -1780,7 +1783,12 @@ void ctr_audio_exit(void) {
   linearFree(s_audio_mem);
   ctr_linear_unlock();
   s_audio_mem = NULL;
+  s_audio_linear = 0;
   s_audio_on = 0;
+}
+
+unsigned int ctr_audio_linear_bytes(void) {
+  return s_audio_linear;
 }
 
 void ctr_audio_close_for_exit(void) {
