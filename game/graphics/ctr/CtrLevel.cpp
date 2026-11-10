@@ -8332,6 +8332,9 @@ void CtrLevels::set_wanted(const std::vector<std::string>& names) {
       rebuild_merc_index();
       bump_set_generation();  // (AI-assisted)
       changed = true;
+      if (g_game_version == GameVersion::Jak2) {
+        m_tex_trim_left = 2;  // (the textures decoded for its sprites and effects: take_tex_trim)
+      }
     } else {
       ++it;
     }
