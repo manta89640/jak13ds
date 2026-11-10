@@ -1462,6 +1462,47 @@ tables. A view is the span between a pad script's `log view-begin NAME` and `log
 The host does not draw `ocean = full` in gameplay runs (CtrOceanFull: "unexpected DMA"), so the
 ocean is missing from these tables. Results of Nov 9: `reports/nov09/tribudget.md`.
 
+## The tie shine at the PS2's distance (shine)
+
+**What the PS2 does** (`draw-inline-array-instance-tie`, `game/mips2c/jak1_functions/tie_methods.cpp`
+block 49; `generic_tie.cpp` multiplies the tint): an instance of an envmapped prototype (flag 2) has
+`fade = trunc(clamp((envmap-fade-far + r - d) * envmap-rfade, 0, 128))`, d the camera's distance to
+its sphere's center, r the sphere's radius. Fade 0: the plain tie. Else the envmap pass with its
+tint x fade / 128. `envmap-rfade` is 128 / the length of the fade, so the shine is full within
+`fade-far + r - length` and gone at `fade-far + r`. The PC port multiplies `envmap-fade-far` by
+10000 at level login and draws every envmapped tie with its shine.
+
+**The port** (Jak 1):
+- `level.gc` (TARGET_3DS) calls `pc-3ds-tie-shine` once per tie tree at its login instead of
+  multiplying. `ctr_tie_shine` (CtrLevel.cpp) reads the tree in game memory: the instances of the
+  envmapped prototypes under their tie nodes, with the prototype's two values (`CtrShineTable`, kept
+  per level until its unload). No level file change: a run's `vis` is its tie node's id.
+- `draw_level`: a run's fade is its node's, the largest of the node's envmapped instances' (a run
+  holds up to 8 instances of a node; no instance has less shine than on the PS2). Fade 0: the run
+  is drawn by the plain level program in its list place. Else through the shine program with the
+  combiner's shine constant x fade / 128. Per chunk two camera distances settle most draws without
+  a look at their runs: within the first all runs are at 128, beyond the second all at 0.
+- Runs without a tie node, levels without a table and Jak II (same fields in its prototypes, but no
+  such line in its `level.gc`; the PC draws its envmapped ties at any distance) keep their shine.
+- Log: `[ctr] LEVEL: tie shine: ...` per tree, `envmapped ties: N draws, N tris ... with them, N
+  tris beyond their shine drawn plain`. Host: `CTR_SHINE_LOG=1` lists the prototypes,
+  `CTR_SHINE_AB=full` the shine at any distance, `alt` that in odd frames, `seam` the plain
+  program in odd frames and the shine program without shine in even ones.
+
+**Distances** (all 21 levels: 305 prototypes, 4766 instances): Precursor Basin 60 m fading over the
+last 20; Citadel 40 / 15 (two prototypes 30-32); Lost Precursor City 25 / 17; Forbidden Jungle 65 /
+30 and 90 / 65 (the machine), the plant boss's shafts 10 / 5; Misty 65 / 55; Snowy 40 / 15, its
+dark eco barrels 100 / 50; Fire Canyon, Boggy Swamp and the final boss 100 / 20; Geyser Rock 120 /
+40; Sentinel Beach 80 / 30; lamps and lanterns 32 / 24; the villages 12-80 (the oracles 65 / 30,
+the warp gates 40 / 20, Sandover's sage machine joints 12 / 6); the cave crystals 100-180. The
+object's radius (0.5-150 m) adds to each.
+
+**Measured** (host, per frame, camera at rest): Precursor Basin start 26.7k triangles through the
+shine program before, 5.7k after (478 -> 83 shine draws; vertex program instructions of the frame
+2.23M -> 1.60M; all draws 1105 -> 1123, binds 162 -> 170: the plain runs are draws of their own);
+Citadel entrance 10.7k -> 2.0k; Snowy fort 0.6k -> 0.6k (all within their distance; 1.1-1.7k ->
+0.3-0.6k with the camera turned).
+
 ## Ties at the PS2's distances: its own geometries and its geomorph (ps2lod)
 
 **What the PS2 does** (`draw-inline-array-instance-tie`, the tie VU program; `c3l_format.md` "The
