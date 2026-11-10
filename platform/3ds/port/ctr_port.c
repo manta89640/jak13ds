@@ -1667,6 +1667,12 @@ static unsigned int s_audio_next = 0; /* the next buffer to hand out (round robi
 static unsigned int s_audio_late = 0;
 static LightEvent s_audio_event;
 
+/* the data cache flush of a queued buffer: the kernel call (as the renderer's, ctr_gpu_citro3d.c:
+ * the DSP module's FlushDataCache makes the same call for us, an IPC round trip on the mixer's
+ * core) or, from the Homebrew Launcher, the DSP module */
+extern int ctr_kernel_flush_cfg;
+static int s_audio_kernel_flush = -1;
+
 static u64 s_audio_last_frame_tick = 0;
 static volatile u32 s_audio_max_frame_gap = 0; /* system ticks */
 static volatile u32 s_audio_dsp_woke = 0;      /* the next gap spans a DSP sleep (HOME, sleep) */
@@ -1815,7 +1821,15 @@ void ctr_audio_submit(short* buffer) {
     printf("[ctr] audio: submit out of order\n");
     return;
   }
-  DSP_FlushDataCache(buffer, (size_t)s_audio_frames * 2 * sizeof(short));
+  const u32 bytes = (u32)(s_audio_frames * 2 * sizeof(short));
+  if (s_audio_kernel_flush < 0) {
+    s_audio_kernel_flush = !envIsHomebrew() && ctr_kernel_flush_cfg;
+  }
+  if (!s_audio_kernel_flush ||
+      R_FAILED(svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)buffer, bytes))) {
+    s_audio_kernel_flush = 0;
+    DSP_FlushDataCache(buffer, bytes);
+  }
   /* (AI-assisted) Late: the buffer queued before this one, the last the DSP had, is done already,
    * so the channel ran dry and this one was due before it came (a gap in the sound). The DSP's
    * dropped frames (ndspGetDroppedFrames) don't count this. At most a DSP frame (~5 ms) of a gap
