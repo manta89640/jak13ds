@@ -41,6 +41,9 @@
   (the-as continue-point #f)
   )
 
+(#when TARGET_3DS
+  (define-extern pc-3ds-arrival-ready? (function symbol)))
+
 (defstate target-continue (target)
   :event (behavior ((proc process) (argc int) (message symbol) (block event-message-block))
     (local-vars (v0-0 object))
@@ -265,6 +268,14 @@
       ;; og:preserve-this don't wait for vis if level doesn't have it
       (when (and s5-4 (-> s5-4 vis-info 0))
         (while (and (-> *level* vis?) (-> s5-4 vis-info 0) (= (-> s5-4 all-visible?) 'loading))
+          (suspend)
+          )
+        )
+      )
+    ;; 3DS: the blackout lasts until the renderer has the scenery near the camera (at most 4 s)
+    (#when TARGET_3DS
+      (when (not (logtest? (-> arg0 flags) (continue-flags no-blackout title title-movie demo demo-movie intro)))
+        (while (not (pc-3ds-arrival-ready?))
           (suspend)
           )
         )

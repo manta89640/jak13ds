@@ -54,6 +54,7 @@ extern "C" int ctr_config_bool(const char* key, int def);              // platfo
 #endif
 
 bool ctr_level_ready(const char* name);  // game/graphics/ctr/CtrRenderer.cpp
+bool ctr_arrival_ready();                // game/graphics/ctr/CtrRenderer.cpp
 u32 ctr_frame_vblanks();                  // game/graphics/ctr/CtrRenderer.cpp
 
 namespace jak2 {
@@ -603,6 +604,10 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("__pc-get-tex-remap", lookup_jak2_texture_dest_offset);
   // (AI-assisted, j2intro) level-update-after-load waits for the 3DS renderer's .c3l of the level
   make_function_symbol_from_c("pc-3ds-level-ready?", pc_3ds_level_ready);
+  // target-continue keeps its blackout until the renderer has ring 0 in view (ctr renderer only)
+  make_function_symbol_from_c("pc-3ds-arrival-ready?", +[]() -> u64 {
+    return offset_of_s7() + (ctr_arrival_ready() ? jak2_symbols::FIX_SYM_TRUE : 0);
+  });
   // (AI-assisted) pc-maybe-vsync's dog-ratio on the 3DS: the vblanks the last frame took
   make_function_symbol_from_c("pc-3ds-frame-vblanks", pc_3ds_frame_vblanks);
   make_function_symbol_from_c("pc-init-autosplitter-struct",

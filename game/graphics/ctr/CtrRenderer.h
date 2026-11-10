@@ -261,6 +261,9 @@ class CtrRenderer {
   float hold_black(float alp);
   float m_shown_alp = 1.f;
   bool m_hold_black = false;
+  // frames in a row with no less missing in view and nothing coming (CtrLevels::coming), and
+  // the last frame's count
+  u32 m_hold_idle = 0, m_hold_idle_late = 0;
   bool m_hold_ramp = false;  // after the hold: faded in from black (1/8 a frame), not cut in
   double m_black_t0 = 0, m_fade_t0 = 0;  // Jak 1: since when black; the fade in's start
   double m_hold_t0 = 0;

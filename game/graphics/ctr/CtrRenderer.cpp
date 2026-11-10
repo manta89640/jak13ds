@@ -49,15 +49,19 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #include "game/kernel/common/kmachine.h"
 #include "game/kernel/common/kscheme.h"
 #include "game/kernel/jak1/kscheme.h"  // (AI-assisted, title3) find_symbol_from_c
+#if !defined(__3DS__) || defined(OG3DS_GAME_JAK2)
+#include "game/kernel/jak2/kscheme.h"
+#endif
 #include "game/runtime.h"
 #include "game/sce/pad_script.h"
 
 // (AI-assisted) PMODE alpha from the game thread (ctr_set_pmode_alp), 1 = no fade
 static std::atomic<float> g_pmode_alp{1.f};
-// Jak 1: what is missing in ring 0 in view at the last frame, and the frames counted
-// (ctr_arrival_ready, game thread)
+// what is missing in ring 0 in view at the last frame, and the frames counted
+// (ctr_arrival_ready, game thread); Jak II: nothing of it can come now (CtrLevels::coming)
 static std::atomic<u32> g_arrival_late{0};
 static std::atomic<u64> g_arrival_frame{0};
+static std::atomic<bool> g_arrival_idle{false};
 static std::atomic<double> g_arrival_done_ms{-1e9};  // the game's wait (ctr_arrival_ready) ended
 
 // (AI-assisted) see CtrRenderer.h; set by the CtrRenderer constructor
@@ -788,8 +792,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   // (AI-assisted, j2intro / title3) the screen is black this frame (the game's blackout since the
   // last frame, or held black by draw_pmode_fade): the level draws keep nothing hidden or far for
   // late data
-  m_levels->set_game_black(!m_jak2 && g_pmode_alp.load(std::memory_order_relaxed) < 0.01f,
-                           !m_jak2 && m_hold_black);
+  m_levels->set_game_black(g_pmode_alp.load(std::memory_order_relaxed) < 0.01f, m_hold_black);
   ctr_level_set_screen_black(
       m_hold_black ||
       (m_shown_alp < 0.01f && g_pmode_alp.load(std::memory_order_relaxed) < 0.01f));
@@ -1469,29 +1472,33 @@ void CtrRenderer::draw_pmode_fade() {
   ctr_gpu_draw(&st, v, 6);
 }
 
-// (AI-assisted, j2intro; Jak 1's title3 does the same) Jak II: a screen coming out of black (the
-// game's blackout before the title intro, a continue, a level start) stays black while, within 3 s
-// of a level shown again (dormant) or of a camera cut, something in view is missing: tie LOD groups
-// drawn far for want of their near chunks, dormant tie chunks not read back yet
-// (CtrLevels::note_late_in_view). Its first visible frame is complete, not filling in on screen.
-// (AI-assisted, j2pop) Jak II: while what is missing gets fewer (a new least count within
-// kStallMs, 2.5 s: in Azahar a continue to the slums gave up after 1.5 s without one), at most
-// kMaxHoldMs; then a fade in over 8 frames. The game runs on (the intro's scene clock
-// follows its voice stream): only the picture waits. (Was at most 1.5 s: HW Oct 25, the title
-// intro gave up with 102 tie LOD groups drawn far and a continue to the slums with 200, read back
-// over the next seconds in view: the user's "rocks pop in".)
-// Jak 1: held until ring 0 in view is there (at most 4 s); a black of kLongBlackMs or more (an
-// arrival) fades in over kFadeInMs.
+// A screen coming out of black (the game's blackout before the title intro, a continue, a level
+// start) stays black while, within 3 s of a level shown or of a camera cut, ring 0 in view is
+// missing (CtrLevels::note_late_in_view: tie LOD groups within 40 m drawn far for want of their
+// near chunks, chunks not there at all), at most kMaxHoldMs and while it gets fewer within
+// kStallMs. The game runs on: only the picture waits. A continue's own wait for the same
+// (ctr_arrival_ready) comes first; then this one stays out.
+// Jak II: what is missing comes through the loader. With nothing queued, being read or waiting to
+// be taken for kIdleFrames frames in a row the rest can't come now (the stream arena given back
+// or full, no linear memory for a chunk): neither wait goes on for it.
+// Jak 1: a black of kLongBlackMs or more (an arrival) fades in over kFadeInMs.
 float CtrRenderer::hold_black(float alp) {
   const bool old = !m_jak2 && ctr_arrival_off();  // (host A/B: Jak 1 as before)
-  const double kMaxHoldMs = m_jak2 ? 6000.0 : old ? 1500.0 : 4000.0;
+  const double kMaxHoldMs = old ? 1500.0 : 4000.0;
   const double kStallMs = old ? 1500.0 : 2500.0;
   constexpr double kLongBlackMs = 400.0, kFadeInMs = 500.0;
+  constexpr u32 kIdleFrames = 12;
   bool shown_or_cut = false;
   u32 ring0 = 0;
   const u32 all = m_levels->late_in_view(m_rs.frame_idx, &shown_or_cut, &ring0);
-  const u32 late = m_jak2 || old ? all : ring0;
+  const u32 late = old ? all : ring0;
+  // (frames in a row with no less missing and nothing coming)
+  m_hold_idle =
+      m_jak2 && late && late >= m_hold_idle_late && !m_levels->coming() ? m_hold_idle + 1 : 0;
+  m_hold_idle_late = late;
+  const bool idle = m_hold_idle >= kIdleFrames;
   g_arrival_late.store(late, std::memory_order_relaxed);
+  g_arrival_idle.store(idle, std::memory_order_relaxed);
   g_arrival_frame.fetch_add(1, std::memory_order_relaxed);
   const double now = ctr_gpu_time_ms();
   // (not again while fading in, nor right after the game's own wait for the same)
@@ -1511,13 +1518,16 @@ float CtrRenderer::hold_black(float alp) {
       m_hold_least = late;
       m_hold_progress_t = now;
     }
-    if (late == 0 || now - m_hold_t0 >= kMaxHoldMs || now - m_hold_progress_t >= kStallMs) {
+    if (late == 0 || now - m_hold_t0 >= kMaxHoldMs || now - m_hold_progress_t >= kStallMs ||
+        idle) {
       m_hold_black = false;
       m_hold_ramp = true;
       m_fade_t0 = now;
       lg::info("[ctr] screen kept black {:.0f} ms ({} frames) for what is missing in view{} (at most "
-               "{} tie LOD groups drawn far / dormant chunks not back)",
-               now - m_hold_t0, m_hold_frames, late ? ", given up" : "", m_hold_late);
+               "{} tie LOD groups within ring 0 drawn far / chunks missing, {} left)",
+               now - m_hold_t0, m_hold_frames,
+               !late ? "" : idle ? ", given up: nothing more can come now" : ", given up",
+               m_hold_late, late);
     } else {
       m_hold_frames++;
       alp = 0.f;
@@ -1939,6 +1949,61 @@ bool continue_camera_trans(float* out) {
   return t[0] != 0.f || t[1] != 0.f || t[2] != 0.f;
 }
 
+// Jak II, a continue in progress (*spawn-actors* is #f from target-continue's start until its
+// levels are ready): where *game-info*'s current continue point puts Jak and the camera (game
+// units), and how many levels it wants; returns the positions written (game thread)
+int continue_place_jak2(float out[2][3], int* want_levels) {
+  *want_levels = 0;
+#if !defined(__3DS__) || defined(OG3DS_GAME_JAK2)
+  static u32 sym = 0, spawn_sym = 0;
+  static u32 tries = 0;
+  if (!sym || !spawn_sym) {
+    if (tries++ % 64) {
+      return 0;
+    }
+    sym = jak2::find_symbol_from_c("*game-info*").offset;
+    spawn_sym = jak2::find_symbol_from_c("*spawn-actors*").offset;
+    if (!sym || !spawn_sym) {
+      return 0;
+    }
+  }
+  if (Ptr<Symbol4<u32>>(spawn_sym)->value() != s7.offset) {
+    return 0;
+  }
+  auto basic_ok = [](u32 a) {
+    return (a & OFFSET_MASK) == BASIC_OFFSET && a >= 0x100000 && a + 256 < (u32)EE_MAIN_MEM_SIZE;
+  };
+  const u32 gi = Ptr<Symbol4<u32>>(sym)->value();
+  if (!basic_ok(gi)) {
+    return 0;
+  }
+  // game-info current-continue: offset 240; continue-point trans: 16, camera-trans: 48
+  const u32 cp = *Ptr<u32>(gi + 240 - 4).c();
+  if (!basic_ok(cp)) {
+    return 0;
+  }
+  int n = 0;
+  for (const u32 off : {16u, 48u}) {
+    const float* t = Ptr<float>(cp + off - 4).c();
+    if (std::isfinite(t[0]) && std::isfinite(t[1]) && std::isfinite(t[2]) &&
+        (t[0] != 0.f || t[1] != 0.f || t[2] != 0.f)) {
+      for (int i = 0; i < 3; i++) {
+        out[n][i] = t[i];
+      }
+      n++;
+    }
+  }
+  // continue-point want: 6 level-buffer-state of 16 bytes at offset 108, each with its name first
+  for (int i = 0; i < 6; i++) {
+    *want_levels += *Ptr<u32>(cp + 108 - 4 + 16 * i).c() != s7.offset;
+  }
+  return n;
+#else
+  (void)out;
+  return 0;
+#endif
+}
+
 // the start menu's boot common page (texture-pool common-page 0, uploaded only while the menu
 // draws), found by the game thread for CtrVram::prewarm_page
 void find_menu_page() {
@@ -1995,6 +2060,23 @@ void ctr_send_chain(const void* data, u32 offset) {
   if (g_game_version == GameVersion::Jak1) {
     find_menu_page();
   }
+  // Jak II, the render thread idle: while the game is black for a continue, where it goes (the
+  // levels that load now hold what is in range there); the decoded textures nothing drew lately
+  // go when linear memory was short
+  float cont_place[2][3] = {};
+  int cont_want = 0;
+  const int cont_places =
+      g_game_version == GameVersion::Jak2 && g_pmode_alp.load(std::memory_order_relaxed) < 0.01f
+          ? continue_place_jak2(cont_place, &cont_want)
+          : 0;
+  auto note_jak2 = [&]() {
+    if (g_game_version == GameVersion::Jak2) {
+      g_ctr->levels().note_continue_place(cont_place, cont_places, cont_places ? cont_want : 0);
+      if (g_ctr->levels().take_tex_trim()) {
+        g_ctr->vram().trim();
+      }
+    }
+  };
   if (g_async) {
     wait_render_idle();
     if (g_levels_pending_set) {
@@ -2005,6 +2087,7 @@ void ctr_send_chain(const void* data, u32 offset) {
       g_ctr->levels().note_game_camera(game_cam);  // (AI-assisted, title3; render thread idle)
     }
     g_ctr->levels().note_continue_camera(cont_cam, have_cont_cam);
+    note_jak2();
     const double tp = ctr_gpu_time_ms();
     g_ctr->prepare_frame(data, offset);
     g_ee.prepare_ms += ctr_gpu_time_ms() - tp;
@@ -2013,6 +2096,7 @@ void ctr_send_chain(const void* data, u32 offset) {
     ctr_gpu_note_release(release);
     ctr_gpu_async_submit();
   } else {
+    note_jak2();
 #ifndef __3DS__
     // (AI-assisted) host (synchronous): the sprites from the snapshot too, so the host runs check
     // it (CtrSpriteRenderer::snap_data compares it with game memory)
@@ -2210,11 +2294,12 @@ bool ctr_level_ready(const char* name) {
   return false;
 }
 
-// Jak 1, game thread (pc-3ds-arrival-ready?, target-continue): a continue's blackout lasts until
-// ring 0 in view is there at a frame drawn since the wait began, at most kCapMs
+// game thread (pc-3ds-arrival-ready?, target-continue): a continue's blackout lasts until ring 0
+// in view is there at a frame drawn since the wait began, at most kCapMs; Jak II: or until
+// nothing of it can come now (hold_black)
 bool ctr_arrival_ready() {
   constexpr double kCapMs = 4000.0;
-  if (!g_ctr_ready || g_is_jak2 || ctr_arrival_off()) {
+  if (!g_ctr_ready || ctr_arrival_off()) {
     return true;
   }
   static double since = 0, last = 0;
@@ -2230,13 +2315,15 @@ bool ctr_arrival_ready() {
   last = now;
   const u32 late = g_arrival_late.load(std::memory_order_relaxed);
   most = std::max(most, late);
-  const bool ready = f >= f0 + 2 && late == 0;
+  const bool idle = late && g_arrival_idle.load(std::memory_order_relaxed);
+  const bool ready = f >= f0 + 2 && (late == 0 || idle);
   if (!ready && now - since < kCapMs) {
     return false;
   }
   lg::info("[ctr] arrival: the game's blackout held {:.0f} ms for ring 0 in view{} (at most {} "
-           "tie LOD groups drawn far / chunks missing)",
-           now - since, ready ? "" : ", given up", most);
+           "tie LOD groups drawn far / chunks missing, {} left)",
+           now - since,
+           !ready ? ", given up" : idle ? ", given up: nothing more can come now" : "", most, late);
   since = 0;
   g_arrival_done_ms = now;
   return true;

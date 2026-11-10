@@ -851,6 +851,15 @@ class CtrLevels {
     }
     m_cont_valid = valid;
   }
+  //! game thread, render thread idle (Jak II): where the game's continue point puts Jak and the
+  //! camera, n positions while the game is black (0: not black, or none), and the levels it wants
+  void note_continue_place(const float (*pos)[3], int n, int want_levels);
+  //! render thread: something that is missing in view can still come (a level load, a read by
+  //! need or a near chunk job in flight, meshes read and not taken yet)
+  bool coming();
+  //! game thread, render thread idle: linear memory was short (Jak II): the textures decoded
+  //! from the game's VRAM that nothing drew lately are to be freed (CtrVram::trim)
+  bool take_tex_trim();
   /*! (AI-assisted, streaming) Jak's first bone in camera space (merc renderer, any frame) */
   void stream_note_target(float x, float y, float z, u64 frame) {
     m_target_cam[0] = x;
@@ -1253,8 +1262,14 @@ class CtrLevels {
   // Residency by need (Jak II): where the camera is and will be, Jak and a continue's camera
   // (game units; n of them, 0: not known), for the render thread (need_positions) and a copy the
   // loader reads (m_lock: m_need_snap)
-  static constexpr int kNeedPos = 5;
+  static constexpr int kNeedPos = 7;
   int need_positions(float pos[kNeedPos][3]) const;
+  float m_cont_place[2][3] = {};  // note_continue_place
+  int m_cont_place_n = 0;
+  int m_need_snap_cont = 0;  // of m_need_snap, the last ones: the continue's place (m_lock)
+  int m_cont_want = 0;       // the levels the continue wants (m_lock)
+  u32 m_tex_trim_left = 0;  // take_tex_trim: the calls still to say yes, the last one's frame
+  u64 m_tex_trim_frame = 0;
   // a managed chunk and how far the nearest position is beyond its reach (game units; < 0: within)
   struct NeedCand {
     CtrLevelData* lev;
