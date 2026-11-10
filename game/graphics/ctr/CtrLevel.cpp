@@ -8795,6 +8795,14 @@ void CtrLevels::stream_note_level(CtrLevelData& lev, u32 late_groups, u32 held_g
   }
 }
 
+bool CtrLevels::stream_held(const CtrLevelData& lev, const CtrLevelData::StreamUnit& su,
+                            u64 frame) {
+  const u32 ci = su.chunk;
+  return su.state == CtrLevelData::kUnitResident && ci < lev.pop_drawn_at.size() &&
+         lev.meshes[ci] >= 0 && !lev.chunk_morphs(ci) &&
+         (u16)((u16)frame - lev.pop_drawn_at[ci]) <= 3;
+}
+
 bool CtrLevels::stream_evict(CtrLevelData& lev, u32 unit, bool now) {
   auto& su = lev.stream_units[unit];
   const u32 ci = su.chunk;
@@ -8805,6 +8813,9 @@ bool CtrLevels::stream_evict(CtrLevelData& lev, u32 unit, bool now) {
       su.leave = frame;
       m_pop.morph_out++;
     }
+    return false;
+  }
+  if (!now && stream_held(lev, su, frame)) {
     return false;
   }
   su.left = su.leave ? frame : 0;
@@ -9021,7 +9032,8 @@ void CtrLevels::stream_update(u64 frame) {
       const bool by_need = jak2 && m_cam_valid;
       if (by_need ? m_need_deficit > 0 : free_now < need) {
         drain = by_need ? m_need_deficit > 512 * 1024 : free_now + 512 * 1024 < need;
-        m_sst.shrunk += stream_shrink(drain);  // (a level waits for the memory: at once)
+        // (what is drawn leaves by its morph or out of view; a load out of memory: make_room)
+        m_sst.shrunk += stream_shrink(drain, false, false);
       }
     } else if (parts_reserve && free_now < reserve + parts_reserve) {
       // (AI-assisted, streammem) a parts job's room: the growth units not needed now (make_room
@@ -9350,7 +9362,8 @@ void CtrLevels::stream_update(u64 frame) {
       u64 bulk = 0;
       while (bulk < deficit && hi < m_have.size() && m_have[hi].score > 2 * kKeepMeters * kM) {
         auto& victim = m_have[hi].lev->stream_units[m_have[hi].unit];
-        if (victim.state == CtrLevelData::kUnitResident) {
+        if (victim.state == CtrLevelData::kUnitResident &&
+            !stream_held(*m_have[hi].lev, victim, frame)) {
           bulk += victim.bytes;
           stream_evict(*m_have[hi].lev, m_have[hi].unit);
           m_sst.bulk_evictions++;
@@ -9420,14 +9433,16 @@ void CtrLevels::stream_update(u64 frame) {
         size_t pick_i = hi;
         for (size_t j = hi; j < m_have.size() && j < hi + 64 && m_have[j].score > beyond; j++) {
           const auto& cu = m_have[j].lev->stream_units[m_have[j].unit];
-          if (cu.state == CtrLevelData::kUnitResident && arena.run_if_freed(cu.mem) >= su.bytes) {
+          if (cu.state == CtrLevelData::kUnitResident && arena.run_if_freed(cu.mem) >= su.bytes &&
+              !stream_held(*m_have[j].lev, cu, frame)) {
             pick_i = j;
             break;
           }
         }
         std::swap(m_have[hi], m_have[pick_i]);
         const auto& victim = m_have[hi].lev->stream_units[m_have[hi].unit];
-        if (victim.state != CtrLevelData::kUnitResident) {
+        if (victim.state != CtrLevelData::kUnitResident ||
+            stream_held(*m_have[hi].lev, victim, frame)) {
           hi++;
           continue;
         }
@@ -9476,7 +9491,8 @@ void CtrLevels::stream_update(u64 frame) {
             const bool drawn = hu.chunk < h.lev->pop_drawn_at.size() &&
                                h.lev->pop_drawn_at[hu.chunk] == (u16)(frame - 1);
             if (hu.state != CtrLevelData::kUnitResident || hu.ring0 || hu.leave ||
-                (tier < 2) != (h.score >= 0) || ((tier & 1) != 0) != drawn) {
+                (tier < 2) != (h.score >= 0) || ((tier & 1) != 0) != drawn ||
+                stream_held(*h.lev, hu, frame)) {
               continue;
             }
             const u32 run = arena.run_if_freed(hu.mem);
@@ -9514,7 +9530,8 @@ void CtrLevels::stream_update(u64 frame) {
       u64 freed_for = 0;
       for (size_t j = hi; !mem && j < m_have.size() && freed_for < su.bytes; j++) {
         auto& victim = m_have[j].lev->stream_units[m_have[j].unit];
-        if (victim.state != CtrLevelData::kUnitResident || victim.urgent || victim.ring0) {
+        if (victim.state != CtrLevelData::kUnitResident || victim.urgent || victim.ring0 ||
+            stream_held(*m_have[j].lev, victim, frame)) {
           continue;
         }
         freed_for += arena.run_if_freed(victim.mem) >= su.bytes ? su.bytes : victim.bytes;
@@ -9553,7 +9570,8 @@ void CtrLevels::stream_update(u64 frame) {
           break;  // (the rest have more)
         }
         if (victim.state != CtrLevelData::kUnitResident || victim.ring0 ||
-            frame < victim.resident_frame + kMinResidentFrames) {
+            frame < victim.resident_frame + kMinResidentFrames ||
+            stream_held(*h.lev, victim, frame)) {
           continue;
         }
         freed_for += arena.run_if_freed(victim.mem) >= su.bytes ? su.bytes : victim.bytes;

@@ -1251,8 +1251,11 @@ class CtrLevels {
   static constexpr double kServeShare = 0.25;
   std::atomic<bool> m_stream_urgent_queued{false};
   void take_stream(Done& d, u64 frame);
-  //! frees a unit; unless now, one drawn last frame first morphs out (freed by stream_update): false
+  //! frees a unit; unless now, one drawn last frame first morphs out (freed by stream_update) or,
+  //! without moving vertices, stays until it is out of view (stream_held): false
   bool stream_evict(CtrLevelData& lev, u32 unit, bool now = false);
+  //! drawn within the last frames with no morph to leave by: not freed unless memory runs out
+  static bool stream_held(const CtrLevelData& lev, const CtrLevelData::StreamUnit& su, u64 frame);
   void stream_idle_fill(u64 frame);
   void stream_take_pending(u64 frame);
   struct StreamTake {
@@ -1265,6 +1268,7 @@ class CtrLevels {
   // the units in the arena's growth segments freed (all: a level load needs the memory; else the
   // ones not needed now); returns how many
   // (AI-assisted, streammem) whole: every unit; now false: a unit drawn leaves by its morph out
+  // or stays while drawn
   u32 stream_shrink(bool all, bool whole = false, bool now = true);
   static void free_stream_parts(const Job& job);
   u32 m_stream_inflight = 0;  // stream jobs queued, running or not taken (kJobsInFlight)
