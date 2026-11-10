@@ -506,6 +506,8 @@
                     )
                 )
               )
+            ;; og:preserve-this kperf: the joints' matrices apart from the decompression
+            (with-pc-profiler "jm-joints"
             (let ((s1-3 3))
               (dotimes (s0-0 s2-0)
                 (let ((a0-12 (-> arg0 data (+ s0-0 s1-3)))
@@ -519,6 +521,7 @@
                   )
                 )
               )
+            )
             (if (-> arg1 postbind-function)
                 ((-> arg1 postbind-function) this arg0 arg1)
                 )
@@ -1373,7 +1376,10 @@
     (let ((gp-1 (logtest? (-> self draw status) (draw-control-status uninited))))
       (logclear! (-> self draw status) (draw-control-status no-draw-temp uninited))
       (when (nonzero? (-> self skel))
+        ;; og:preserve-this kperf: the channels, blend shapes, eyes and effects of a post
+        (with-pc-profiler "jp-eval"
         (evaluate-joint-control self)
+        )
         (when (or (logtest? (-> self skel status) (joint-control-status sync-math)) gp-1)
           (do-joint-math (-> self draw) (-> self node-list) (-> self skel))
           (if (and gp-1 (type? (-> self root) collide-shape))

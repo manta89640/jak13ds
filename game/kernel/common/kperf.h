@@ -43,7 +43,8 @@ enum class Gauge { SOUND_HANDLERS = 0, COUNT = 1 };
 void set_gauge(Gauge g, u32 value);
 
 //! Event counters, reported per frame (game thread only).
-enum class Counter { SUSPEND = 0, SUSPEND_BYTES = 1, COUNT = 2 };
+//! SWITCH_TICKS: ticks() inside thread-resume and thread-suspend, counted while sections are timed
+enum class Counter { SUSPEND = 0, SUSPEND_BYTES = 1, SWITCH_TICKS = 2, COUNT = 3 };
 extern u64 g_counters[(int)Counter::COUNT];
 inline void count(Counter c, u64 n) {
   g_counters[(int)c] += n;
