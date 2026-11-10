@@ -565,8 +565,10 @@ std::optional<time_stamp> IOP_Kernel::dispatch() {
 #ifdef __3DS__
   // (AI-assisted) The vblank handler (stream clock and sound info for the EE) runs even when no
   // thread is ready: the ISO thread doesn't poll every millisecond any more to make one ready.
-  if (vblank_handler != nullptr && vblank_recieved.exchange(false)) {
-    vblank_handler(nullptr);
+  if (vblank_handler != nullptr) {
+    for (int n = std::min(vblank_recieved.exchange(0), 60); n > 0; n--) {
+      vblank_handler(nullptr);
+    }
   }
 #endif
 
@@ -577,9 +579,10 @@ std::optional<time_stamp> IOP_Kernel::dispatch() {
   }
   while (next != nullptr) {
     // Check vblank interrupt
-    if (vblank_handler != nullptr && vblank_recieved) {
-      vblank_handler(nullptr);
-      vblank_recieved = false;
+    if (vblank_handler != nullptr) {
+      for (int n = std::min(vblank_recieved.exchange(0), 60); n > 0; n--) {
+        vblank_handler(nullptr);
+      }
     }
     // printf("[IOP Kernel] Dispatch %s (%d)\n", next->name.c_str(), next->thID);
     auto p = scoped_prof(next->name.c_str());

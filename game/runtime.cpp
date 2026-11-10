@@ -354,6 +354,10 @@ void ee_worker_runner(SystemThreadInterface& iface) {
   }
 }
 
+#ifdef __3DS__
+u32 ctr_frame_vblanks();  // game/graphics/ctr/CtrRenderer.cpp
+#endif
+
 /*!
  * SystemThread function for running the IOP (separate I/O Processor)
  */
@@ -385,8 +389,10 @@ void iop_runner(SystemThreadInterface& iface, GameVersion version) {
 #endif
 #ifdef __3DS__
   // (AI-assisted) wake the IOP for its vblank handler: it doesn't poll every millisecond any more
-  Gfx::register_vsync_callback([&iop]() {
-    iop.kernel.signal_vblank();
+  // Jak II at 30 fps: a game frame is two or three vblanks of the IOP's handler (music fades, the
+  // stream clock), which the PS2 runs at 60 Hz whatever the game's frame takes
+  Gfx::register_vsync_callback([&iop, version]() {
+    iop.kernel.signal_vblank(version == GameVersion::Jak2 ? (int)ctr_frame_vblanks() : 1);
     iop.signal_run_iop();
   });
 #else

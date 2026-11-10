@@ -238,7 +238,8 @@ class IOP_Kernel {
 
   u32 GetSystemTimeLow();
 
-  void signal_vblank() { vblank_recieved = true; };
+  // n: the vblanks since the last signal (the handler runs once for each)
+  void signal_vblank(int n = 1) { vblank_recieved += n; };
 
   bool sif_busy(u32 id);
   // for a stall report: every thread, the RPC servers' calls, the overlord's queues (no locks)
@@ -267,7 +268,7 @@ class IOP_Kernel {
   std::optional<time_stamp> nextWakeup();
 
   s32 (*vblank_handler)(void*) = nullptr;
-  std::atomic_bool vblank_recieved = false;
+  std::atomic<int> vblank_recieved{0};
 
   cothread_t kernel_thread;
   s32 _nextThID = 0;
