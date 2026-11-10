@@ -63,6 +63,7 @@ struct Holes {
 };
 Holes g_holes;
 void tod_drop_entries(CtrLevelData::Tod& t, size_t ci);
+bool dist_frees(const CtrLevelData& lev, size_t ci);
 // chunk ci's mesh freed or made again (a later mesh may get the same id): its time of day and
 // tfrag morph colors are made again
 void forget_chunk_colors(CtrLevelData& lev, size_t ci) {
@@ -602,6 +603,7 @@ void CtrLevels::run_job(const Job& job) {
     }
     d.result = LoadResult::FAILED;
   }
+  m_load_left.store(0, std::memory_order_relaxed);
   if (m_load_stream_ok) {
     m_load_stream_bufs.release();
     m_load_stream_ok = false;
@@ -959,24 +961,26 @@ bool CtrLevels::housekeeping(bool room) {
       whole = m_room_whole;
       m_room_whole = false;
     }
-    // (AI-assisted, streammem) the queued stream jobs' and the not yet taken meshes' pieces too:
-    // they kept growth segments from emptying (SM-1)
-    stream_drop_pending(whole);
-    stream_shrink(true, whole);  // (AI-assisted, streaming) the arena's growth back for the load
-    // (AI-assisted, j2strip) Jak II: the loaded levels' chunks far beyond their draw distance
-    // too (freed by distance from now on while the heap is short: dist_update)
+    // Jak II: the chunks beyond their draw distance first (the farthest first); the stream
+    // arena's growth only when they don't cover what the load wants
+    bool arena = true;
     if (g_game_version == GameVersion::Jak2) {
       u64 want;
       {
         std::lock_guard<std::mutex> lk(m_lock);
         want = m_room_bytes;
       }
-      const u64 bytes = dist_make_room(want);
-      if (bytes) {
-        lg::info("[ctr] making room: {} KB of chunks far beyond their draw distance freed (the "
-                 "farthest first; {} KB wanted)",
-                 bytes / 1024, want / 1024);
-      }
+      const u64 bytes = need_make_room(want);
+      lg::info("[ctr] making room: {} KB of chunks beyond their draw distance freed (the farthest "
+               "first; {} KB wanted)",
+               bytes / 1024, want / 1024);
+      arena = whole || !want || bytes < want;
+    }
+    if (arena) {
+      // (AI-assisted, streammem) the queued stream jobs' and the not yet taken meshes' pieces too:
+      // they kept growth segments from emptying (SM-1)
+      stream_drop_pending(whole);
+      stream_shrink(true, whole);  // (AI-assisted, streaming) the arena's growth back for the load
     }
   }
   if (dropped || room) {
@@ -1224,14 +1228,16 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
       const u32 count = c.index_end - c.index_first;
       const int tail = c.normals_offset ? (int)(c.vertex_count * c.tail_k) : 0;
       int mesh = ctr_gpu_mesh_begin_tail(c.vertex_count, tail, count, &vdst, &idst);
-      while (mesh < 0 && make_room(job.name, "meshes", parts_left_bytes(job, &c))) {
+      // (a Jak II read by need stops here: its room is need_update's to make, the rest is asked
+      // for again)
+      const bool by_need = job.dormant && g_game_version == GameVersion::Jak2;
+      while (mesh < 0 && !by_need && make_room(job.name, "meshes", parts_left_bytes(job, &c))) {
         mesh = ctr_gpu_mesh_begin_tail(c.vertex_count, tail, count, &vdst, &idst);
       }
       if (mesh < 0 && !cancelled()) {
-        const char* kind = job.dist      ? "read back by distance"
-                           : job.dormant ? "dormant read back"
-                           : job.detail  ? "detail reload"
-                                         : "repair";
+        const char* kind = job.dormant  ? "read by need"
+                           : job.detail ? "detail reload"
+                                        : "repair";
         // (one line per level and kind every kPartsLogMs: a lasting shortage retries every second)
         double& logged = m_parts_log_ms[job.name + kind];
         if (logged <= 0 || ctr_gpu_time_ms() - logged >= kPartsLogMs) {
@@ -1358,43 +1364,34 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
                     : lev->repair_requested) = false;
     bump_set_generation();  // (AI-assisted)
   }
-  // (AI-assisted, j2-mem) dormant levels: the chunks of the job that didn't come are freed ones
-  // again (another read when needed)
+  // the chunks of the job that didn't come are absent again (another read when needed)
   if (lev && d.job.dormant) {
     for (const auto& c : d.job.chunks) {
       if (c.chunk < lev->chunk_dormant.size()) {
         u8& fl = lev->chunk_dormant[c.chunk];
-        if (fl == CtrLevelData::kDormReading) {
-          fl = CtrLevelData::kDormFreed;
-        } else if (fl == CtrLevelData::kDistReading) {
-          fl = CtrLevelData::kDistFreed;  // (AI-assisted, j2strip)
+        if (fl == CtrLevelData::kDistReading) {
+          fl = CtrLevelData::kDistFreed;
         } else if (fl == CtrLevelData::kTitleReading) {
           fl = CtrLevelData::kTitleFreed;
         }
       }
     }
   }
-  // (AI-assisted, j2strip) a distance read back that ran short: what it made is taken (the
-  // nearest first next time), the rest read again a second later
+  // a read that ran short (the heap in pieces): what it made is taken, the rest asked for again
+  // a second later
   if (lev && d.yielded) {
     lev->dormant_retry_frame = lev->detail_retry_frame = frame;
-  } else if (lev && d.job.dist && d.result != LoadResult::LOADED) {
+  } else if (lev && d.job.dormant && d.result != LoadResult::LOADED) {
     lev->dormant_retry_frame = frame + 30;
     if (lev->dist_warn_ms <= 0 || ctr_gpu_time_ms() - lev->dist_warn_ms >= kPartsLogMs) {
       lev->dist_warn_ms = ctr_gpu_time_ms();
-      lg::warn("[ctr] {}: {} of {} chunks read back by distance (no memory for the others yet)",
-               name, d.meshes.size(), d.job.chunks.size());
+      lg::warn("[ctr] {}: {} of {} chunks read (no memory for the others yet; {})", name,
+               d.meshes.size(), d.job.chunks.size(), linear_room_text());
     }
   }
-  // (AI-assisted, streammem) a dormant read back or a detail reload that ran short keeps what it
-  // made too (it threw all of it away and read it all again: SM-1, SM-7); the rest is read by the
-  // next one (collect_chunks: the chunks without a mesh), soon when this one made some, else after
-  // a wait (not every frame while the memory isn't there)
-  if (lev && !d.yielded && d.job.dormant && !d.job.dist && d.result != LoadResult::LOADED) {
-    lev->dormant_retry_frame = frame + (d.meshes.empty() ? 120 : 30);
-    lg::warn("[ctr] {}: {} of {} dormant chunks read back (no memory for the others yet)", name,
-             d.meshes.size(), d.job.chunks.size());
-  }
+  // (AI-assisted, streammem) a detail reload that ran short keeps what it made too; the rest is
+  // read by the next one (collect_chunks: the chunks without a mesh), soon when this one made
+  // some, else after a wait (not every frame while the memory isn't there)
   if (lev && !d.yielded && d.job.detail && !d.job.dormant && d.result != LoadResult::LOADED) {
     lev->detail_retry_frame = frame + (d.meshes.empty() ? 300 : 30);
     lg::warn("[ctr] {}: {} of {} detail meshes read again (no memory for the others yet), the "
@@ -1447,11 +1444,7 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
     made++;
   }
   delete_parts(d);
-  if (d.job.dist) {
-    // (AI-assisted, j2strip) (logged when it ran short)
-  } else if (d.job.dormant) {
-    lg::info("[ctr] {}: {} dormant chunks back", name, made);  // (AI-assisted, j2-mem)
-  } else if (d.job.detail) {
+  if (d.job.detail && !d.job.dormant) {
     // (AI-assisted, streammem) jobs of kDetailJobBytes: the next one at the next draw
     if (d.result == LoadResult::LOADED && !d.job.detail_more) {
       lev->detail_loaded = true;
@@ -1488,6 +1481,11 @@ void CtrLevels::unload_detail(CtrLevelData& lev) {
       if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
         tod_drop_entries(*lev.tod, ci);
       }
+      // (Jak II: a chunk with a draw distance comes back by need, not with the detail reload)
+      if (g_game_version == GameVersion::Jak2 && ci < lev.chunk_dormant.size() &&
+          lev.chunk_dormant[ci] == 0 && dist_frees(lev, ci)) {
+        lev.chunk_dormant[ci] = CtrLevelData::kDistFreed;
+      }
       freed++;
     }
   }
@@ -1500,31 +1498,15 @@ void CtrLevels::unload_detail(CtrLevelData& lev) {
   }
 }
 
-// ---- (AI-assisted, j2-mem) Dormant levels (Jak II, config dormant_levels) ----
-// Haven City keeps a neighbouring district loaded that can't be seen from where Jak is: the game's
-// visibility string for it is all zero (ctyindb from the slums: 7.4 MB of linear memory, nothing
-// of it drawn). After kDormantFrames level draws so, the level is dormant: it wants no near chunks
-// (the stream scheduler frees its ones first), and the meshes of its ties with a distance limit
-// (the small and medium objects: 4.4 MB of ctyindb's 7.4) are freed where they are more than
-// kDormFreeMeters from the camera (its sphere's surface; from the slums 4.3 MB of ctyindb's are
-// beyond 100 m, 3.2 MB beyond 150 m). Kept: everything near the camera, and what can be drawn from anywhere the string
-// may show the level again: the tfrag (all tiers: small in Jak II), the ties without a distance
-// limit (landmarks, the far versions of the LOD groups), the vista tier, the chunks the string
-// can't hide (shrubs: no visibility runs), textures and merc models. Freed chunks are read back
-// (a detail job of those chunks) as the camera comes within kDormReadMeters of them (now, 1.5 s
-// ahead at its speed, or Jak), and all of them once the string shows the level again: what is
-// nearer than that is always there when the level appears. A farther one not back yet isn't drawn,
-// and once its mesh comes it stays hidden while in view, at most kDormantHoldFrames from when that
-// began (as a tie LOD group whose near chunk came late, streaming.md): it appears out of view.
+// ---- Dormant levels (Jak II, config dormant_levels) ----
+// A level the game's visibility string hides whole for kDormantFrames level draws is dormant: it
+// wants no near chunks, and its tie chunks with a draw distance that the string hides are needed
+// only within kNeedDormMeters ("Residency by need"). One not back when the string shows the level
+// again isn't drawn; once its mesh comes it stays hidden while in view, at most
+// kDormantHoldFrames.
 namespace {
 constexpr u32 kDormantFrames = 90;  // 3 s at 30 fps
 constexpr u32 kDormantHoldFrames = 120;
-constexpr float kDormFreeMeters = 100.f, kDormReadMeters = 75.f;
-constexpr float kDormLeadFrames = 45.f;  // 1.5 s at 30 fps (the camera's velocity is per frame)
-// (AI-assisted, streammem) one read back: at most this much, the nearest first (the rest by the
-// next one): ctyindb's 4.3 MB in one job failed part way under memory pressure and was read again
-// whole every 2 s
-constexpr u64 kDormJobBytes = 2u * 1024 * 1024;
 // a chunk the visibility string hides whole when it is zero: visibility runs, each with an id
 bool chunk_hideable(const CtrLevelData& lev, size_t ci) {
   const auto& ch = lev.chunks[ci];
@@ -1539,146 +1521,14 @@ bool chunk_hideable(const CtrLevelData& lev, size_t ci) {
   }
   return true;
 }
-// freed while dormant and far: a tie chunk with a distance limit the visibility string hides
-bool dormant_frees(const CtrLevelData& lev, size_t ci) {
-  const auto& ch = lev.chunks[ci];
-  return !lev.is_unit(ci) && ch.lod_tier == 0 && ch.kind == c3l::CHUNK_KIND_TIE &&
-         ch.max_dist > 0.f && ci < lev.mesh_index_first.size() &&
-         lev.mesh_index_first[ci] != UINT32_MAX && chunk_hideable(lev, ci);
-}
 }  // namespace
 
-void CtrLevels::dormant_update(u64 frame) {
-  if (!m_cam_valid) {
-    return;
-  }
-  constexpr float kM = 4096.f;
-  float pos[3][3];
-  int np = 2;
-  for (int c = 0; c < 3; c++) {
-    pos[0][c] = m_cam[c];
-    pos[1][c] = m_cam[c] + m_cam_vel[c] * kDormLeadFrames;
-  }
-  if (m_target_frame + 3 >= frame) {
-    for (int c = 0; c < 3; c++) {
-      pos[2][c] = m_target[c];
-    }
-    np = 3;
-  }
-  for (auto& [name, lp] : m_levels) {
-    CtrLevelData& lev = *lp;
-    if (lev.chunk_dormant.empty()) {
-      if (!lev.dormant) {
-        continue;
-      }
-      lev.chunk_dormant.assign(lev.chunks.size(), 0);
-      lev.chunk_hold_since.assign(lev.chunks.size(), 0);
-    }
-    if (!lev.detail_loaded || lev.repair_requested) {
-      continue;  // (far mode's partial unload, a repair in flight: theirs first)
-    }
-    std::vector<std::pair<float, DetailChunk>> want;  // (AI-assisted, streammem) with its distance
-    u32 freed = 0, left_out = 0;
-    u64 freed_bytes = 0;
-    for (size_t ci = 0; ci < lev.chunks.size() && ci < lev.meshes.size(); ci++) {
-      const u8 fl = lev.chunk_dormant[ci];
-      if (fl == CtrLevelData::kDormReading || fl >= CtrLevelData::kDistFreed ||
-          (fl == 0 && !lev.dormant) || !dormant_frees(lev, ci)) {  // (j2strip: dist_update's)
-        continue;
-      }
-      const auto& ch = lev.chunks[ci];
-      float d2 = 1e30f;
-      for (int i = 0; i < np; i++) {
-        const float dx = pos[i][0] - ch.bsphere[0], dy = pos[i][1] - ch.bsphere[1],
-                    dz = pos[i][2] - ch.bsphere[2];
-        d2 = std::min(d2, dx * dx + dy * dy + dz * dz);
-      }
-      const float d = std::sqrt(d2) - ch.bsphere[3];
-      if (fl == CtrLevelData::kDormFreed) {
-        if (!lev.dormant || d < kDormReadMeters * kM) {
-          want.emplace_back(d, DetailChunk{(u32)ci, ch.first_vertex, ch.vertex_count,
-                                           lev.mesh_index_first[ci], lev.mesh_index_end[ci],
-                                           lev.tail_file(ci), lev.tail_k(ci)});
-        }
-      } else if (d > kDormFreeMeters * kM && lev.meshes[ci] < 0) {
-        // left out by an incomplete load (no memory): a freed one now, not one to repair
-        lev.chunk_dormant[ci] = CtrLevelData::kDormFreed;
-        left_out++;
-      } else if (d > kDormFreeMeters * kM) {
-        freed_bytes += CtrStreamArena::mesh_bytes(ch.vertex_count,
-                                                  lev.mesh_index_end[ci] - lev.mesh_index_first[ci]);
-        ctr_gpu_mesh_delete(lev.meshes[ci]);  // freed after the GPU is done with it
-        lev.meshes[ci] = -1;
-        forget_chunk_colors(lev, ci);
-        if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
-          tod_drop_entries(*lev.tod, ci);
-        }
-        lev.chunk_dormant[ci] = CtrLevelData::kDormFreed;
-        freed++;
-      }
-    }
-    if (freed || left_out) {
-      bump_set_generation();
-      lg::info("[ctr] {}: dormant: {} tie chunks freed ({} KB){}", name, freed, freed_bytes / 1024,
-               left_out ? fmt::format(", {} left out by its load not repaired", left_out) : "");
-      if (lev.incomplete) {
-        u32 bytes = 0;
-        lev.incomplete = missing_parts(lev, &bytes) > 0;
-      }
-    }
-    if (!want.empty() && !lev.dormant_requested && !lev.detail_requested &&
-        !lev.repair_requested && frame >= lev.dormant_retry_frame) {
-      Job job;
-      job.name = lev.name;
-      job.detail = true;
-      job.dormant = true;
-      job.generation = lev.generation;
-      job.path = lev.path;
-      job.vertex_data_offset = lev.vertex_data_offset;
-      job.index_data_offset = lev.index_data_offset;
-      // (AI-assisted, streammem) the nearest first, at most kDormJobBytes (then in file order)
-      std::sort(want.begin(), want.end(),
-                [](const auto& a, const auto& b) { return a.first < b.first; });
-      u64 bytes = 0;
-      for (const auto& [d, c] : want) {
-        const u32 b = CtrStreamArena::mesh_bytes(c.vertex_count, c.index_end - c.index_first);
-        if (!job.chunks.empty() && bytes + b > kDormJobBytes) {
-          break;
-        }
-        lev.chunk_dormant[c.chunk] = CtrLevelData::kDormReading;
-        bytes += b;
-        job.chunks.push_back(c);
-      }
-      std::sort(job.chunks.begin(), job.chunks.end(), [](const DetailChunk& a, const DetailChunk& b) {
-        return a.first_vertex < b.first_vertex;
-      });
-      job.room_bytes = bytes;
-      lev.dormant_requested = true;
-      lg::info("[ctr] {}: camera near its freed ties, reading {} of {} chunks back ({} KB)", name,
-               job.chunks.size(), want.size(), bytes / 1024);
-      request(job);
-    }
-  }
-}
-
-// ---- (AI-assisted, j2strip) Distance freeing (Jak II: a level short of linear memory) ----
-// Jak II loads levels in pairs that don't fit the 3DS's linear memory: the strip mine (its 670k
-// shrub triangles are 13 MB of meshes, 19 MB in all) with Vin's room beside it (7 MB) left 128 KB
-// free and 79 parts out, and the slums with the industrial district or the mountain had the same.
-// Most of those meshes are shrubs and small ties drawn only within their distance (shrubs 35-160 m,
-// ties their limit x tie_distance_scale_max), so nothing far beyond it needs them. A load whose
-// meshes don't fit the free linear memory (dist_load_tight; dist_free on) leaves out the chunks
-// of such kinds that are farther than kDistFreeMeters beyond that distance (with its 10%
-// hysteresis, at the largest auto_detail distance) from the camera now, 2 s ahead at its speed and
-// Jak; a load that runs short and makes room (housekeeping: dist_make_room) frees those of the
-// loaded levels, the farthest first and about as much as it wants (all of them at its second try),
-// and turns dist_free on for them. While the loaded levels leave less than kDistPlayRoom above the
-// stream arena's floor (its growth counted as free), dist_update frees the chunks more than
-// kDistPlayFreeMeters beyond their distance, the farthest first. A freed chunk is
-// read back (a dormant job of its level, the nearest first) as soon as the camera is within
-// kDistReadMeters beyond its distance. A chunk not back yet within its distance is not drawn: one
-// in view stays hidden while in view once it came, as a dormant level's (draw_level, the screen
-// kept black after a cut). With enough linear memory none of this happens: the same output.
+// ---- Residency by need (Jak II; docs/3ds-port/streaming.md "Jak II: residency by need") ----
+// A shrub or tie chunk with a draw distance is resident while a position (the camera now, 1 and
+// 2 s ahead, Jak, a continue's camera) is within its reach plus kNeedReadMeters, under one budget
+// of linear memory: need_update reads the nearest absent ones and frees the farthest resident
+// ones for them, for a level load, a repair or the stream arena. A level's load holds its other
+// chunks and the ones needed then.
 namespace {
 // (AI-assisted, title-popin) what is in view and moving away keeps its nearer version / stays drawn
 // up to this many times its distance (with the 10% hysteresis out of view): it goes when it is out
@@ -1703,17 +1553,20 @@ static const float kShrubNearK =
 #endif
 // a shrub run's fade (CtrTfragRenderer::m_run_fade): blend FIX's 0x80 = drawn as it is
 constexpr u8 kRunOpaque = 0x80;
-constexpr float kDistFreeMeters = 60.f, kDistReadMeters = 30.f;
-// in play (dist_update): while the loaded levels leave less than kDistPlayRoom above the stream
-// arena's floor (its growth counted as free), the chunks this far beyond their distance go, the
-// farthest first; checked every kDistPlayEvery frames, not within kDistPlayCutFrames of a cut
-constexpr float kDistPlayFreeMeters = 90.f;
-constexpr u64 kDistPlayRoom = 12u * 1024 * 1024;
-constexpr u64 kDistPlayEvery = 15, kDistPlayCutFrames = 60;
-constexpr float kDistLeadFrames = 60.f;  // 2 s at 30 fps (the camera's velocity is per frame)
-constexpr u32 kDistJobBytes = 2u * 1024 * 1024;  // one read back: at most this much (the nearest)
-constexpr u64 kDistLoadMargin = 1536 * 1024;     // a load is tight with less left than this
-constexpr u64 kDistReadRoom = 512 * 1024;  // (AI-assisted, j2pop) a read back with less left frees
+constexpr float kNeedReadMeters = 30.f, kNeedKeepMeters = 45.f, kNeedSwapMeters = 30.f;
+constexpr float kNeedDormMeters = 45.f;
+constexpr float kNeedFarMeters = 10000.f;  // added for a level in far mode: the first to go
+constexpr float kDistLeadFrames = 60.f;    // 2 s at 30 fps (the camera's velocity is per frame)
+constexpr u64 kNeedEvery = 4;              // frames between passes (freed memory is back by then)
+constexpr u64 kNeedJobBytes = 256 * 1024, kNeedBlackJobBytes = 2u * 1024 * 1024;
+constexpr u64 kNeedIdleRoom = 2u * 1024 * 1024;     // kept free for the start of the next load
+constexpr u64 kNeedLoadDefault = 4u * 1024 * 1024;  // a load whose size isn't known yet
+constexpr u64 kNeedLoadMargin = 512 * 1024;
+constexpr u64 kNeedFillRoom = 8u * 1024 * 1024;     // with this much to spare: the rest too
+constexpr float kNeedCapStep = 0.125f;
+constexpr u32 kNeedShortPasses = 4, kNeedOkPasses = 75;
+constexpr u64 kNeedCapHoldFrames = 900;
+constexpr u64 kNeedCapUpRoom = 3u * 1024 * 1024;
 // a chunk's largest draw distance (game units) at any auto_detail position, with the 10%
 // hysteresis (draw_level's decide_dist); 0: none (drawn at any distance: kept)
 float dist_limit(const CtrLevelData& lev, const c3l::Chunk& ch) {
@@ -1747,7 +1600,7 @@ bool dist_frees(const CtrLevelData& lev, size_t ci) {
          dist_limit(lev, ch) > 0;
 }
 // the squared distance from the nearest position to the chunk's sphere center
-float dist_d2(const c3l::Chunk& ch, const float pos[4][3], int np) {
+float dist_d2(const c3l::Chunk& ch, const float pos[][3], int np) {
   float d2 = 1e30f;
   for (int i = 0; i < np; i++) {
     const float dx = pos[i][0] - ch.bsphere[0], dy = pos[i][1] - ch.bsphere[1],
@@ -1756,22 +1609,62 @@ float dist_d2(const c3l::Chunk& ch, const float pos[4][3], int np) {
   }
   return d2;
 }
-// beyond `meters` past its draw distance from every position
-bool dist_beyond(const CtrLevelData& lev, const c3l::Chunk& ch, const float pos[4][3], int np,
-                 float meters) {
-  const float lim = dist_limit(lev, ch) + meters * 4096.f + ch.bsphere[3];
-  return dist_d2(ch, pos, np) > lim * lim;
+// a managed chunk's reach from its sphere's surface at auto_detail position t: its draw limit with
+// the hysteresis or fade band it goes by
+float need_reach(const CtrLevelData& lev, const c3l::Chunk& ch, float t) {
+  const auto& s = ctr_settings();
+  float d = 0;
+  if (ch.kind == c3l::CHUNK_KIND_SHRUB) {
+    if (lev.shrub_ps2_dist) {
+      const float k0 = s.shrub_scale;
+      d = ch.max_dist * kShrubFarK * (k0 + (std::max(s.shrub_scale_max, k0) - k0) * t) *
+          s.detail_scale;
+    } else if (s.shrub_distance > 0) {
+      const float d0 = s.shrub_distance;
+      d = (d0 + (std::max(s.shrub_distance_max, d0) - d0) * t) * 4096.f * s.detail_scale;
+    } else {
+      d = ch.max_dist * s.detail_scale;
+    }
+  } else {
+    const float k0 = s.tie_distance_scale;
+    d = ch.max_dist * (k0 + (std::max(s.tie_distance_scale_max, k0) - k0) * t) * s.detail_scale;
+  }
+  if (!(d > 0)) {
+    return dist_limit(lev, ch);
+  }
+  if (s.draw_distance > 0) {
+    d = std::min(d, s.draw_distance * 4096.f);
+  }
+  return d * std::max(1.1f, ctr_detail::kFadeBand);
 }
-// (AI-assisted, j2pop) how far (game units) it is beyond `meters` past its draw distance from the
-// nearest position (<= 0: not beyond)
-float dist_excess(const CtrLevelData& lev, const c3l::Chunk& ch, const float pos[4][3], int np,
-                  float meters) {
-  const float lim = dist_limit(lev, ch) + meters * 4096.f + ch.bsphere[3];
-  return std::sqrt(dist_d2(ch, pos, np)) - lim;
+// how far the nearest position is beyond that reach (game units; < 0: within)
+float need_excess(const c3l::Chunk& ch, float reach, const float pos[][3], int np) {
+  return std::sqrt(dist_d2(ch, pos, np)) - reach - ch.bsphere[3];
+}
+// every position is beyond far mode's distance and the read margin outside the level's bounds
+bool need_level_far(const CtrLevelData& lev, const float pos[][3], int np) {
+  const float fl = ctr_settings().far_level_distance;
+  if (!(fl > 0) || !np) {
+    return false;
+  }
+  const float m = (fl * 1.1f + kNeedReadMeters) * 4096.f;
+  for (int i = 0; i < np; i++) {
+    float d2 = 0;
+    for (int c = 0; c < 3; c++) {
+      const float v = pos[i][c];
+      const float o = v < lev.bbox_min[c] ? lev.bbox_min[c] - v
+                                         : (v > lev.bbox_max[c] ? v - lev.bbox_max[c] : 0.f);
+      d2 += o * o;
+    }
+    if (d2 <= m * m) {
+      return false;
+    }
+  }
+  return true;
 }
 }  // namespace
 
-int CtrLevels::dist_positions(float pos[4][3]) const {
+int CtrLevels::need_positions(float pos[kNeedPos][3]) const {
   if (!m_cam_valid) {
     return 0;
   }
@@ -1779,217 +1672,336 @@ int CtrLevels::dist_positions(float pos[4][3]) const {
     pos[0][c] = m_cam[c];
     pos[1][c] = m_cam[c] + m_cam_vel[c] * kDistLeadFrames * 0.5f;
     pos[2][c] = m_cam[c] + m_cam_vel[c] * kDistLeadFrames;
-    pos[3][c] = m_target[c];
   }
-  return m_target_frame + 3 >= m_cam_frame ? 4 : 3;
+  int n = 3;
+  if (m_target_frame + 3 >= m_cam_frame) {
+    for (int c = 0; c < 3; c++) {
+      pos[n][c] = m_target[c];
+    }
+    n++;
+  }
+  if (m_cont_valid && m_game_black.load(std::memory_order_relaxed)) {
+    for (int c = 0; c < 3; c++) {
+      pos[n][c] = m_cont_cam[c];
+    }
+    n++;
+  }
+  return n;
 }
 
-// the chunks of lev distance freeing may free that are far beyond their distance: freed (or, left
-// out by an incomplete load, not repaired); returns the bytes freed
-u64 CtrLevels::dist_free_far(CtrLevelData& lev,
-                             const float pos[4][3],
-                             int np,
-                             float min_excess,
-                             float meters,
-                             bool log) {
-  if (lev.chunk_dormant.size() != lev.chunks.size()) {
-    lev.chunk_dormant.assign(lev.chunks.size(), 0);
-    lev.chunk_hold_since.assign(lev.chunks.size(), 0);
-  }
-  if (!lev.detail_loaded || lev.repair_requested) {
-    return 0;  // (far mode's partial unload, a repair in flight: theirs first)
-  }
-  u64 bytes = 0;
-  u32 freed = 0, left_out = 0;
-  for (size_t ci = 0; ci < lev.chunks.size() && ci < lev.meshes.size() &&
-                      ci < lev.mesh_index_first.size();
-       ci++) {
-    if (lev.chunk_dormant[ci] != 0 || lev.mesh_index_first[ci] == UINT32_MAX ||
-        !dist_frees(lev, ci) || !dist_beyond(lev, lev.chunks[ci], pos, np, meters) ||
-        (min_excess > 0 && dist_excess(lev, lev.chunks[ci], pos, np, meters) <= min_excess)) {
-      continue;
-    }
-    const auto& ch = lev.chunks[ci];
-    if (lev.meshes[ci] >= 0) {
-      bytes += CtrStreamArena::mesh_bytes(ch.vertex_count,
-                                          lev.mesh_index_end[ci] - lev.mesh_index_first[ci]) +
-               lev.normals_tail_bytes(ci);
-      ctr_gpu_mesh_delete(lev.meshes[ci]);  // freed after the GPU is done with it
-      lev.meshes[ci] = -1;
-      forget_chunk_colors(lev, ci);
-      if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
-        tod_drop_entries(*lev.tod, ci);
-      }
-      freed++;
-    } else {
-      left_out++;
-    }
-    lev.chunk_dormant[ci] = CtrLevelData::kDistFreed;
-  }
-  if (freed || left_out) {
-    bump_set_generation();
-    if (lev.incomplete) {
-      u32 b = 0;
-      lev.incomplete = missing_parts(lev, &b) > 0;
-    }
-    if (log) {
-      lg::info("[ctr] {}: linear memory short: {} chunks far beyond their draw distance freed ({} "
-               "KB){}; linear free {} KB",
-               lev.name, freed, bytes / 1024,
-               left_out ? fmt::format(", {} left out by its load not repaired", left_out) : "",
-               ctr_gpu_linear_free() / 1024);
-    }
-    m_dst.freed_chunks += freed;
-    m_dst.freed_bytes += bytes;
-  }
-  return bytes;
-}
-
-// (AI-assisted, j2pop) a load short of memory (make_room): the loaded levels' chunks far beyond
-// their distance, the farthest first, until about want bytes (+ kDistLoadMargin) are freed; want
-// 0: all of them (make_room's second try in a job). The HW log of Oct 25 (a continue to the
-// slums): one texture pool of 2.7 MB freed 7.7 MB, 2 MB of it around where the camera went next,
-// read back over seconds in view.
-u64 CtrLevels::dist_make_room(u64 want, float meters, bool log) {
-  if (meters <= 0.f) {
-    meters = kDistFreeMeters;
-  }
-  float pos[4][3];
-  const int np = dist_positions(pos);
-  std::vector<std::pair<float, u32>> cand;  // excess, bytes
-  if (want && np) {
-    for (auto& [n, lp] : m_levels) {
-      const CtrLevelData& lev = *lp;
-      if (!lev.detail_loaded || lev.repair_requested) {
-        continue;
-      }
-      for (size_t ci = 0; ci < lev.chunks.size() && ci < lev.meshes.size() &&
-                          ci < lev.mesh_index_first.size();
-           ci++) {
-        if ((ci < lev.chunk_dormant.size() && lev.chunk_dormant[ci] != 0) || lev.meshes[ci] < 0 ||
-            lev.mesh_index_first[ci] == UINT32_MAX || !dist_frees(lev, ci)) {
-          continue;
-        }
-        const auto& ch = lev.chunks[ci];
-        const float e = dist_excess(lev, ch, pos, np, meters);
-        if (e > 0) {
-          cand.emplace_back(e, CtrStreamArena::mesh_bytes(
-                                   ch.vertex_count,
-                                   lev.mesh_index_end[ci] - lev.mesh_index_first[ci]));
-        }
-      }
-    }
-  }
-  // the excess the freeing stops at (0: all)
-  float min_excess = 0.f;
-  if (want && np) {
-    std::sort(cand.begin(), cand.end(),
-              [](const auto& a, const auto& b) { return a.first > b.first; });
-    u64 sum = 0;
-    for (size_t k = 0; k < cand.size(); k++) {
-      sum += cand[k].second;
-      if (sum >= want + kDistLoadMargin) {
-        // (dist_free_far frees those beyond the next one's excess)
-        min_excess = k + 1 < cand.size() ? cand[k + 1].first : 0.f;
-        break;
-      }
-    }
-  }
-  u64 bytes = 0;
-  for (auto& [n, lp] : m_levels) {
-    lp->dist_free = true;
-    bytes += dist_free_far(*lp, pos, np, min_excess, meters, log);
-  }
-  return bytes;
-}
-
-void CtrLevels::dist_update(u64 frame, u32 free_now) {
-  if (g_game_version != GameVersion::Jak2) {
-    return;
-  }
-  float pos[4][3];
-  const int np = dist_positions(pos);
-  {
-    std::lock_guard<std::mutex> lk(m_lock);  // (for the loader: load_file)
-    memcpy(m_dist_snap, pos, sizeof(pos));
-    m_dist_snap_n = np;
-  }
-  if (!np) {
-    return;
-  }
-  // short of a level load's room: free by position before a load has to (read back 60 m nearer)
-  if (frame >= m_dist_play_frame + kDistPlayEvery && frame > m_cut_frame + kDistPlayCutFrames) {
-    m_dist_play_frame = frame;
-    const u32 cap = CtrStreamArena::get().capacity(), first = ctr_stream_kb() * 1024u;
-    const u64 avail = (u64)free_now + (cap > first ? cap - first : 0);
-    const u64 room = (u64)ctr_settings().stream_reserve_kb * 1024u + kDistPlayRoom;
-    if (avail < room) {
-      m_dst.play_frees += dist_make_room(room - avail, kDistPlayFreeMeters, false) > 0;
-    }
-  }
+void CtrLevels::need_scan(const float pos[kNeedPos][3], int np, float t, u64 frame) {
+  constexpr float kM = 4096.f;
+  m_need_have.clear();
+  m_need_want.clear();
+  m_dst.resident = m_dst.managed = 0;
   for (auto& [name, lp] : m_levels) {
     CtrLevelData& lev = *lp;
-    if (!lev.dist_free) {
+    const size_t n = lev.chunks.size();
+    if (lev.chunk_dormant.size() != n || lev.meshes.size() != n ||
+        lev.mesh_index_first.size() != n) {
       continue;
     }
-    if (lev.chunk_dormant.size() != lev.chunks.size() || !lev.detail_loaded ||
-        lev.dormant_requested || lev.detail_requested || lev.repair_requested ||
-        frame < lev.dormant_retry_frame) {
-      continue;
-    }
-    // the freed chunks within kDistReadMeters beyond their distance, the nearest first
-    std::vector<std::pair<float, size_t>> near;
-    for (size_t ci = 0; ci < lev.chunks.size() && ci < lev.meshes.size(); ci++) {
-      if (lev.chunk_dormant[ci] != CtrLevelData::kDistFreed) {
+    // (far mode draws none of them; a level not drawn lately shows nothing)
+    const bool drawn = lev.last_draw_frame + 3 >= frame && !lev.was_far &&
+                       lev.chunk_state.size() == n;
+    const float far_e = need_level_far(lev, pos, np) ? kNeedFarMeters * kM : 0.f;
+    bool left_out = false;
+    for (size_t ci = 0; ci < n; ci++) {
+      u8& fl = lev.chunk_dormant[ci];
+      if (fl == CtrLevelData::kDistReading || fl >= CtrLevelData::kTitleFreed ||
+          lev.mesh_index_first[ci] == UINT32_MAX || !dist_frees(lev, ci)) {
         continue;
       }
       const auto& ch = lev.chunks[ci];
-      if (!dist_beyond(lev, ch, pos, np, kDistReadMeters)) {
-        const float r = dist_limit(lev, ch) + ch.bsphere[3];
-        near.emplace_back(dist_d2(ch, pos, np) - r * r, ci);
+      if (fl == 0 && lev.meshes[ci] < 0) {
+        if (lev.repair_requested) {
+          continue;  // (the repair in flight may hold it)
+        }
+        fl = CtrLevelData::kDistFreed;  // left out by a load or a read short of memory
+        left_out = true;
+      }
+      const bool hidden = lev.dormant && ch.kind == c3l::CHUNK_KIND_TIE && chunk_hideable(lev, ci);
+      float reach = need_reach(lev, ch, t);
+      if (hidden) {
+        reach = std::min(reach, kNeedDormMeters * kM);
+      }
+      const u32 bytes = CtrStreamArena::mesh_bytes(
+                            ch.vertex_count, lev.mesh_index_end[ci] - lev.mesh_index_first[ci]) +
+                        lev.normals_tail_bytes(ci);
+      const float e = need_excess(ch, reach, pos, np) + far_e;
+      // within its draw distance by the last draw's decision
+      const bool in_range = drawn && !hidden && (lev.chunk_state[ci] & 4);
+      m_dst.managed += bytes;
+      if (fl == 0) {
+        m_dst.resident += bytes;
+        if (!in_range) {
+          m_need_have.push_back({&lev, (u32)ci, bytes, e});
+        }
+      } else {
+        m_need_want.push_back({&lev, (u32)ci, bytes, in_range ? std::min(e, -1.f) : e});
       }
     }
-    if (near.empty()) {
-      continue;
+    if (left_out && lev.incomplete) {
+      u32 b = 0;
+      lev.incomplete = missing_parts(lev, &b) > 0;
     }
-    std::sort(near.begin(), near.end());
+  }
+}
+
+void CtrLevels::need_free(CtrLevelData& lev, u32 ci) {
+  ctr_gpu_mesh_delete(lev.meshes[ci]);  // freed after the GPU is done with it
+  lev.meshes[ci] = -1;
+  forget_chunk_colors(lev, ci);
+  if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
+    tod_drop_entries(*lev.tod, ci);
+  }
+  lev.chunk_dormant[ci] = CtrLevelData::kDistFreed;
+}
+
+u64 CtrLevels::need_make_room(u64 want) {
+  float pos[kNeedPos][3];
+  const int np = need_positions(pos);
+  need_scan(pos, np, ctr_settings().auto_detail ? m_need_cap : 0.f, m_render_frame.load());
+  std::sort(m_need_have.begin(), m_need_have.end(),
+            [](const NeedCand& a, const NeedCand& b) { return a.e > b.e; });
+  u64 got = 0;
+  for (const auto& h : m_need_have) {
+    if (!(h.e > 0) || (want && got >= want + kNeedLoadMargin)) {
+      break;
+    }
+    need_free(*h.lev, h.chunk);
+    got += h.bytes;
+  }
+  if (got) {
+    bump_set_generation();
+    m_dst.load_bytes += got;
+  }
+  return got;
+}
+
+void CtrLevels::need_update(u64 frame, u32 free_now, u64 parts_room, bool level_loading,
+                            u64 claim) {
+  if (g_game_version != GameVersion::Jak2) {
+    return;
+  }
+  float pos[kNeedPos][3];
+  const int np = need_positions(pos);
+  {
+    std::lock_guard<std::mutex> lk(m_lock);  // (for the loader: load_file)
+    memcpy(m_need_snap, pos, sizeof(pos));
+    m_need_snap_n = np;
+  }
+  if (!np || frame < m_need_frame + kNeedEvery) {
+    return;
+  }
+  m_need_frame = frame;
+  constexpr float kM = 4096.f;
+  const auto& s = ctr_settings();
+  // what waits for linear memory: a level load, a repair, the stream arena (claim)
+  if (level_loading) {
+    const u64 left = m_load_left.load(std::memory_order_relaxed);
+    claim += left ? left + kNeedLoadMargin : kNeedLoadDefault;
+  }
+  claim += m_stream_repair_room;
+  const u64 reserve = (u64)s.stream_reserve_kb * 1024u + claim + parts_room +
+                      (level_loading ? 0 : kNeedIdleRoom);
+  s64 room = (s64)free_now - (s64)reserve;
+  need_scan(pos, np, s.auto_detail ? m_need_cap : 0.f, frame);
+  auto& have = m_need_have;
+  auto& want = m_need_want;
+  std::sort(have.begin(), have.end(),
+            [](const NeedCand& a, const NeedCand& b) { return a.e > b.e; });
+  std::sort(want.begin(), want.end(),
+            [](const NeedCand& a, const NeedCand& b) { return a.e < b.e; });
+  size_t hi = 0;
+  s64 coming = 0;  // freed in this pass: free memory by the next one
+  auto evict = [&](float beyond) {
+    if (hi >= have.size() || !(have[hi].e > beyond)) {
+      return false;
+    }
+    need_free(*have[hi].lev, have[hi].chunk);
+    coming += have[hi].bytes;
+    m_dst.freed_chunks++;
+    m_dst.freed_bytes += have[hi].bytes;
+    hi++;
+    return true;
+  };
+  while (room + coming < 0 && evict(claim ? 0.f : kNeedKeepMeters * kM)) {
+  }
+  u64 short_bytes = claim && room + coming < 0 ? (u64)(-(room + coming)) : 0;
+  m_need_deficit = short_bytes;
+  // the absent ones within the read margin, the nearest first: one job per level
+  // (small jobs in play: what a job brings is colored in the frame it is first drawn; large ones
+  // while the screen is black or the camera just cut)
+  const bool black = m_game_black.load(std::memory_order_relaxed) ||
+                     m_hold_black.load(std::memory_order_relaxed) ||
+                     (m_cut_frame && frame < m_cut_frame + 90);
+  const u64 job_max = black ? kNeedBlackJobBytes : kNeedJobBytes;
+  struct Build {
+    CtrLevelData* lev;
+    std::vector<DetailChunk> chunks;
+    u64 bytes;
+    bool full;
+  };
+  std::vector<Build> builds;
+  builds.reserve(CtrJak2Vis::kSlots);
+  auto build_of = [&](CtrLevelData* lev) -> Build* {
+    for (auto& b : builds) {
+      if (b.lev == lev) {
+        return &b;
+      }
+    }
+    if (lev->dormant_requested || frame < lev->dormant_retry_frame) {
+      return nullptr;
+    }
+    builds.push_back(Build{lev, {}, 0, false});
+    return &builds.back();
+  };
+  auto add = [&](Build& b, const NeedCand& w) {
+    const CtrLevelData& lev = *w.lev;
+    const auto& ch = lev.chunks[w.chunk];
+    b.chunks.push_back({w.chunk, ch.first_vertex, ch.vertex_count, lev.mesh_index_first[w.chunk],
+                        lev.mesh_index_end[w.chunk], lev.tail_file(w.chunk),
+                        lev.tail_k(w.chunk)});
+    w.lev->chunk_dormant[w.chunk] = CtrLevelData::kDistReading;
+    b.bytes += w.bytes;
+    room -= (s64)w.bytes;
+  };
+  auto submit = [&](Build& b, bool fill) {
+    CtrLevelData& lev = *b.lev;
     Job job;
     job.name = lev.name;
     job.detail = true;
     job.dormant = true;
-    job.dist = true;
     job.generation = lev.generation;
     job.path = lev.path;
     job.vertex_data_offset = lev.vertex_data_offset;
     job.index_data_offset = lev.index_data_offset;
-    u64 bytes = 0;
-    for (const auto& [d, ci] : near) {
-      const auto& ch = lev.chunks[ci];
-      const u32 b = CtrStreamArena::mesh_bytes(ch.vertex_count,
-                                               lev.mesh_index_end[ci] - lev.mesh_index_first[ci]) +
-                    lev.normals_tail_bytes(ci);
-      if (!job.chunks.empty() && bytes + b > kDistJobBytes) {
-        break;
-      }
-      bytes += b;
-      job.chunks.push_back({(u32)ci, ch.first_vertex, ch.vertex_count, lev.mesh_index_first[ci],
-                            lev.mesh_index_end[ci], lev.tail_file(ci), lev.tail_k(ci)});
-      lev.chunk_dormant[ci] = CtrLevelData::kDistReading;
-    }
-    std::sort(job.chunks.begin(), job.chunks.end(), [](const DetailChunk& a, const DetailChunk& b) {
-      return a.first_vertex < b.first_vertex;
-    });
+    job.chunks = std::move(b.chunks);
+    std::sort(job.chunks.begin(), job.chunks.end(),
+              [](const DetailChunk& a, const DetailChunk& c) {
+                return a.first_vertex < c.first_vertex;
+              });
+    job.room_bytes = b.bytes;
     lev.dormant_requested = true;
-    job.room_bytes = bytes;  // (AI-assisted, streammem)
-    // (AI-assisted, j2pop) a read back that would not fit: the farthest chunks freed first, as a
-    // load makes room (not the stream arena's growth, which make_room would take back too)
-    if ((u64)free_now < bytes + kDistReadRoom) {
-      dist_make_room(bytes);
-    }
     m_dst.read_jobs++;
     m_dst.read_chunks += job.chunks.size();
-    m_dst.read_bytes += bytes;
+    (fill ? m_dst.fill_bytes : m_dst.read_bytes) += b.bytes;
     request(job);
+  };
+  m_need_unmet.clear();
+  size_t wi = 0;
+  for (; wi < want.size() && want[wi].e < kNeedReadMeters * kM; wi++) {
+    const NeedCand& w = want[wi];
+    Build* b = build_of(w.lev);
+    if (!b || b->full) {
+      continue;
+    }
+    if (!b->chunks.empty() && b->bytes + w.bytes > job_max) {
+      b->full = true;
+    } else if (room >= (s64)w.bytes) {
+      add(*b, w);
+    } else {
+      m_need_unmet.push_back((u32)wi);
+    }
+  }
+  // room for the ones that had none, by the next pass: the farthest resident ones give way to a
+  // nearer one (not to one as far: no back and forth); one within its draw distance takes the
+  // room of any beyond theirs, and counts as short when that took one within the keep margin
+  s64 unmet = 0;
+  for (const u32 k : m_need_unmet) {
+    const NeedCand& w = want[k];
+    unmet += w.bytes;
+    const float beyond =
+        w.e < 0 ? 0.f : std::max(w.e + kNeedSwapMeters * kM, kNeedKeepMeters * kM);
+    while (room + coming < unmet && evict(beyond)) {
+    }
+    if (w.e < 0 &&
+        (room + coming < unmet || (hi > 0 && have[hi - 1].e < kNeedKeepMeters * kM))) {
+      short_bytes += w.bytes;
+    }
+  }
+  bool any = false;
+  for (auto& b : builds) {
+    if (!b.chunks.empty()) {
+      submit(b, false);
+      any = true;
+    }
+  }
+  // memory to spare and nothing else to read: the rest, the nearest first (with enough memory
+  // every chunk is there, as a whole level load had it)
+  if (!any && m_need_unmet.empty() && !claim && !level_loading && !m_stream_inflight &&
+      room > (s64)kNeedFillRoom) {
+    Build fill{nullptr, {}, 0, false};
+    for (; wi < want.size(); wi++) {
+      const NeedCand& w = want[wi];
+      if (!fill.lev) {
+        if (w.lev->dormant_requested || frame < w.lev->dormant_retry_frame) {
+          continue;
+        }
+        fill.lev = w.lev;
+      } else if (w.lev != fill.lev) {
+        continue;
+      }
+      if ((!fill.chunks.empty() && fill.bytes + w.bytes > job_max) ||
+          room - (s64)w.bytes < (s64)kNeedFillRoom) {
+        break;
+      }
+      add(fill, w);
+    }
+    if (!fill.chunks.empty()) {
+      submit(fill, true);
+    }
+  }
+  if (coming) {
+    bump_set_generation();
+  }
+  // more needed than fits: the distances come in (auto_detail's position capped; what is in view
+  // keeps its distance until it is out of view), and go out again when there is room to spare
+  m_dst.short_max = std::max(m_dst.short_max, short_bytes);
+  if (short_bytes) {
+    m_dst.short_passes++;
+    m_need_ok = 0;
+    // (a load's or a repair's wait alone: four times as long before the distances come in)
+    m_need_short += short_bytes > m_need_deficit ? 4 : 1;
+    if (m_need_short >= 4 * kNeedShortPasses) {
+      m_need_short = 0;
+      const double now = ctr_gpu_time_ms();
+      if (s.auto_detail && m_need_cap > 0) {
+        m_need_cap = std::max(0.f, m_need_cap - kNeedCapStep);
+        m_need_cap_frame = frame;
+        ctr_level_set_mem_cap(m_need_cap);
+        lg::warn("[ctr] linear memory short: {} KB of chunks within their draw distance (or a "
+                 "load's parts) have no room ({} KB free, {} KB kept for the floor, loads and "
+                 "reads; {} of {} KB of chunks by need there): tie and shrub distances at most "
+                 "auto detail {:.2f} now",
+                 short_bytes / 1024, free_now / 1024, reserve / 1024, m_dst.resident / 1024,
+                 m_dst.managed / 1024, m_need_cap);
+      } else if (now - m_need_log_ms >= kPartsLogMs) {
+        m_need_log_ms = now;
+        lg::error("[ctr] linear memory short at the nearest distances: {} KB of chunks within "
+                  "their draw distance (or a load's parts) have no room ({} KB free, {} KB kept "
+                  "for the floor, loads and reads; {} of {} KB of chunks by need there)",
+                  short_bytes / 1024, free_now / 1024, reserve / 1024, m_dst.resident / 1024,
+                  m_dst.managed / 1024);
+      }
+    }
+  } else {
+    m_need_short = 0;
+    if (m_need_cap < 1.f && room > (s64)kNeedCapUpRoom &&
+        frame >= m_need_cap_frame + kNeedCapHoldFrames) {
+      if (++m_need_ok >= kNeedOkPasses) {
+        m_need_ok = 0;
+        m_need_cap = std::min(1.f, m_need_cap + kNeedCapStep);
+        m_need_cap_frame = frame;
+        ctr_level_set_mem_cap(m_need_cap);
+        lg::info("[ctr] linear memory: {} KB to spare again, tie and shrub distances up to auto "
+                 "detail {:.2f}",
+                 room / 1024, m_need_cap);
+      }
+    } else {
+      m_need_ok = 0;
+    }
   }
 }
 
@@ -2224,7 +2236,6 @@ void CtrLevels::title_update(u64 frame) {
     job.name = lev.name;
     job.detail = true;
     job.dormant = true;
-    job.dist = true;
     job.generation = lev.generation;
     job.path = lev.path;
     job.vertex_data_offset = lev.vertex_data_offset;
@@ -2264,7 +2275,7 @@ void CtrLevels::collect_chunks(const CtrLevelData& lev,
                       ci < lev.mesh_index_first.size();
        ci++) {
     const auto& ch = lev.chunks[ci];
-    // (AI-assisted, j2strip) the chunks freed by distance come back by distance (dist_update)
+    // (the chunks absent by need or left out by the title come back by theirs)
     if (lev.meshes[ci] < 0 && lev.mesh_index_first[ci] != UINT32_MAX && !lev.is_unit(ci) &&
         !(ci < lev.chunk_dormant.size() && lev.chunk_dormant[ci] >= CtrLevelData::kDistFreed) &&
         (!missing_only || ((lev.detail_loaded || far_chunk(lev, ch)) && !lev.dormant_freed(ci)))) {
@@ -3521,7 +3532,7 @@ void tod_make_groups(CtrLevelData* out, u32 ci, const u16* idst, u32 idx_first, 
 // (AI-assisted, streaming) a near chunk not read at load: room in Tod::groups for its groups (one
 // per visibility id of its runs: the most tod_make_groups makes), filled when it is first read
 // (CtrLevels::take_stream); one group for all of it until then.
-void tod_reserve_unit(CtrLevelData* out, u32 ci) {
+u32 tod_reserve_groups(CtrLevelData* out, u32 ci) {
   auto& t = *out->tod;
   const auto& ch = out->chunks[ci];
   std::vector<u16> ids;
@@ -3539,7 +3550,86 @@ void tod_reserve_unit(CtrLevelData* out, u32 ci) {
   for (u32 r = r0; r < r0 + ch.vis_run_count && r < t.run_group.size(); r++) {
     t.run_group[r] = 0;
   }
-  out->stream_units[out->chunk_unit[ci]].tod_slots = (u16)n;
+  return n;
+}
+void tod_reserve_unit(CtrLevelData* out, u32 ci) {
+  out->stream_units[out->chunk_unit[ci]].tod_slots = (u16)tod_reserve_groups(out, ci);
+}
+
+// A chunk left out of its level's load (Jak II): its groups as tod_make_groups makes them, from its
+// mesh's indices into the slots kept for it (tod_reserve_groups); else one group for all stays.
+void tod_fill_groups(CtrLevelData& lev, u32 ci, int mesh, u32 slots) {
+  auto& t = *lev.tod;
+  const auto& ch = lev.chunks[ci];
+  using G = CtrLevelData::Tod::VisGroup;
+  const void* verts = nullptr;
+  const u16* idx = nullptr;
+  int nv = 0, ni = 0;
+  if (slots < 2 || !ch.vis_run_count || ch.vertex_count < 2 ||
+      ci >= t.chunk_group_first.size() || !ctr_gpu_mesh_peek(mesh, &verts, &nv, &idx, &ni) ||
+      !idx) {
+    return;
+  }
+  const u32 r0 = lev.chunk_first_run[ci];
+  std::vector<std::pair<u16, u16>> ids;  // vis id, group
+  std::vector<G> gs;
+  std::vector<u16> rg(ch.vis_run_count, 0);
+  for (u32 k = 0; k < ch.draw_count && ch.first_draw + k < lev.draws.size(); k++) {
+    const u32 di = ch.first_draw + k;
+    u32 at = lev.draws[di].first_index;
+    for (u32 r = lev.draw_first_run[di]; r < lev.draw_first_run[di] + lev.draw_run_count[di];
+         r++) {
+      const u32 n = lev.vis_runs[r].index_count;
+      if (at + n > (u32)ni || r < r0 || r - r0 >= rg.size()) {
+        return;
+      }
+      const u16 vis = lev.vis_runs[r].vis;
+      u16 g = 0xffff;
+      for (const auto& [id, gi] : ids) {
+        if (id == vis) {
+          g = gi;
+          break;
+        }
+      }
+      if (g == 0xffff) {
+        g = (u16)gs.size();
+        ids.emplace_back(vis, g);
+        gs.push_back(G{0xffff, 0, 0});
+      }
+      rg[r - r0] = g;
+      for (u32 i = at; i < at + n; i++) {
+        gs[g].lo = std::min(gs[g].lo, idx[i]);
+        gs[g].hi = std::max(gs[g].hi, idx[i]);
+      }
+      at += n;
+    }
+  }
+  const u32 g0 = t.chunk_group_first[ci];
+  if (gs.size() < 2 || gs.size() > slots || g0 + gs.size() > t.groups.size()) {
+    return;
+  }
+  // in vertex order, none overlapping (as tod_make_groups)
+  std::vector<u16> order(gs.size()), slot(gs.size());
+  for (size_t g = 0; g < gs.size(); g++) {
+    order[g] = (u16)g;
+  }
+  std::sort(order.begin(), order.end(), [&](u16 a, u16 b) { return gs[a].lo < gs[b].lo; });
+  for (size_t k = 1; k < order.size(); k++) {
+    if (gs[order[k]].lo <= gs[order[k - 1]].hi) {
+      return;
+    }
+  }
+  for (size_t k = 0; k < order.size(); k++) {
+    slot[order[k]] = (u16)k;
+    t.groups[g0 + k] = gs[order[k]];
+  }
+  for (u32 k = 0; k < rg.size() && r0 + k < t.run_group.size(); k++) {
+    t.run_group[r0 + k] = slot[rg[k]];
+  }
+  t.chunk_group_count[ci] = (u16)gs.size();
+  if (g0 + gs.size() <= t.group_list.size()) {
+    std::fill(t.group_list.begin() + g0, t.group_list.begin() + g0 + gs.size(), 0u);
+  }
 }
 
 // The chunk's groups that are plain (every vertex with a time of day color: tod_write_range's fast
@@ -3996,6 +4086,10 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
   }
   if (!t.chunk_scanned[ci]) {
     // no mesh at load: the palettes and light vertices now (render thread, once)
+    if (ci < lev.chunk_tod_slots.size() && lev.chunk_tod_slots[ci]) {
+      tod_fill_groups(lev, (u32)ci, mesh, lev.chunk_tod_slots[ci]);
+      lev.chunk_tod_slots[ci] = 0;
+    }
     CtrLevelData::Tod::LightList lights;
     const u8 mask = tod_scan(t, v, n, &lights);
     t.chunk_scanned[ci] = mask ? 2 : 1;
@@ -4007,7 +4101,7 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
       return 0;
     }
     tod_mark_plain(t, (u32)ci, v, n);
-    return tod_recolor(lev, ci, shown, ps);  // (the groups: one for all, made at load)
+    return tod_recolor(lev, ci, shown, ps);  // (the groups: made at load, or just above)
   }
   const u32 r0 = lev.chunk_first_run[ci];
   const u32 nr = lev.chunks[ci].vis_run_count;
@@ -6937,6 +7031,52 @@ bool CtrLevels::load_file(const fs::path& path,
                    ctr_settings().streaming &&
                    CtrStreamArena::get().init(ctr_stream_kb() * 1024u);
 
+  // Jak II: the chunks with a draw distance that no position needs now are left to need_update,
+  // and the linear memory the load takes is kept free for it from here on (m_load_left)
+  std::vector<u8> dist_skip;
+  if (g_game_version == GameVersion::Jak2) {
+    float pos[kNeedPos][3];
+    int np;
+    {
+      std::lock_guard<std::mutex> lk(m_lock);
+      memcpy(pos, m_need_snap, sizeof(pos));
+      np = m_need_snap_n;
+    }
+    const size_t n = out->chunks.size();
+    out->chunk_dormant.assign(n, 0);
+    out->chunk_hold_since.assign(n, 0);
+    out->chunk_tod_slots.assign(n, 0);
+    dist_skip.assign(n, 0);
+    u64 with = 0, later = 0;
+    u32 nlater = 0;
+    for (size_t ci = 0; ci < n; ci++) {
+      const auto& ch = out->chunks[ci];
+      u32 lo = UINT32_MAX, hi = 0;
+      for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count && d < out->draws.size();
+           d++) {
+        lo = std::min<u32>(lo, out->draws[d].first_index);
+        hi = std::max<u32>(hi, out->draws[d].first_index + out->draws[d].index_count);
+      }
+      if (lo == UINT32_MAX || (out->is_unit(ci) && out->streaming)) {
+        continue;
+      }
+      const u64 b = CtrStreamArena::mesh_bytes(ch.vertex_count, hi - lo);
+      if (dist_frees(*out, ci) &&
+          (!np || need_excess(ch, need_reach(*out, ch, 1.f), pos, np) > kNeedReadMeters * 4096.f)) {
+        dist_skip[ci] = 1;
+        later += b;
+        nlater++;
+      } else {
+        with += b;
+      }
+    }
+    m_load_left.store(with + hdr.merc_vertex_size + hdr.merc_index_size + hdr.texture_data_size,
+                      std::memory_order_relaxed);
+    lg::info("[ctr] {}: {} KB of meshes with the level; {} chunks with a draw distance ({} KB) "
+             "not needed now{} come by need",
+             name, with / 1024, nlater, later / 1024, np ? "" : " (no camera yet: all of them)");
+  }
+
   load_tod(f, hdr, out);  // (AI-assisted) c3l v16
 
   std::vector<c3l::Texture> texs;
@@ -7019,62 +7159,9 @@ bool CtrLevels::load_file(const fs::path& path,
     }
     return n;
   };
-  // (AI-assisted, j2strip) Jak II: meshes that don't fit the free linear memory (with
-  // kDistLoadMargin, the merc models' too): the chunks far beyond their draw distance are left for
-  // later, read back by distance ("Distance freeing")
   load_env_tie_chunks(f, hdr, out);  // before the meshes: their tails
   load_morph(f, hdr, out);
   load_tfrag_lod(f, hdr, file_runs, out);
-  std::vector<u8> dist_skip;
-  if (g_game_version == GameVersion::Jak2) {
-    auto chunk_range = [&](const c3l::Chunk& ch, u32* first, u32* end) {
-      *first = UINT32_MAX;
-      *end = 0;
-      for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
-        *first = std::min<u32>(*first, out->draws[d].first_index);
-        *end = std::max<u32>(*end, out->draws[d].first_index + out->draws[d].index_count);
-      }
-      return *first != UINT32_MAX;
-    };
-    u64 need = (u64)hdr.merc_vertex_size + hdr.merc_index_size;
-    for (size_t ci = 0; ci < out->chunks.size(); ci++) {
-      u32 first, end;
-      if (chunk_range(out->chunks[ci], &first, &end) && !(out->is_unit(ci) && out->streaming)) {
-        need += CtrStreamArena::mesh_bytes(out->chunks[ci].vertex_count, end - first) +
-                out->normals_tail_bytes(ci);
-      }
-    }
-    const u64 free_now = ctr_gpu_linear_free();
-    out->dist_free = true;  // (freed in play by distance too: dist_update)
-    out->chunk_dormant.assign(out->chunks.size(), 0);
-    out->chunk_hold_since.assign(out->chunks.size(), 0);
-    if (need + kDistLoadMargin > free_now) {
-      float pos[4][3];
-      int np;
-      {
-        std::lock_guard<std::mutex> lk(m_lock);
-        memcpy(pos, m_dist_snap, sizeof(pos));
-        np = m_dist_snap_n;
-      }
-      dist_skip.assign(out->chunks.size(), 0);
-      u64 skipped = 0;
-      u32 n = 0;
-      for (size_t ci = 0; ci < out->chunks.size(); ci++) {
-        u32 first, end;
-        const auto& ch = out->chunks[ci];
-        if (chunk_range(ch, &first, &end) && dist_frees(*out, ci) &&
-            dist_beyond(*out, ch, pos, np, kDistFreeMeters)) {
-          dist_skip[ci] = 1;
-          skipped += CtrStreamArena::mesh_bytes(ch.vertex_count, end - first);
-          n++;
-        }
-      }
-      lg::info("[ctr] {}: linear memory short (meshes {} KB, free {} KB): {} chunks ({} KB) far "
-               "beyond their draw distance{} left for later, read back by distance",
-               name, need / 1024, free_now / 1024, n, skipped / 1024,
-               np ? "" : " (no camera yet: all of them)");
-    }
-  }
   u32 stream_skipped = 0, stream_core_kb = 0;
   std::map<std::string, std::pair<u32, u64>> not_made;  // section: chunks, bytes
   // per chunk: kLeaveLowres the low resolution tfrag of a level with a vista tier (never drawn:
@@ -7134,6 +7221,9 @@ bool CtrLevels::load_file(const fs::path& path,
     }
     serve_streams_in_load();
     const size_t ci = out->meshes.size();
+    if (!dist_skip.empty() && (ci & 31) == 0) {
+      m_load_left.store(load_left_bytes(ci), std::memory_order_relaxed);
+    }
     // the chunk's draws cover a contiguous range of the index data
     u32 first = UINT32_MAX, end = 0;
     for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
@@ -7317,6 +7407,8 @@ bool CtrLevels::load_file(const fs::path& path,
       }
     } else if (out->tod && skip) {
       tod_reserve_unit(out, (u32)ci);  // (AI-assisted, streaming)
+    } else if (out->tod && dskip) {
+      out->chunk_tod_slots[ci] = (u16)tod_reserve_groups(out, (u32)ci);
     } else if (out->tod) {
       tod_make_groups(out, (u32)out->meshes.size(), nullptr, 0, 0);
     }
@@ -8695,21 +8787,25 @@ void CtrLevels::stream_update(u64 frame) {
   // heap is under its floor (below), which brings the floor back.
   ctr_heap_set_linear_floor(std::max<u32>(1024 * 1024, floor_bytes - std::min(floor_bytes, 1024u * 1024)));
 #endif
-  dormant_update(frame);  // (AI-assisted, j2-mem)
-  dist_update(frame, free_now);  // (AI-assisted, j2strip)
-  title_update(frame);
-  if (!arena.ready() && !level_loading && !parts_room && frame % kRepairCheckFrames == 0) {
-    // (AI-assisted, streammem) the arena given back to a level load out of memory (make_room), or
-    // its first segment not there at the first streaming level's load: made again once the heap
-    // has it over its floor
-    bool any = false;
+  // the arena given back to a level load out of memory (make_room), or its first segment not
+  // there at the first streaming level's load: wanted again
+  bool arena_wanted = false;
+  if (!arena.ready()) {
     for (const auto& [name, lp] : m_levels) {
-      any = any || lp->streaming;
+      arena_wanted = arena_wanted || lp->streaming;
     }
-    if (any && free_now >= ctr_stream_kb() * 1024u + floor_bytes + kGrowMargin &&
-        arena.init(ctr_stream_kb() * 1024u)) {
-      lg::info("[ctr] stream arena made again ({} KB linear free)", free_now / 1024);
-    }
+  }
+  const bool jak2 = g_game_version == GameVersion::Jak2;
+  need_update(frame, free_now, parts_room, level_loading,
+              arena_wanted ? ctr_stream_kb() * 1024u + kGrowMargin : 0);
+  title_update(frame);
+  // made again once the heap has it over its floor (Jak II: need_update makes that room, and its
+  // reads in flight keep theirs)
+  if (arena_wanted && !level_loading && (jak2 || !parts_room) &&
+      frame % kRepairCheckFrames == 0 &&
+      free_now >= ctr_stream_kb() * 1024u + floor_bytes + kGrowMargin + (jak2 ? parts_room : 0) &&
+      arena.init(ctr_stream_kb() * 1024u)) {
+    lg::info("[ctr] stream arena made again ({} KB linear free)", free_now / 1024);
   }
   if ((!m_cam_valid && !m_game_cam_new) || !arena.ready()) {
     return;
@@ -8729,8 +8825,11 @@ void CtrLevels::stream_update(u64 frame) {
   if (arena.has_growth()) {
     if (level_loading) {
       const u32 need = reserve + kLoadRoom;
-      if (free_now < need) {
-        drain = free_now + 512 * 1024 < need;
+      // (Jak II: the chunks by need make a load's room first, need_update; the growth only for
+      // what they lack)
+      const bool by_need = jak2 && m_cam_valid;
+      if (by_need ? m_need_deficit > 0 : free_now < need) {
+        drain = by_need ? m_need_deficit > 512 * 1024 : free_now + 512 * 1024 < need;
         m_sst.shrunk += stream_shrink(drain);  // (a level waits for the memory: at once)
       }
     } else if (parts_reserve && free_now < reserve + parts_reserve) {
@@ -9141,7 +9240,8 @@ void CtrLevels::stream_update(u64 frame) {
     if (!mem && evicted < su.bytes) {
       // (AI-assisted, streammem) the room of the parts jobs in flight too (parts_reserve)
       const u32 grow_reserve =
-          reserve + (level_loading ? kLoadRoom : std::max(kGrowHeadroom, parts_reserve));
+          reserve + (level_loading ? kLoadRoom : std::max(kGrowHeadroom, parts_reserve)) +
+          (jak2 ? (u32)kNeedIdleRoom : 0u);
       const u64 cap = arena.capacity();
       const u64 demand = need_now + std::max<u64>(kGrowMargin, need_now / 8);
       const u32 want = demand > cap ? (u32)std::min<u64>(demand - cap, 1u << 30) : 0;
@@ -9793,6 +9893,22 @@ void CtrLevels::stream_log() {
   g_tri_band_frames = 0;
 #endif
   log_memory();
+  if (m_dst.managed) {
+    lg::info("[ctr] chunks by need: {} of {} KB there; {} freed for room ({} KB; {} KB for a load "
+             "out of memory), {} reads of {} chunks ({} KB needed, {} KB to fill), {} passes "
+             "short of room (at most {} KB within their draw distance or of a load waiting); "
+             "auto detail at most {:.2f}",
+             m_dst.resident / 1024, m_dst.managed / 1024, m_dst.freed_chunks,
+             m_dst.freed_bytes / 1024, m_dst.load_bytes / 1024, m_dst.read_jobs,
+             m_dst.read_chunks, m_dst.read_bytes / 1024, m_dst.fill_bytes / 1024,
+             m_dst.short_passes, m_dst.short_max / 1024, m_need_cap);
+  }
+  {
+    const u64 resident = m_dst.resident, managed = m_dst.managed;
+    m_dst = DistStats();
+    m_dst.resident = resident;
+    m_dst.managed = managed;
+  }
   const auto as = CtrStreamArena::get().stats();
   const double now = ctr_gpu_time_ms();
   const double secs = m_sst.since_ms > 0 ? (now - m_sst.since_ms) / 1000.0 : 0.0;
@@ -9873,13 +9989,6 @@ void CtrLevels::stream_log() {
            m_sst.ring0_sum / n / 1024.0, m_sst.ring0_max / 1024, m_sst.ring0_evictions,
            m_sst.ring0_late, m_sst.burst_frames,
            levels.empty() ? std::string("no levels") : levels);
-  if (m_dst.freed_chunks || m_dst.read_jobs) {
-    lg::info("[ctr] distance freeing: {} chunks freed ({} KB; {} times in play), {} read backs of "
-             "{} chunks ({} KB)",
-             m_dst.freed_chunks, m_dst.freed_bytes / 1024, m_dst.play_frees, m_dst.read_jobs,
-             m_dst.read_chunks, m_dst.read_bytes / 1024);
-  }
-  m_dst = DistStats();
 #ifdef __3DS__
   ctr_heap_trace_dump("stats");  // (AI-assisted, lavamem) trace builds only
 #endif
@@ -9975,6 +10084,7 @@ float g_detail_t = 0.25f;
 float g_detail_now = 0.25f;
 u64 g_detail_now_frame = 0;
 bool g_detail_snap = true;
+float g_detail_mem_cap = 1.f;  // ctr_level_set_mem_cap
 // (AI-assisted, j2intro / title3) the screen is black this frame (ctr_level_set_screen_black)
 bool g_screen_black = false;
 // (AI-assisted, title-popin) the auto_detail position as stored per chunk / tie LOD group
@@ -10231,6 +10341,14 @@ double ctr_level_tod_take_ms() {
 void ctr_level_set_detail(float t, bool snap) {
   g_detail_t = detail_at(detail_q(t));  // (on the grid of the held positions)
   g_detail_snap = g_detail_snap || snap;
+}
+
+void ctr_level_set_mem_cap(float cap) {
+  g_detail_mem_cap = cap >= 1.f ? 1.f : detail_at(detail_q(std::max(cap, 0.f)));
+}
+
+float ctr_level_mem_cap() {
+  return g_detail_mem_cap;
 }
 
 void ctr_level_set_screen_black(bool black) {

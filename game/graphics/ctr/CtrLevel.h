@@ -296,10 +296,13 @@ struct CtrLevelData {
   // title intro's first frame); CtrLevels::note_late_in_view
   u64 shown_frame = 0;
   u32 vis_scan_bytes = UINT32_MAX;  // the string's bytes its ids are in (UINT32_MAX: not known yet)
-  // per chunk (made at its first dormancy): kDormFreed its mesh freed for that, kDormReading being
-  // read back; and the frame a chunk without its mesh began to be kept hidden in view (0: not)
+  // per chunk: its residency (0 resident or never there, else kDist* / kTitle*), and the frame a
+  // chunk without its mesh began to be kept hidden in view (0: not)
   std::vector<u8> chunk_dormant;
   std::vector<u32> chunk_hold_since;
+  // per chunk left out of the load (Jak II): the time of day groups kept for it, made from its
+  // mesh at its first draw (0: none, or made)
+  std::vector<u16> chunk_tod_slots;
   // (AI-assisted, j2cull) draw_level's cull clusters, made at the level's first draw
   // (make_cull_clusters): its chunks in runs of neighbouring ones in index order (one test of a
   // cluster that lies beyond every member's distance limit, while all of them were beyond it last
@@ -329,19 +332,16 @@ struct CtrLevelData {
   std::vector<u32> hole_since, hole_last;
   bool cull_made = false;
   size_t cull_sizes[3] = {0, 0, 0};  // chunks, tie LOD groups, chunk_unit when made
-  bool dormant_requested = false;  // a read of its freed chunks is queued
-  u64 dormant_retry_frame = 0;     // after a failed one: not before this frame
-  static constexpr u8 kDormFreed = 1, kDormReading = 2;
-  // (AI-assisted, j2strip) Jak II, linear memory short (CtrLevel.cpp "Distance freeing"): a shrub
-  // or tie chunk with a draw distance, its mesh left out (or freed) while the camera is far beyond
-  // that distance, read back by distance (being read)
+  bool dormant_requested = false;  // a read of its absent chunks is queued
+  u64 dormant_retry_frame = 0;     // after one that ran short: not before this frame
+  // Jak II (CtrLevel.cpp "Residency by need"): a shrub or tie chunk with a draw distance is
+  // resident while the camera is within it (plus a lead), else absent (kDistFreed) or being read
   static constexpr u8 kDistFreed = 3, kDistReading = 4;
   // Jak 1 title screen: a chunk its attract camera can't show, left out (CtrLevel.cpp "Title
   // screen"); being read back
   static constexpr u8 kTitleFreed = 5, kTitleReading = 6;
   u32 title_left = 0;       // chunks in those states
   bool title_pass = false;  // this title's leave-out was applied (at load, or freed)
-  bool dist_free = false;  // its load ran short of linear memory, or a load made room: on
   bool dormant_freed(size_t ci) const {
     return ci < chunk_dormant.size() && chunk_dormant[ci] != 0;
   }
@@ -812,13 +812,10 @@ class CtrLevels {
   /*! Partial unload (render thread): free the meshes a far level doesn't draw / read them again. */
   void unload_detail(CtrLevelData& lev);
   void request_detail(CtrLevelData& lev);
-  /*! (AI-assisted, j2-mem) Jak II, render thread, each frame: the dormant levels' chunks freed
-   * or read back by the camera's distance (CtrLevel.cpp "Dormant levels") */
-  void dormant_update(u64 frame);
-  /*! (AI-assisted, j2strip) Jak II, render thread, each frame: the levels short of linear memory
-   * (dist_free): their freed chunks read back by distance (CtrLevel.cpp "Distance freeing"; they
-   * are freed only by a load that would fail otherwise: make_room) */
-  void dist_update(u64 frame, u32 free_now);
+  /*! Jak II, render thread, each frame: the chunks with a draw distance read and freed by need
+   * under one budget of linear memory (CtrLevel.cpp "Residency by need"). parts_room: the meshes
+   * of the parts jobs in flight; claim: what else waits for linear memory (the stream arena) */
+  void need_update(u64 frame, u32 free_now, u64 parts_room, bool level_loading, u64 claim);
   /*! (AI-assisted, streaming) render thread, each level draw: the camera position (game units) */
   void stream_note_camera(const math::Vector4f& trans,
                           const math::Vector4f planes[4],
@@ -1003,8 +1000,7 @@ class CtrLevels {
     // (request_repair): only these parts of the loaded level `generation`
     bool detail = false;
     bool repair = false;
-    bool dormant = false;  // (AI-assisted, j2-mem) with detail: a dormant level's chunks read back
-    bool dist = false;  // (AI-assisted, j2strip) with dormant: chunks freed by distance read back
+    bool dormant = false;  // with detail: absent chunks read (Jak II by need, Jak 1's title)
     u32 generation = 0;
     std::string path;
     u32 vertex_data_offset = 0, index_data_offset = 0;
@@ -1253,33 +1249,49 @@ class CtrLevels {
   // the camera: where it was last drawn from, its velocity (game units per ms, smoothed)
   float m_cam[3] = {0, 0, 0}, m_cam_vel[3] = {0, 0, 0};
   float m_cam_rot[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};  // (AI-assisted) rows, see camera()
-  // (AI-assisted, j2strip) distance freeing: where the camera is and will be, and Jak (game
-  // units; n of them, 0: not known), for the render thread (dist_positions) and a copy the loader
-  // reads (m_lock: m_dist_snap)
-  int dist_positions(float pos[4][3]) const;
-  // (AI-assisted, j2pop) min_excess: only the chunks more than that (game units) beyond their
-  // freeing distance
-  u64 dist_free_far(CtrLevelData& lev,
-                    const float pos[4][3],
-                    int np,
-                    float min_excess,
-                    float meters,
-                    bool log);
-  // (AI-assisted, j2pop) a load that made room: the farthest chunks first, until want bytes are
-  // freed (0: all of those far beyond their distance); returns the bytes freed
-  u64 dist_make_room(u64 want, float meters = 0.f, bool log = true);  // meters 0: kDistFreeMeters
-  float m_dist_snap[4][3] = {};
-  int m_dist_snap_n = 0;
-  u64 m_dist_play_frame = 0;
+  // Residency by need (Jak II): where the camera is and will be, Jak and a continue's camera
+  // (game units; n of them, 0: not known), for the render thread (need_positions) and a copy the
+  // loader reads (m_lock: m_need_snap)
+  static constexpr int kNeedPos = 5;
+  int need_positions(float pos[kNeedPos][3]) const;
+  // a managed chunk and how far the nearest position is beyond its reach (game units; < 0: within)
+  struct NeedCand {
+    CtrLevelData* lev;
+    u32 chunk;
+    u32 bytes;
+    float e;
+  };
+  // have: the resident ones nothing draws now; want: the absent ones
+  void need_scan(const float pos[kNeedPos][3], int np, float t, u64 frame);
+  void need_free(CtrLevelData& lev, u32 ci);
+  // a load out of memory: the resident ones beyond their reach, the farthest first, until want
+  // bytes are freed (0: all of them); returns the bytes freed
+  u64 need_make_room(u64 want);
+  std::vector<NeedCand> m_need_have, m_need_want;
+  std::vector<u32> m_need_unmet;
+  float m_need_snap[kNeedPos][3] = {};
+  int m_need_snap_n = 0;
+  u64 m_need_frame = 0;
+  // the level load in flight: the linear memory it still takes (loader thread; 0: not known)
+  std::atomic<u64> m_load_left{0};
+  // what a level load, a repair or the stream arena still lack after the last pass's freeing
+  u64 m_need_deficit = 0;
+  // the auto_detail position the linear memory allows (1: no limit), the passes in a row short of
+  // room / with room to spare, the frame it last moved, the last shortage line
+  float m_need_cap = 1.f;
+  u32 m_need_short = 0, m_need_ok = 0;
+  u64 m_need_cap_frame = 0;
+  double m_need_log_ms = 0;
   // Jak 1 title screen (CtrLevel.cpp "Title screen"): the title level is wanted (set_wanted; the
   // loader reads it), the camera left the attract path this title, the per-frame residency update
   std::atomic<bool> m_title_on{false};
   bool m_title_off_path = false;
   void title_update(u64 frame);
-  // distance freeing per stats period (stream_log)
+  // residency by need per stats period (stream_log); resident / managed: the last pass's bytes
   struct DistStats {
-    u64 play_frees = 0, freed_chunks = 0, freed_bytes = 0, read_jobs = 0, read_chunks = 0,
-        read_bytes = 0;
+    u64 freed_chunks = 0, freed_bytes = 0, load_bytes = 0, read_jobs = 0, read_chunks = 0,
+        read_bytes = 0, fill_bytes = 0, short_max = 0, short_passes = 0;
+    u64 resident = 0, managed = 0;
   } m_dst;
   math::Vector4f m_planes[4];  // the view's planes (as CtrBackgroundCamera::planes)
   u64 m_cut_frame = 0;         // the last camera cut (a jump of > kCutMeters, or of the factor)
@@ -1364,6 +1376,10 @@ static_assert(sizeof(CtrBackgroundCamera) == 16 * 23);
 /*! (AI-assisted) config.ini auto_detail: where the shrub / tie distances are between their near
  * (0) and far (1) values (render thread). */
 void ctr_level_set_detail(float t, bool snap = false);
+/*! Jak II: the highest auto_detail position the linear memory allows (1: no limit; render thread:
+ * CtrLevels::need_update sets it, CtrRenderer's controller stays under it). */
+void ctr_level_set_mem_cap(float cap);
+float ctr_level_mem_cap();
 // host A/B, env CTR_ARRIVAL_OFF: the arrival changes off (load order, faster reading, holds)
 bool ctr_arrival_off();
 #ifndef __3DS__
