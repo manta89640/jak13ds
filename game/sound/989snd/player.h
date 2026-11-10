@@ -21,6 +21,8 @@
 #ifdef __3DS__
 #include <atomic>
 #include <thread>
+
+#include "game/sound/common/mix_budget.h"
 #else
 #include "third-party/cubeb/cubeb/include/cubeb/cubeb.h"
 #endif
@@ -32,17 +34,15 @@ namespace snd {
 // around each block of voice mixing (Synth::BeginBlock / EndBlock), not while it mixes. The
 // overlord's sound calls (IOP thread, on the game's core) take it too, which stalls the game in
 // its sound RPC while they wait. It counts the time other threads wait for it (kperf "sound
-// lock"), and tells the mixer when someone waits.
+// lock").
 class TickLock {
  public:
   void lock();
   bool try_lock() { return m_mutex.try_lock(); }
   void unlock() { m_mutex.unlock(); }
-  bool contended() const { return m_waiters.load(std::memory_order_relaxed) > 0; }
 
  private:
   std::recursive_mutex m_mutex;
-  std::atomic<int> m_waiters{0};
 };
 #endif
 
@@ -112,6 +112,10 @@ class Player {
   // libsd effect attributes; the port mixes both SPU2 cores as one, so any core sets the one unit
   void SetReverbMode(u32 mode);
   void SetReverbDepth(s16 left, s16 right);
+  // 989snd's voice allocator (VoiceManager): a volume group's SPU voices, and a voice kept from
+  // the tones for the caller (its number)
+  void SetGroupVoiceRange(s32 group, s32 min, s32 max);
+  s32 ExternVoiceAlloc(s32 group);
   void InitCubeb();
   void DestroyCubeb();
   s32 GetTick() { return mTick; };
@@ -158,6 +162,11 @@ class Player {
   void* mMixerThread{nullptr};
   static void* MixerThreadEntry(void* self);
   void MixerThread();
+  // the mixer thread's: how many voices it mixes audibly, and what Tick() saw in a buffer
+  MixBudget mBudget;
+  int mAudiblePeak{0};
+  int mMutedPeak{0};
+  u32 mHandlerCount{0};
 #else
   cubeb* mCtx{nullptr};
   cubeb_stream* mStream{nullptr};

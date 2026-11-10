@@ -101,8 +101,8 @@ void snd_UnlockVoiceAllocator() {
 }
 
 s32 snd_ExternVoiceAlloc(s32 vol_group, s32 priority) {
-  // printf("snd_ExternVoiceVoiceAlloc\n");
-  return 0;
+  // the voices themselves are sdshim's; 989snd's allocator keeps the number from its tones
+  return player ? player->ExternVoiceAlloc(vol_group) : 0;
 }
 
 u32 snd_SRAMMalloc(u32 size) {
@@ -116,7 +116,11 @@ void snd_SRAMMarkUsed(u32 addr, u32 size) {
 
 void snd_SetMixerMode(s32 channel_mode, s32 reverb_mode) {}
 
-void snd_SetGroupVoiceRange(s32 group, s32 min, s32 max) {}
+void snd_SetGroupVoiceRange(s32 group, s32 min, s32 max) {
+  if (player) {
+    player->SetGroupVoiceRange(group, min, max);
+  }
+}
 
 void snd_SetReverbDepth(s32 core, s32 left, s32 right) {
   if (player && (core & (SND_CORE_0 | SND_CORE_1))) {

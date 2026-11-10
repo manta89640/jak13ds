@@ -10,6 +10,7 @@ for variant in "" _arm; do
   c++ -std=c++20 -O2 -I"$R" ${variant:+-DSND_TEST_ARM_DSP} \
     "$R/test/snd_voice/voice_exact.cpp" \
     "$R/game/sound/common/voice.cpp" "$R/game/sound/common/envelope.cpp" \
+    "$R/game/sound/common/synth.cpp" "$R/game/sound/common/reverb.cpp" \
     "$R/test/snd_voice/ref/voice.cpp" "$R/test/snd_voice/ref/envelope.cpp" \
     -o "$OUT$variant"
   echo "built $OUT$variant"

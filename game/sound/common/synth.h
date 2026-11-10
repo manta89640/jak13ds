@@ -27,17 +27,19 @@ class Synth {
   }
 
   s16Output Tick();
-#ifdef __3DS__
   // (AI-assisted) `samples` outputs at once, the same as calling Tick() that many times (nothing
   // else changes the voices meanwhile): one voice at a time over the block. ratio: SPU ticks per
   // output sample, 16.16 (see Voice::RunBlock).
   // In three steps, so the mixer runs the voices without holding its lock: BeginBlock() and
   // EndBlock() under the lock, Mix() between them without it. Meanwhile register writes to the
   // voices, AddVoice and SetMasterVol are kept and EndBlock() applies them (Voice::SetBusy).
-  void BeginBlock();
+  // audible: the most voices mixed audibly in the block. With more running, the quietest of the
+  // tones' voices are muted for it (Voice::SetMuted): they move on unheard at a fraction of the
+  // cost. The overlord's stream voices are never muted.
+  static constexpr int kAllAudible = 1 << 30;
+  void BeginBlock(int audible = kAllAudible);
   void Mix(s16Output* out, int samples, u32 ratio);
   void EndBlock();
-#endif
   // (AI-assisted) voices that aren't stopped (statistics)
   int VoiceCount() const {
     int n = 0;
@@ -46,6 +48,9 @@ class Synth {
     }
     return n;
   }
+  // as of the last BeginBlock(): the voices running, and the ones of them it muted
+  int RunningCount() const { return mRunning; }
+  int MutedCount() const { return mMuted; }
   void AddVoice(std::shared_ptr<Voice> voice);
   void SetMasterVol(u32 volume);
   void SetOutputRate(u32 rate) { mReverb.SetOutputRate(rate); }
@@ -55,8 +60,9 @@ class Synth {
   void SetReverbDepth(s16 left, s16 right);
 
  private:
+  void MuteQuietest(int audible);
+
   std::forward_list<std::shared_ptr<Voice>> mVoices;
-#ifdef __3DS__
   bool mBusy{false};
   std::vector<std::shared_ptr<Voice>> mPendingVoices;
   u32 mPendingMasterVol{0};
@@ -64,7 +70,13 @@ class Synth {
   bool mReverbModePending{false}, mReverbDepthPending{false};
   u32 mPendingReverbMode{0};
   s16 mPendingDepthL{0}, mPendingDepthR{0};
-#endif
+  struct Rank {
+    u32 loudness;
+    Voice* voice;
+  };
+  std::vector<Rank> mRank;
+  int mRunning{0};
+  int mMuted{0};
   Reverb mReverb;
   std::vector<s16Output> mWet;
 

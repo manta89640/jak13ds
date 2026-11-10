@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <fstream>
+#include <string>
 
 #include "sfxblock.h"
 
@@ -60,10 +61,8 @@ void TickLock::lock() {
   if (m_mutex.try_lock()) {
     return;
   }
-  m_waiters.fetch_add(1, std::memory_order_relaxed);
   const u64 t0 = kperf::ticks();
   m_mutex.lock();
-  m_waiters.fetch_sub(1, std::memory_order_relaxed);
   if (ctr_thread_current_id() != g_mixer_thread_id.load(std::memory_order_relaxed)) {
     kperf::add_thread(kperf::Thread::SOUND_LOCK_WAIT, kperf::ticks() - t0, 1);
   }
@@ -80,6 +79,9 @@ void Player::InitCubeb() {
   mHandlerThreadStop = false;
   g_output_active = false;
   mSynth.SetOutputRate(kMixRate);
+#ifdef OG3DS_GAME_JAK2
+  mVmanager.SetVoiceLimit(true);
+#endif
   int core = 1;
   if (ctr_sound_config(&core)) {
     if (ctr_audio_init(kMixRate, kMixFrames, kMixBuffers) == 0) {
@@ -140,75 +142,79 @@ void Player::MixerThread() {
   g_mixer_thread_id.store(ctr_thread_current_id(), std::memory_order_relaxed);
   u32 last_dropped = 0;
   u32 last_gap_us = 0;
-  // (AI-assisted) The mixing time (not the sleeps that let sound calls have the lock) is averaged
-  // over about a second as a share of the audio it makes; above kMaxShare it's logged. The mixer
-  // doesn't hold back while it keeps up: audio must not break up (a guard that slept here made it
-  // stutter in Azahar). See the summary line every ~10 s.
-  // (AI-assisted, cpusound) Only once it can't keep up (share above 100%: the DSP runs dry
-  // between buffers anyway) it sleeps kBehindSleepUs after each buffer. Otherwise a buffer is
-  // always free, it never waits for the DSP, and at the highest priority it would take its whole
-  // core: on core 2 the render thread, the level loader and the save worker.
-  constexpr unsigned kBehindSleepUs = 500;
+  // The loop: while the DSP has a free buffer, mix it and queue it, then wait for the DSP's next
+  // frame. It never sleeps with a buffer to make. What keeps it faster than the output is the
+  // voice limit (MixBudget): the time of every buffer goes into it, and Tick() mutes the quietest
+  // voices beyond the limit. A summary every ~10 s (480 buffers), in % of the audio made.
   constexpr double kBufferMs = 1000.0 * kMixFrames / kMixRate;
-  constexpr double kMaxShare = 0.85;
-  double share = 0.0;
+  constexpr u32 kBufferUs = (u32)(1000000ull * kMixFrames / kMixRate);
   double last_warn_ms = -1e9;
-  // a summary every ~10 s (480 buffers): mixing time, waits for sound calls, both in % of the
-  // audio made (above 100%: can't keep up)
-  double sum_mix_ms = 0.0, sum_wait_ms = 0.0;
-  int sum_buffers = 0;
+  double sum_mix_ms = 0.0, sum_queue_ms = 0.0;
+  int sum_buffers = 0, sum_cuts = 0, sum_muted = 0, sum_limit = MixBudget::kNoLimit;
   while (!mHandlerThreadStop) {
     short* buf;
     while (!mHandlerThreadStop && (buf = ctr_audio_get_buffer()) != nullptr) {
+      const u32 late_before = ctr_audio_late_buffers();
+      mAudiblePeak = 0;
+      mMutedPeak = 0;
       const u64 t0 = kperf::ticks();
       Tick((s16Output*)buf, kMixFrames);
       const u64 t1 = kperf::ticks();
-      const u64 t_mix = t1 - t0;
       ctr_audio_submit(buf);
-      // let waiting sound calls have the lock (see TickLock), for up to 2 ms
-      for (int w = 0; w < 40 && mTickLock.contended(); w++) {
-        ctr_thread_sleep_us(50);
+      const u64 t2 = kperf::ticks();
+      const bool late = ctr_audio_late_buffers() != late_before;
+      const double mix_ms = kperf::ticks_to_ms(t1 - t0);
+      const double queue_ms = kperf::ticks_to_ms(t2 - t1);
+      const int running = mAudiblePeak + mMutedPeak;
+      const bool cut =
+          mBudget.OnBuffer((u32)((mix_ms + queue_ms) * 1000.0), kBufferUs, late, mAudiblePeak);
+      kperf::add_thread(kperf::Thread::SOUND, t1 - t0, 1);
+      kperf::set_gauge(kperf::Gauge::SOUND_HANDLERS, mHandlerCount);
+      sum_mix_ms += mix_ms;
+      sum_queue_ms += queue_ms;
+      sum_cuts += cut;
+      sum_muted = std::max(sum_muted, mMutedPeak);
+      sum_limit = std::min(sum_limit, mBudget.Limit());
+      if (cut) {
+        const double now = kperf::ticks_to_ms(t2);
+        if (now - last_warn_ms > 5000.0) {
+          lg::warn(
+              "3DS sound: a buffer took {:.0f}% of its time to mix{} ({} sounds, {} voices): the "
+              "{} loudest voices stay audible for now",
+              100.0 * (mix_ms + queue_ms) / kBufferMs, late ? " and came late" : "", mHandlerCount,
+              running, mBudget.Limit());
+          last_warn_ms = now;
+        }
       }
-      const u64 t_wait = kperf::ticks() - t1;
-      sum_mix_ms += kperf::ticks_to_ms(t_mix);
-      sum_wait_ms += kperf::ticks_to_ms(t_wait);
       if (++sum_buffers == 480) {
         const double handler_ms = kperf::ticks_to_ms(g_handler_ticks);
         g_handler_ticks = 0;
         const double real_ms = sum_buffers * kBufferMs;
         size_t sounds;
         int voices;
+        u32 stolen, refused;
         {
           std::scoped_lock lock(mTickLock);
           sounds = mHandlers.size();
           voices = mSynth.VoiceCount();
+          stolen = mVmanager.StolenVoices();
+          refused = mVmanager.RefusedTones();
         }
         // late buffers: the DSP ran out of sound before the mixer's next buffer came (a gap),
         // which the dropped DSP frames don't show
         lg::info(
             "3DS sound: {:.0f}% of real time ({:.0f}% sound effect handlers, {:.0f}% voices), "
-            "waiting for sound calls {:.0f}%, {} sounds, {} voices, {} DSP frames dropped so far, "
-            "{} late buffers so far",
+            "queueing {:.1f}%, {} sounds, {} voices; voice limit: {} cuts, lowest {}, at most {} "
+            "muted; SPU voices: {} taken over, {} tones without one so far; {} DSP frames dropped "
+            "so far, {} late buffers so far",
             100.0 * sum_mix_ms / real_ms, 100.0 * handler_ms / real_ms,
-            100.0 * (sum_mix_ms - handler_ms) / real_ms, 100.0 * sum_wait_ms / real_ms, sounds,
-            voices, ctr_audio_dropped_frames(), ctr_audio_late_buffers());
-        sum_mix_ms = sum_wait_ms = 0.0;
-        sum_buffers = 0;
-      }
-      kperf::add_thread(kperf::Thread::SOUND, t_mix, 1);
-      kperf::set_gauge(kperf::Gauge::SOUND_HANDLERS, (u32)mHandlers.size());
-      const double mix_ms = kperf::ticks_to_ms(t_mix);
-      share = share * 0.95 + 0.05 * (mix_ms / kBufferMs);
-      if (share > kMaxShare) {
-        const double now = kperf::ticks_to_ms(kperf::ticks());
-        if (now - last_warn_ms > 5000.0) {
-          lg::warn("3DS sound: mixer near its limit ({:.0f}% of real time, {} sounds, {} voices)",
-                   share * 100.0, mHandlers.size(), mSynth.VoiceCount());
-          last_warn_ms = now;
-        }
-      }
-      if (share > 1.0) {
-        ctr_thread_sleep_us(kBehindSleepUs);
+            100.0 * (sum_mix_ms - handler_ms) / real_ms, 100.0 * sum_queue_ms / real_ms, sounds,
+            voices, sum_cuts,
+            sum_limit >= MixBudget::kNoLimit ? std::string("none") : std::to_string(sum_limit),
+            sum_muted, stolen, refused, ctr_audio_dropped_frames(), ctr_audio_late_buffers());
+        sum_mix_ms = sum_queue_ms = 0.0;
+        sum_buffers = sum_cuts = sum_muted = 0;
+        sum_limit = mBudget.Limit();
       }
     }
     // the count reads 0 once the audio is closed for exit
@@ -383,6 +389,8 @@ void Player::Tick(s16Output* stream, int samples) {
   // are mixed without the lock (Synth::BeginBlock): a sound call waits only for the handler
   // ticks, not for the mixing, which on a core the system shares can be held up for milliseconds.
   static u64 spu = 200ull * kMixRate;
+  const int audible =
+      mBudget.Limit() >= MixBudget::kNoLimit ? Synth::kAllAudible : mBudget.Limit();
   for (int i = 0; i < samples;) {
     int n;
     {
@@ -410,7 +418,10 @@ void Player::Tick(s16Output* stream, int samples) {
       // multiply, the 64-bit one a libgcc call (the ARM11 has no divide instruction)
       const u32 left = (u32)(200ull * kMixRate - spu);
       n = (int)std::min<u32>((u32)(samples - i), (left + 47999u) / 48000u);
-      mSynth.BeginBlock();
+      mSynth.BeginBlock(audible);
+      mAudiblePeak = std::max(mAudiblePeak, mSynth.RunningCount() - mSynth.MutedCount());
+      mMutedPeak = std::max(mMutedPeak, mSynth.MutedCount());
+      mHandlerCount = (u32)mHandlers.size();
       mMixing.store(true, std::memory_order_relaxed);
     }
     mSynth.Mix(stream + i, n, kTickRatio);
@@ -422,10 +433,8 @@ void Player::Tick(s16Output* stream, int samples) {
     spu += (u64)n * 48000;
     i += n;
   }
-  return;
 #else
   std::scoped_lock lock(mTickLock);
-#endif
   static int htick = 200;
   static int stick = 48000;
   for (int i = 0; i < samples; i++) {
@@ -457,6 +466,7 @@ void Player::Tick(s16Output* stream, int samples) {
     htick++;
     *stream++ = mSynth.Tick();
   }
+#endif
 }
 
 u32 Player::PlaySound(BankHandle bank_id,
@@ -801,6 +811,16 @@ void Player::SetReverbDepth(s16 left, s16 right) {
     lg::info("sound: SPU2 effect depth {} {}", left, right);
   }
   mSynth.SetReverbDepth(left, right);
+}
+
+void Player::SetGroupVoiceRange(s32 group, s32 min, s32 max) {
+  std::scoped_lock lock(mTickLock);
+  mVmanager.SetGroupVoiceRange(group, min, max);
+}
+
+s32 Player::ExternVoiceAlloc(s32 group) {
+  std::scoped_lock lock(mTickLock);
+  return std::max(mVmanager.ExternVoiceAlloc(group), 0);
 }
 
 void Player::StopAllSounds() {

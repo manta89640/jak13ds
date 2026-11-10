@@ -12,6 +12,12 @@
  * after every block. Then both are timed on a game-like mix (48 voices in 128-sample chunks at
  * 32728 Hz, also compared).
  *
+ * The voice limits: muted voices (Voice::SetMuted) against the reference for where they are
+ * (address, envelope, end) with nothing mixed; Synth::BeginBlock / Mix / EndBlock against the
+ * sum of reference voices, without a limit (every sample) and with one (the quietest muted, the
+ * others exact); the SPU voice allocator's rule (voice_alloc.h) and the mixer's voice budget
+ * (mix_budget.h) on made-up loads.
+ *
  *   test/snd_voice/build.sh && /tmp/snd_voice_exact [trials] [seed] [bank.SBK ...]
  *
  * Exit status 0 when everything matches.
@@ -29,7 +35,10 @@
 #include <string>
 #include <vector>
 
+#include "game/sound/common/mix_budget.h"
+#include "game/sound/common/synth.h"
 #include "game/sound/common/voice.h"
+#include "game/sound/common/voice_alloc.h"
 #include "test/snd_voice/ref/voice.h"
 
 namespace {
@@ -380,6 +389,387 @@ void Trial(Rng& rng, const Data& data, u32 ratio, Stats& st) {
   }
 }
 
+// A muted voice against the reference, which plays: the same samples run, NAX, envelope level and
+// stopped flag after every block, and nothing added to the output while it is muted. Mutes change
+// between blocks. The output is compared again once a key on came while it wasn't muted (the
+// decoder starts over there).
+void MutedTrial(Rng& rng, const Data& data, u32 ratio, Stats& st) {
+  Pair p;
+  const u32 nblocks = data.blocks();
+  auto key_on = [&]() {
+    const u32 ssa = 8 * Rand(rng, nblocks) + (Rand(rng, 5) == 0 ? Rand(rng, 8) : 0);
+    const u16 pitch = RandPitch(rng);
+    u16 a1, a2;
+    RandAdsr(rng, a1, a2);
+    const u16 vl = RandVolume(rng), vr = RandVolume(rng);
+    p.Both([&](auto& v) {
+      v.SetSsa(ssa);
+      v.SetPitch(pitch);
+      v.SetAsdr1(a1);
+      v.SetAsdr2(a2);
+      v.SetVolume(vl, vr);
+      v.KeyOn();
+    });
+    st.keyons++;
+  };
+  p.Both([&](auto& v) { v.SetSample(const_cast<u16*>(data.words.data())); });
+  bool muted = Rand(rng, 4) != 0;
+  p.a.SetMuted(muted);
+  key_on();
+  bool exact = !muted;
+  st.trials++;
+
+  std::vector<snd::s16Output> oa, bg;
+  std::vector<snd_ref::s16Output> ob;
+  const int blocks = 20 + (int)Rand(rng, 300);
+  int stopped_blocks = 0;
+  for (int blk = 0; blk < blocks; blk++) {
+    const int n = Rand(rng, 4) == 0 ? 1 + (int)Rand(rng, 8) : 1 + (int)Rand(rng, 256);
+    oa.resize(n);
+    bg.resize(n);
+    ob.resize(n);
+    for (int k = 0; k < n; k++) {
+      const s16 l = (s16)(Rand(rng, 4000) - 2000), r = (s16)(Rand(rng, 4000) - 2000);
+      oa[k] = {l, r};
+      bg[k] = {l, r};
+      ob[k] = {l, r};
+    }
+    const int ra = p.a.RunBlock(oa.data(), n, ratio);
+    const int rb = p.b.RunBlock(ob.data(), n, ratio);
+    st.blocks++;
+    st.samples += (u64)n;
+    st.run += (u64)rb;
+    bool same = ra == rb && p.a.GetNax() == p.b.GetNax() && p.a.Stopped() == p.b.Stopped() &&
+                p.a.GetEnvx() == p.b.GetEnvx();
+    for (int k = 0; k < n && same; k++) {
+      if (muted) {
+        same = oa[k].left == bg[k].left && oa[k].right == bg[k].right;
+      } else if (exact) {
+        same = oa[k].left == ob[k].left && oa[k].right == ob[k].right;
+      }
+    }
+    if (!same) {
+      if (st.mismatches < 10) {
+        printf(
+            "MISMATCH (muted voice: %s, %s, ratio %05x, block %d, n %d): ran %d / %d, nax %u / "
+            "%u, stopped %d / %d, envx %d / %d\n",
+            muted ? "muted" : exact ? "heard, exact" : "heard", data.name.c_str(), ratio, blk, n,
+            ra, rb, p.a.GetNax(), p.b.GetNax(), (int)p.a.Stopped(), (int)p.b.Stopped(),
+            p.a.GetEnvx(), p.b.GetEnvx());
+      }
+      st.mismatches++;
+      return;
+    }
+    if (Rand(rng, 100) < 3) {
+      p.Both([](auto& v) { v.KeyOff(); });
+    }
+    if (Rand(rng, 100) < 4) {
+      const u16 pitch = RandPitch(rng);
+      p.Both([&](auto& v) { v.SetPitch(pitch); });
+    }
+    if (Rand(rng, 100) < 3) {
+      const u16 vl = RandVolume(rng), vr = RandVolume(rng);
+      p.Both([&](auto& v) { v.SetVolume(vl, vr); });
+    }
+    if (Rand(rng, 100) < 5) {
+      muted = !muted;
+      p.a.SetMuted(muted);
+      exact = false;
+    }
+    bool restart = Rand(rng, 100) < 2;
+    if (p.b.Stopped()) {
+      st.stops += stopped_blocks == 0;
+      if (++stopped_blocks > 2) {
+        if (Rand(rng, 2) == 0) {
+          break;
+        }
+        restart = true;
+      }
+    }
+    if (restart) {
+      key_on();
+      exact = !muted;
+      stopped_blocks = 0;
+    }
+  }
+}
+
+// Synth::BeginBlock / Mix / EndBlock (the 3DS mixer's block) with `voices` held voices of
+// different volumes against reference voices mixed in the synth's order: every sample without a
+// limit; with a limit, that many voices heard (the loudest: the output is their sum), the others
+// muted, all of them where the reference is; then without a limit again (the muted ones are
+// heard again, only where they are is compared).
+bool SynthTrial(Rng& rng, const Data& data, int voices, int limit) {
+  snd::Synth synth;
+  std::vector<std::shared_ptr<snd::Voice>> vs;
+  std::vector<snd_ref::Voice> refs(voices);
+  std::vector<char> ever_muted(voices, 0);
+  for (int k = 0; k < voices; k++) {
+    auto v = std::make_shared<snd::Voice>();
+    const u32 ssa = 8 * Rand(rng, data.blocks());
+    const u16 pitch = (u16)(0x800 + Rand(rng, 0x1800));
+    const u16 a1 = (u16)(0x000F | (Rand(rng, 4) << 10));
+    const u16 a2 = (u16)(0x1FC0 | (8 + Rand(rng, 8)));
+    const u16 vol = (u16)(0x200 + 0x40 * k);
+    auto setup = [&](auto& x) {
+      x.SetSample(const_cast<u16*>(data.words.data()));
+      x.SetSsa(ssa);
+      x.SetPitch(pitch);
+      x.SetAsdr1(a1);
+      x.SetAsdr2(a2);
+      x.SetVolume(vol, (u16)(vol / 2));
+      x.KeyOn();
+    };
+    setup(*v);
+    setup(refs[k]);
+    synth.AddVoice(v);
+    vs.push_back(v);
+  }
+  constexpr int kBlocks = 60, kSamples = 136;
+  std::vector<snd::s16Output> out(kSamples);
+  std::vector<snd_ref::s16Output> ref(kSamples), unheard(kSamples);
+  int compared = 0;
+  for (int blk = 0; blk < kBlocks; blk++) {
+    const bool limited = blk >= 20 && blk < 40;
+    synth.BeginBlock(limited ? limit : snd::Synth::kAllAudible);
+    const int muted_now = synth.MutedCount();
+    if (synth.RunningCount() != voices || muted_now != (limited ? voices - limit : 0)) {
+      printf("MISMATCH (synth, block %d): %d voices running, %d muted (limit %d of %d)\n", blk,
+             synth.RunningCount(), muted_now, limited ? limit : voices, voices);
+      return false;
+    }
+    bool exact = true;
+    for (int k = 0; k < voices; k++) {
+      const bool muted = vs[k]->Muted();
+      // the loudest stay: the voices' volumes go up with k
+      if (limited && muted != (k < voices - limit)) {
+        printf("MISMATCH (synth, block %d): voice %d of %d %s (limit %d)\n", blk, k, voices,
+               muted ? "muted" : "heard", limit);
+        return false;
+      }
+      exact = exact && (muted || !ever_muted[k]);
+      ever_muted[k] = ever_muted[k] || muted;
+    }
+    synth.Mix(out.data(), kSamples, kTickRatio);
+    synth.EndBlock();
+    std::fill(ref.begin(), ref.end(), snd_ref::s16Output{});
+    // the synth's list has the last voice added first
+    for (int k = voices - 1; k >= 0; k--) {
+      refs[k].RunBlock(vs[k]->Muted() ? unheard.data() : ref.data(), kSamples, kTickRatio);
+      if (vs[k]->GetNax() != refs[k].GetNax() || vs[k]->GetEnvx() != refs[k].GetEnvx() ||
+          vs[k]->Stopped() != refs[k].Stopped()) {
+        printf("MISMATCH (synth, block %d, voice %d): nax %u / %u, envx %d / %d\n", blk, k,
+               vs[k]->GetNax(), refs[k].GetNax(), vs[k]->GetEnvx(), refs[k].GetEnvx());
+        return false;
+      }
+    }
+    if (!exact) {
+      continue;
+    }
+    compared++;
+    for (int i = 0; i < kSamples; i++) {
+      // the synth's master volume (0x3FFF)
+      const s16 l = (s16)((ref[i].left * 0x3FFF) >> 15), r = (s16)((ref[i].right * 0x3FFF) >> 15);
+      if (out[i].left != l || out[i].right != r) {
+        printf("MISMATCH (synth, block %d, sample %d): %d,%d / %d,%d\n", blk, i, out[i].left,
+               out[i].right, l, r);
+        return false;
+      }
+    }
+  }
+  // all of them when no voice was ever muted, else the blocks up to the end of the limit
+  const int expected = limit < voices ? 40 : kBlocks;
+  if (compared != expected) {
+    printf("MISMATCH (synth): %d blocks' output compared, %d expected\n", compared, expected);
+    return false;
+  }
+  return true;
+}
+
+// a permanent voice (the overlord's stream voices) is never muted: with room for one voice the
+// louder tone is
+bool PermanentCheck(const Data& data) {
+  snd::Synth synth;
+  auto stream = std::make_shared<snd::Voice>(snd::Voice::AllocationType::Permanent);
+  auto tone = std::make_shared<snd::Voice>();
+  for (auto& v : {stream, tone}) {
+    v->SetSample(const_cast<u16*>(data.words.data()));
+    v->SetPitch(0x1000);
+    v->SetAsdr1(0x000F);
+    v->SetAsdr2(0x1FC8);
+    v->SetVolume(v == tone ? 0x2000 : 0x100, v == tone ? 0x2000 : 0x100);
+    v->KeyOn();
+    synth.AddVoice(v);
+  }
+  synth.BeginBlock(1);
+  const bool ok = synth.RunningCount() == 2 && synth.MutedCount() == 1 && !stream->Muted() &&
+                  tone->Muted();
+  synth.EndBlock();
+  if (!ok) {
+    printf("MISMATCH (synth): permanent voice %s, tone %s, %d running, %d muted\n",
+           stream->Muted() ? "muted" : "heard", tone->Muted() ? "muted" : "heard",
+           synth.RunningCount(), synth.MutedCount());
+  }
+  return ok;
+}
+
+// 989snd's voice allocation as voice_alloc.h has it
+bool AllocatorChecks() {
+  int bad = 0;
+  auto expect = [&](bool ok, const char* what) {
+    if (!ok) {
+      printf("MISMATCH (voice allocator): %s\n", what);
+      bad++;
+    }
+  };
+  bool stolen = false;
+  {
+    snd::VoiceAllocator a;
+    bool all_free = true;
+    for (int i = 0; i < 48; i++) {
+      all_free = all_free && a.Allocate(0, 10, 0, &stolen) == i && !stolen;
+    }
+    expect(all_free, "48 tones get the 48 voices in order");
+    expect(a.Allocate(0, 9, 0, &stolen) == -1 && !stolen, "a lower priority gets no held voice");
+    expect(a.Allocate(0, 10, 0, &stolen) == 0 && stolen, "the same priority takes the oldest");
+    expect(a.Allocate(0, 10, 0, &stolen) == 1 && stolen, "then the next oldest");
+    expect(a.Allocate(0, 9, 1ull << 7, &stolen) == 7 && stolen,
+           "a lower priority takes the voice in its release");
+    expect(a.Allocate(0, 11, 0, &stolen) == 7 && stolen,
+           "a higher priority takes the lowest priority (voice 7, at 9)");
+    expect(a.Allocate(0, 12, (1ull << 30) | (1ull << 40), &stolen) == 30 && stolen,
+           "of two in release the older (same priority)");
+    a.Free(20);
+    expect(a.Allocate(0, 0, 0, &stolen) == 20 && !stolen, "a freed voice is free");
+    expect(a.Allocate(0, 5, 1ull << 30, &stolen) == 30 && stolen,
+           "a voice in release before the held ones, whatever its priority (12)");
+  }
+  {
+    // Jak 1: one stream voice, the music's and dialogue's groups on voices 0-15, the others 16-47
+    snd::VoiceAllocator a;
+    expect(a.AllocExternal(2) == 0, "the first external voice is 0");
+    for (int g = 0; g < 8; g++) {
+      a.SetGroupRange(g, 0x10, 0x2f);
+    }
+    a.SetGroupRange(1, 0, 0xf);
+    a.SetGroupRange(2, 0, 0xf);
+    bool music = true, effects = true;
+    for (int i = 1; i < 16; i++) {
+      music = music && a.Allocate(1, 5, 0, &stolen) == i && !stolen;
+    }
+    expect(music, "group 1 gets voices 1-15");
+    expect(a.Allocate(1, 5, 0, &stolen) == 1 && stolen, "its 16th tone takes its oldest voice");
+    for (int i = 16; i < 48; i++) {
+      effects = effects && a.Allocate(0, 5, 0, &stolen) == i && !stolen;
+    }
+    expect(effects, "group 0 gets voices 16-47");
+    expect(a.Allocate(3, 4, 0, &stolen) == -1, "group 3 shares them: nothing for a lower priority");
+    expect(a.Allocate(3, 5, 0, &stolen) == 16 && stolen, "group 3 takes group 0's oldest");
+  }
+  {
+    // Jak II: 4 stream voices, 44 for the tones
+    snd::VoiceAllocator a;
+    bool ext = true, tones = true;
+    for (int i = 0; i < 4; i++) {
+      ext = ext && a.AllocExternal(2) == i;
+    }
+    expect(ext, "4 external voices are 0-3");
+    for (int i = 4; i < 48; i++) {
+      tones = tones && a.Allocate(i % 14, 5, 0, &stolen) == i && !stolen;
+    }
+    expect(tones, "44 tones get voices 4-47");
+    expect(a.Allocate(40, 5, 0, &stolen) == 4 && stolen, "the 45th takes the oldest, never 0-3");
+  }
+  return bad == 0;
+}
+
+// Voice::KeyedOff(), also for keys given while the mixer runs the voice
+bool KeyedOffChecks(const Data& data) {
+  snd::Voice v;
+  v.SetSample(const_cast<u16*>(data.words.data()));
+  v.KeyOn();
+  bool ok = !v.KeyedOff();
+  v.KeyOff();
+  ok = ok && v.KeyedOff();
+  v.SetBusy(true);
+  v.KeyOn();
+  ok = ok && !v.KeyedOff();
+  v.KeyOff();
+  ok = ok && v.KeyedOff();
+  v.SetBusy(false);
+  ok = ok && v.KeyedOff();
+  v.KeyOn();
+  ok = ok && !v.KeyedOff();
+  if (!ok) {
+    printf("MISMATCH (keyed off flag)\n");
+  }
+  return ok;
+}
+
+// The mixer's voice budget on a made-up mixer: a buffer takes fixed + per_voice for each voice
+// heard + per_voice / 6 for each muted one (1/256 of its duration).
+struct BudgetSim {
+  snd::MixBudget budget;
+  int cuts = 0;
+  int high = 0;  // buffers that took more than kHigh
+  void Run(int buffers, int voices, u32 fixed, u32 per_voice) {
+    for (int i = 0; i < buffers; i++) {
+      const int heard = std::min(voices, budget.Limit());
+      const u32 load = fixed + per_voice * (u32)heard + per_voice * (u32)(voices - heard) / 6;
+      high += load > snd::MixBudget::kHigh;
+      cuts += budget.OnBuffer(load * 100, 25600, false, heard);
+    }
+  }
+};
+
+bool BudgetChecks() {
+  int bad = 0;
+  auto expect = [&](bool ok, const char* what) {
+    if (!ok) {
+      printf("MISMATCH (voice budget): %s\n", what);
+      bad++;
+    }
+  };
+  using B = snd::MixBudget;
+  {
+    // 44 voices + 26 fixed: 62% and 79% of real time, below kHigh
+    BudgetSim s;
+    s.Run(2000, 44, 26, 3);
+    s.Run(2000, 44, 26, 4);
+    expect(s.cuts == 0 && s.high == 0 && s.budget.Limit() == B::kNoLimit,
+           "no limit while the mixer keeps up");
+  }
+  {
+    // 44 voices at 6 (2.3%) each + 38 fixed: 118% of real time; 27 heard and 17 muted: 85%
+    BudgetSim s;
+    s.Run(8, 44, 38, 6);
+    expect(s.cuts >= 1 && s.high <= 4, "an overload is cut within 4 buffers");
+    expect(s.budget.Limit() >= B::kMin && s.budget.Limit() < 44, "to a limit below the voices");
+    const int cuts = s.cuts, high = s.high;
+    s.Run(4000, 44, 38, 6);
+    expect(s.high - high <= 40, "and stays cut while it lasts");
+    expect(s.cuts - cuts <= 16, "without cutting again more than once in a while");
+    expect(s.budget.Limit() >= 25 && s.budget.Limit() <= 28, "at about the count that fits");
+    s.Run(400, 10, 38, 6);
+    expect(s.budget.Limit() == B::kNoLimit, "the limit goes away when the load does");
+  }
+  {
+    // nothing fits: the limit stops at kMin
+    BudgetSim s;
+    s.Run(200, 44, 300, 6);
+    expect(s.budget.Limit() == B::kMin, "the limit never goes below kMin");
+  }
+  {
+    // a late buffer (the output ran dry): no cut while mixing is fast, a deep one when it is slow
+    snd::MixBudget b;
+    expect(!b.OnBuffer(5000, 25600, true, 30) && b.Limit() == B::kNoLimit,
+           "a late buffer that was quick to mix cuts nothing");
+    expect(b.OnBuffer(23040, 25600, true, 30) && b.Limit() <= 17 && b.Limit() >= B::kMin,
+           "a late buffer that took 90% cuts to about half");
+  }
+  return bad == 0;
+}
+
 // this thread's CPU time in ns (the machine may be busy with other work)
 double ThreadNs() {
   timespec ts;
@@ -474,6 +864,29 @@ int main(int argc, char** argv) {
       (unsigned long long)st.run, (unsigned long long)st.keyons, (unsigned long long)st.stops,
       (unsigned long long)st.mismatches, secs);
 
+  // muted voices
+  Stats mst;
+  for (int t = 0; t < trials / 4 && mst.mismatches == 0; t++) {
+    const Data& data = sets[Rand(rng, (u32)sets.size())];
+    MutedTrial(rng, data, Rand(rng, 4) == 0 ? 0x10000 : kTickRatio, mst);
+  }
+  printf("muted voices: %llu trials, %llu blocks, %llu output samples, %llu mismatches\n",
+         (unsigned long long)mst.trials, (unsigned long long)mst.blocks,
+         (unsigned long long)mst.samples, (unsigned long long)mst.mismatches);
+
+  // the synth's block with and without a voice limit (voices that never end: no loop flags)
+  const Data plain = MakeSynthetic(rng, 4096, 0, "synthetic, no flags");
+  const bool synth_ok = SynthTrial(rng, plain, 48, 48) && SynthTrial(rng, plain, 48, 30) &&
+                        SynthTrial(rng, plain, 12, 1) && SynthTrial(rng, plain, 20, 0) &&
+                        PermanentCheck(plain);
+  const bool alloc_ok = AllocatorChecks();
+  const bool keyed_ok = KeyedOffChecks(plain);
+  const bool budget_ok = BudgetChecks();
+  printf("synth blocks %s, voice allocator %s, keyed off flag %s, voice budget %s\n",
+         synth_ok ? "ok" : "FAILED", alloc_ok ? "ok" : "FAILED", keyed_ok ? "ok" : "FAILED",
+         budget_ok ? "ok" : "FAILED");
+  const bool limits_ok = mst.mismatches == 0 && synth_ok && alloc_ok && keyed_ok && budget_ok;
+
   // the game-like mix, on the real data when there is some; the best of 7 runs each, alternating
   const Data& data = sets.back();
   constexpr int kVoices = 48, kSeconds = 10;
@@ -496,5 +909,5 @@ int main(int argc, char** argv) {
       data.name.c_str(), kVoices, kSeconds, same ? "identical" : "DIFFERENT",
       best_ref / (double)run_ref, best_new / (double)run_new,
       (best_ref / (double)run_ref) / (best_new / (double)run_new));
-  return (st.mismatches == 0 && same) ? 0 : 1;
+  return (st.mismatches == 0 && same && limits_ok) ? 0 : 1;
 }
