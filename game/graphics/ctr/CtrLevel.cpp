@@ -12523,6 +12523,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
   }
   const u8* const all_vis = j2_hidden ? lev.chunk_all_vis.data() : nullptr;
+  // the zero string hides the chunk whole (emit_chunk's test): not in view, whatever the camera
+  auto string_hides = [&](size_t ci, const c3l::Chunk& ch) {
+    return all_vis && all_vis[ci] && ch.kind != c3l::CHUNK_KIND_VISTA && ch.lod_tier < 3;
+  };
   auto emit_chunk = [&](size_t ci, bool vista_chunk) {
     m_ph_emits++;
     const auto& ch = lev.chunks[ci];
@@ -13012,7 +13016,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // ctr_pop: a chunk in view the config would draw, not drawn: a hole unless a vista copy stands in
   auto note_hole = [&](size_t ci, const c3l::Chunk& ch, bool miss) {
     const bool vista = ch.kind == c3l::CHUNK_KIND_VISTA;
-    if (!sphere_in_view(cam, ch.bsphere) || fog_at(ch.bsphere, vista) >= 0.9f) {
+    if (string_hides(ci, ch) || !sphere_in_view(cam, ch.bsphere) ||
+        fog_at(ch.bsphere, vista) >= 0.9f) {
       return;
     }
     if (!miss && !vista && lev.vista_copy[ci] && m_vista_src[ci]) {
@@ -13169,7 +13174,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         hold = 0;
       } else if (meshes[ci] < 0 ? lev.dormant_freed(ci) && !lev.dormant : hold != 0) {
         // (while dormant the string hides it anyway: no hold)
-        const bool seen = sphere_in_view(cam, ch.bsphere);
+        const bool seen = !string_hides(ci, ch) && sphere_in_view(cam, ch.bsphere);
         if (meshes[ci] < 0) {
           hold = seen ? (hold ? hold : frame32) : 0;
           m_levels->stream_check().dorm_missing += seen;
@@ -13185,7 +13190,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     if (meshes[ci] < 0 && dist_ok && lod_ok && !(lev.has_vista && ch.lod_tier == 3) &&
         (!(ch.lod_tier != 0 ? far_tfrag : far_level) || far_chunk(lev, ch)) &&
-        sphere_in_view(cam, ch.bsphere)) {
+        !string_hides(ci, ch) && sphere_in_view(cam, ch.bsphere)) {
       g_holes.chunk_frames[std::min<u32>(ch.kind, 3)]++;
       g_holes.this_frame++;
     }
