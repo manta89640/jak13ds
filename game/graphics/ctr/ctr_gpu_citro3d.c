@@ -358,6 +358,7 @@ enum {
   PROG_MESH_MORPH_FA, /* the same with the fog in the alpha (ctr_mesh_morph_fa.v.pica) */
   PROG_TFRAG_MORPH,    /* ctr_gpu_draw_mesh_tmorph (ctr_tfrag_morph.v.pica, set 1 only) */
   PROG_TFRAG_MORPH_FA, /* the same with the fog in the alpha (ctr_tfrag_morph_fa.v.pica) */
+  PROG_CLIP_PZ, /* PROG_CLIP whose vertices' z is already the PICA's (ctr_gpu_draw_clip_pz) */
 };
 /* (AI-assisted) the level mesh programs (one vertex layout, the same uniforms) */
 static inline int is_mesh_prog(int prog) {
@@ -512,6 +513,7 @@ static struct {
   float last_env_fade[3];
   uint32_t last_env_bones_id; /* (AI-assisted) as last_skin_bones_id */
   C3D_Mtx gl_to_pica;
+  C3D_Mtx gl_to_pica_pz; /* gl_to_pica with z passed through (PROG_CLIP_PZ) */
   MeshSlot meshes[MAX_MESHES];
   int pending_mesh_delete[MAX_MESHES];
   int pending_mesh_delete_count;
@@ -999,6 +1001,7 @@ static void use_program(int prog) {
     static const void* last_dvlp;
     const shaderProgram_s* sp = prog == PROG_BASIC     ? &g.ps->basic
                                 : prog == PROG_CLIP     ? &g.ps->clip
+                                : prog == PROG_CLIP_PZ  ? &g.ps->clip
                                 : prog == PROG_CLIP2    ? &g.ps->clip2
                                 : prog == PROG_OCEAN    ? &g.ps->ocean
                                 : prog == PROG_OCEAN_FULL ? &g.ps->ocean_full
@@ -1039,8 +1042,8 @@ static void use_program(int prog) {
     AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_projection, &g.projection);
     unif_vectors += 4;
-  } else if (prog == PROG_CLIP || prog == PROG_CLIP2) {
-    C3D_BindProgram(prog == PROG_CLIP ? &g.ps->clip : &g.ps->clip2);
+  } else if (prog == PROG_CLIP || prog == PROG_CLIP2 || prog == PROG_CLIP_PZ) {
+    C3D_BindProgram(prog == PROG_CLIP2 ? &g.ps->clip2 : &g.ps->clip);
     g.last_state_valid = 0;
     AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4); /* clip space position */
     AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2); /* texcoord (0) */
@@ -1051,8 +1054,8 @@ static void use_program(int prog) {
       AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
     }
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER,
-                     prog == PROG_CLIP ? g.ps->uloc_clip_glpica : g.ps->uloc_clip2_glpica,
-                     &g.gl_to_pica);
+                     prog == PROG_CLIP2 ? g.ps->uloc_clip2_glpica : g.ps->uloc_clip_glpica,
+                     prog == PROG_CLIP_PZ ? &g.gl_to_pica_pz : &g.gl_to_pica);
     unif_vectors += 4;
   } else if (prog == PROG_OCEAN) {
     /* (AI-assisted) the static mesh layout (texcoord unused by the shader) */
@@ -1239,6 +1242,9 @@ static void setup_projection(void) {
   g.gl_to_pica.r[3].z = 0.0f;
   g.gl_to_pica.r[3].w = 1.0f;
   gl_to_pica_check();
+  g.gl_to_pica_pz = g.gl_to_pica;
+  g.gl_to_pica_pz.r[2].z = 1.0f;
+  g.gl_to_pica_pz.r[2].w = 0.0f;
 
   /* (AI-assisted) the ocean's GS vertices -> g.projection's space like CtrDirect: x = (X / 16 -
    * 2048) / 256, y = (2048 - Y / 16) / h (h: the field's half height, 112 for Jak 1's 512 x 224,
@@ -7315,7 +7321,8 @@ void ctr_gpu_draw_strip(const ctr_draw_state* state, const ctr_vertex* verts, in
   draw_immediate(state, PROG_BASIC, dst, sizeof(ctr_vertex), count, GPU_TRIANGLE_STRIP);
 }
 
-void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count) {
+static void draw_clip_prog(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count,
+                           int prog) {
   SKY_HOOK(state);
   if (!g.ready || !g.in_frame || count < 3) {
     return;
@@ -7327,7 +7334,15 @@ void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts
   uint8_t* dst = g.vbuf + g.vbuf_used;
   memcpy(dst, verts, bytes);
   g.vbuf_used += (bytes + 15) & ~(size_t)15;
-  draw_immediate(state, PROG_CLIP, dst, sizeof(ctr_clip_vertex), count, GPU_TRIANGLES);
+  draw_immediate(state, prog, dst, sizeof(ctr_clip_vertex), count, GPU_TRIANGLES);
+}
+
+void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count) {
+  draw_clip_prog(state, verts, count, PROG_CLIP);
+}
+
+void ctr_gpu_draw_clip_pz(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count) {
+  draw_clip_prog(state, verts, count, PROG_CLIP_PZ);
 }
 
 void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t const1,

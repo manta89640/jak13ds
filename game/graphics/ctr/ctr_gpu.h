@@ -198,6 +198,10 @@ typedef struct {
 } ctr_clip_vertex;
 /* Draw a triangle list in clip space (the sky): the GPU clips it. State like ctr_gpu_draw. */
 void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count);
+/* The same with z already the PICA's: -depth * w. The GPU reads vertex floats as float24 (16 bit
+ * mantissa): an OpenGL-style z past a few metres is within 1% of -w, and the shader's (z + w) kept
+ * ~2^-16 of w, ~100 GS depth units; this z keeps its own 16 bits. */
+void ctr_gpu_draw_clip_pz(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count);
 /* (AI-assisted) Indexed triangle lists of ctr_clip_vertex (like ctr_gpu_draw_clip: the GPU clips),
  * written in place into this frame's vertex memory: ctr_gpu_clip_reserve gives room for max_verts
  * vertices and max_indices u16 indices (0 when there is none: nothing reserved). Then
