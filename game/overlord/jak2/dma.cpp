@@ -225,6 +225,7 @@ bool DMA_SendToSPUAndSync(uint8_t* iop_mem,
     // the actual interrupt will be run from iso.cpp, in the isothread loop.
     // sceSdSetTransIntrHandler(chan, SpuDmaIntr, 0);
     pending_dma = kDmaDelay;  // added
+    NotifyISOThread();  // its loop counts the delay down
     int sz = sceSdVoiceTrans((int)(short)chan, 0, iop_mem, spu_addr, size_one_side);
     // if (disable_intr == 1) {
     // CpuResumeIntr(local_28[0]);

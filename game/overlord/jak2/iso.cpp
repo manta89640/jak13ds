@@ -450,6 +450,19 @@ static bool IsoThreadIdle() {
   return true;
 }
 
+// the loop's wait with no read in progress
+static u32 IsoThreadWaitUs() {
+  if (IsoThreadIdle()) {
+    return 100000;
+  }
+  // only streams queued, no SPU DMA to finish: their file data is read a chunk (0.3 s) ahead
+  if (!pending_dma && !StopPluginStreams && !gPriStack[0].count && !gPriStack[1].count &&
+      !gPriStack[2].count) {
+    return 4000;
+  }
+  return 1000;
+}
+
 u32 ISOThread() {
   bool bVar1;
   CmdLoadSingleIop* inasdf;
@@ -765,7 +778,7 @@ u32 ISOThread() {
       }
 
       if (should_sleep) {
-        DelayThreadNotifiable(IsoThreadIdle() ? 100000 : 1000);
+        DelayThreadNotifiable(IsoThreadWaitUs());
       }
     }
   } while (true);
