@@ -537,6 +537,9 @@ CtrTexAnimJak2::Src* CtrTexAnimJak2::src(const char* name, const char* dgo, bool
     m_c3t_tried = true;
     m_c3t_path = (ctr_level_c3l_dir() / "texanim.c3t").string();
     FILE* f = fopen(m_c3t_path.c_str(), "rb");
+    if (f) {
+      setvbuf(f, nullptr, _IONBF, 0);  // whole records and textures are read in one piece
+    }
     c3t::Header hdr{};
     if (f && fread(&hdr, sizeof(hdr), 1, f) == 1 && !memcmp(hdr.magic, c3t::kMagic, 4) &&
         hdr.version == c3t::kVersion && hdr.count < 4096 &&
@@ -556,33 +559,47 @@ CtrTexAnimJak2::Src* CtrTexAnimJak2::src(const char* name, const char* dgo, bool
         }
       }
     }
-    if (f) {
-      fclose(f);
-    }
+    m_c3t_file = f;  // kept open: an open per texture cost the render thread far more than the read
     lg::info("[ctr] jak2 texture animation: {} textures in {}", m_srcs.size(), m_c3t_path);
   }
   for (auto& s : m_srcs) {
     if (s.name != name || s.dgo != (dgo ? dgo : "")) {
       continue;
     }
-    if (load && s.data.empty() && s.size) {
-      FILE* f = fopen(m_c3t_path.c_str(), "rb");
-      if (f) {
-        s.data.resize(s.size);
-        if (fseek(f, (long)s.offset, SEEK_SET) != 0 ||
-            fread(s.data.data(), 1, s.size, f) != s.size) {
-          s.data.clear();
-        }
-        fclose(f);
+    if (load && s.data.empty() && s.size && m_c3t_file) {
+      s.data.resize(s.size);
+      if (fseek(m_c3t_file, (long)s.offset, SEEK_SET) != 0 ||
+          fread(s.data.data(), 1, s.size, m_c3t_file) != s.size) {
+        s.data.clear();
       }
     }
     if (load && s.data.empty() && s.kind != c3t::kSizeOnly) {
       return nullptr;
     }
-    s.used_frame = m_frame;
     return &s;
   }
   return nullptr;
+}
+
+void CtrTexAnimJak2::load_array(int array) {
+  const auto& arr = kArrays[array];
+  for (int a = 0; a < arr.anims; a++) {
+    const auto& def = arr.anim[a];
+    for (int l = 0; l < def.layers; l++) {
+      m_anim_def[array][a].from[l] = src(def.layer[l].tex, nullptr, true);
+    }
+  }
+}
+
+void CtrTexAnimJak2::load_group(int group) {
+  const auto& g = kClutGroups[group];
+  for (int i = 0; i < g.count; i++) {
+    const auto& t = g.tex[i];
+    Def& d = m_clut_def[group][i];
+    d.from[0] = src(t.name, t.dgo, true);
+    d.from[1] = src((std::string(t.name) + t.suf0).c_str(), t.dgo, true);
+    d.from[2] = src((std::string(t.name) + t.suf1).c_str(), t.dgo, true);
+  }
 }
 
 bool CtrTexAnimJak2::Out::upload(int slot_index) {
@@ -616,46 +633,52 @@ void CtrTexAnimJak2::Out::release() {
 }
 
 CtrTexAnimJak2::Out* CtrTexAnimJak2::out(const char* name, int w, int h) {
-  auto& o = m_outs[name];
-  if ((int)o.rgba.size() != w * h || o.w != w || o.h != h) {
-    o.release();
-    o.w = w;
-    o.h = h;
-    o.rgba.assign((size_t)w * h, 0);
-  }
-  o.seen_frame = m_frame;
-  return &o;
+  return ready(&m_outs[name], w, h);
 }
 
-void CtrTexAnimJak2::fixed_anim(const void* def_ptr,
-                                const u8* in,
-                                float time,
-                                const u8* vals,
-                                int nvals) {
-  const auto& def = *(const Anim*)def_ptr;
-  const int slot = slot_index(def.dest);
-  if (slot < 0 || slot >= CTR_ANIM_SLOTS) {
+CtrTexAnimJak2::Out* CtrTexAnimJak2::ready(Out* o, int w, int h) {
+  if ((int)o->rgba.size() != w * h || o->w != w || o->h != h) {
+    o->release();
+    o->w = w;
+    o->h = h;
+    o->rgba.assign((size_t)w * h, 0);
+  }
+  o->seen_frame = m_frame;
+  return o;
+}
+
+void CtrTexAnimJak2::fixed_anim(int array, int anim, float time, const u8* vals, int nvals) {
+  const auto& def = kArrays[array].anim[anim];
+  Def& d = m_anim_def[array][anim];
+  if (d.slot == -2) {
+    d.slot = slot_index(def.dest);
+    // the destination's size (the base texture's or the override), at most kFixedMax per side
+    // (the CPU's cost: ~100 instructions per pixel and layer)
+    int dw = def.w, dh = def.h;
+    if (!dw || !dh) {
+      const Src* base = src(def.dest, nullptr, false);
+      dw = base ? base->w : 0;
+      dh = base ? base->h : 0;
+    }
+    if (dw && dh) {
+      d.w = std::min(pow2_at_least_8(dw), kFixedMax);
+      d.h = std::min(pow2_at_least_8(dh), kFixedMax);
+    }
+  }
+  const int slot = d.slot;
+  if (slot < 0 || slot >= CTR_ANIM_SLOTS || !d.w) {
     return;
   }
-  // the destination's size (the base texture's or the override), at most 64 x 64
-  int w = def.w, h = def.h;
-  if (!w || !h) {
-    const Src* d = src(def.dest, nullptr, false);
-    if (!d) {
-      return;
-    }
-    w = d->w;
-    h = d->h;
-  }
-  // at most kFixedMax per side (the CPU's cost: ~100 instructions per pixel and layer)
-  w = std::min(pow2_at_least_8(w), kFixedMax);
-  h = std::min(pow2_at_least_8(h), kFixedMax);
+  const int w = d.w, h = d.h;
   // only the slots drawn in the last frame (the game sends some, the skull gem and the bomb
   // gradient, in every level whether a model shows them or not); the base texture until then
   if (!(ctr_gpu_anim_slots_drawn() & (1ull << slot))) {
     return;
   }
-  auto* o = out(def.dest, w, h);
+  if (!d.out) {
+    d.out = &m_outs[def.dest];
+  }
+  auto* o = ready(d.out, w, h);
   // redrawn every kFixedRate frames, if its input changed; at most kFixedPerFrame animations a
   // frame (the one waiting longest first: the others' turn comes in the next frames)
   const size_t n = 4 + (size_t)nvals;
@@ -666,7 +689,6 @@ void CtrTexAnimJak2::fixed_anim(const void* def_ptr,
     return;
   }
   m_fixed_this_frame++;
-  (void)in;
   o->input.resize(n);
   memcpy(o->input.data(), &time, 4);
   memcpy(o->input.data() + 4, vals, nvals);
@@ -678,7 +700,7 @@ void CtrTexAnimJak2::fixed_anim(const void* def_ptr,
     if (time < ld.start || time > ld.end) {
       continue;
     }
-    const Src* s = src(ld.tex, nullptr, true);
+    const Src* s = d.from[l];
     if (!s || s->kind != c3t::kRgba) {
       continue;
     }
@@ -699,8 +721,8 @@ void CtrTexAnimJak2::fixed_anim(const void* def_ptr,
   m_slot_names[def.dest]++;
 }
 
-void CtrTexAnimJak2::clut_group(const void* group_ptr, const u8* data, int bytes) {
-  const auto& g = *(const ClutGroup*)group_ptr;
+void CtrTexAnimJak2::clut_group(int group, const u8* data, int bytes) {
+  const auto& g = kClutGroups[group];
   if (bytes < 16 || !g.count) {
     return;
   }
@@ -717,29 +739,33 @@ void CtrTexAnimJak2::clut_group(const void* group_ptr, const u8* data, int bytes
   const float w0 = 1.f - f, w1 = f;
   for (int i = 0; i < g.count; i++) {
     const auto& t = g.tex[i];
-    const int slot = slot_index(t.name);
+    Def& d = m_clut_def[group][i];
+    if (d.slot == -2) {
+      d.slot = slot_index(t.name);
+      d.out = &m_outs[t.name];  // (by name: the groups with the same texture share it)
+    }
+    const int slot = d.slot;
     if (slot < 0 || slot >= CTR_ANIM_SLOTS) {
       continue;
     }
-    auto it = m_outs.find(t.name);
     // at weight 0 the level's base texture (baked with the first CLUT) is the same: nothing to do
     // until the weight first moves
-    if (f == 0.f && (it == m_outs.end() || it->second.tex < 0)) {
+    if (f == 0.f && d.out->tex < 0) {
       continue;
     }
-    if (it != m_outs.end() && it->second.weight == f && it->second.tex >= 0) {
-      it->second.seen_frame = m_frame;
+    if (d.out->weight == f && d.out->tex >= 0) {
+      d.out->seen_frame = m_frame;
       continue;
     }
-    const Src* dst = src(t.name, t.dgo, true);
-    const Src* c0 = src((std::string(t.name) + t.suf0).c_str(), t.dgo, true);
-    const Src* c1 = src((std::string(t.name) + t.suf1).c_str(), t.dgo, true);
+    const Src* dst = d.from[0];
+    const Src* c0 = d.from[1];
+    const Src* c1 = d.from[2];
     if (!dst || !c0 || !c1 || dst->kind != c3t::kIndex || c0->kind != c3t::kIndex ||
         c1->kind != c3t::kIndex) {
       continue;
     }
     const int w = pow2_at_least_8(dst->w), h = pow2_at_least_8(dst->h);
-    auto* o = out(t.name, w, h);
+    auto* o = ready(d.out, w, h);
     o->weight = f;
     // ClutBlender::run: the blended CLUT (cast to u8), then the index lookups
     u32 clut[256];
@@ -754,9 +780,15 @@ void CtrTexAnimJak2::clut_group(const void* group_ptr, const u8* data, int bytes
       clut[k] = v;
     }
     const u8* idx = dst->data.data();
+    int xs[c3t::kMaxSize];  // (the column of each x: no divide per texel)
+    for (int x = 0; x < w; x++) {
+      xs[x] = x * dst->w / w;
+    }
     for (int y = 0; y < h; y++) {
+      const u8* row = idx + (size_t)(y * dst->h / h) * dst->w;
+      u32* out_row = o->rgba.data() + (size_t)y * w;
       for (int x = 0; x < w; x++) {
-        o->rgba[(size_t)y * w + x] = clut[idx[(size_t)(y * dst->h / h) * dst->w + x * dst->w / w]];
+        out_row[x] = clut[row[xs[x]]];
       }
     }
     o->upload(slot);
@@ -766,15 +798,25 @@ void CtrTexAnimJak2::clut_group(const void* group_ptr, const u8* data, int bytes
 }
 
 bool CtrTexAnimJak2::run(u16 code, const u8* data, int bytes) {
-  for (const auto& g : kClutGroups) {
-    if (g.code == code) {
+  constexpr int kGroups = (int)(sizeof(kClutGroups) / sizeof(kClutGroups[0]));
+  constexpr int kArrayCount = (int)(sizeof(kArrays) / sizeof(kArrays[0]));
+  static_assert(kGroups <= kMaxGroups && kArrayCount <= kMaxArrays);
+  for (int gi = 0; gi < kGroups; gi++) {
+    if (kClutGroups[gi].code == code) {
       const double t0 = ctr_gpu_time_ms();
-      clut_group(&g, data, bytes);
+      // the sources are read when the game first sends the group (a level's start), not at the
+      // frame that first shows it
+      if (!m_group_loaded[gi]) {
+        m_group_loaded[gi] = true;
+        load_group(gi);
+      }
+      clut_group(gi, data, bytes);
       m_slot_ms += ctr_gpu_time_ms() - t0;
       return true;
     }
   }
-  for (const auto& arr : kArrays) {
+  for (int ai = 0; ai < kArrayCount; ai++) {
+    const auto& arr = kArrays[ai];
     if (arr.code != code) {
       continue;
     }
@@ -787,12 +829,16 @@ bool CtrTexAnimJak2::run(u16 code, const u8* data, int bytes) {
       return true;
     }
     const double t0 = ctr_gpu_time_ms();
+    if (!m_array_loaded[ai]) {
+      m_array_loaded[ai] = true;
+      load_array(ai);
+    }
     const u8* p = data;
     for (int a = 0; a < arr.anims; a++) {
       float time;
       memcpy(&time, p, 4);
       const int nv = 160 * arr.anim[a].layers;
-      fixed_anim(&arr.anim[a], p, time, p + 16, nv);
+      fixed_anim(ai, a, time, p + 16, nv);
       p += 16 + nv;
     }
     m_slot_ms += ctr_gpu_time_ms() - t0;
@@ -921,16 +967,11 @@ void CtrTexAnimJak2::frame_done() {
   m_snap_valid = false;
   m_frame++;
   m_fixed_this_frame = 0;
-  // idle animations give back their GPU texture and texels; unused sources their data
+  // idle animations give back their GPU texture and texels
   if ((m_frame & 63) == 0) {
     for (auto& [name, o] : m_outs) {
       if (o.tex >= 0 && m_frame - o.seen_frame > (u64)kIdleFrames) {
         o.release();
-      }
-    }
-    for (auto& s : m_srcs) {
-      if (!s.data.empty() && m_frame - s.used_frame > (u64)kIdleFrames) {
-        std::vector<u8>().swap(s.data);
       }
     }
   }
