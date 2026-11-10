@@ -416,6 +416,22 @@ void CtrVram::write_ct32(const u8* data, u32 dest_block, u32 width, u32 height) 
 }
 
 void CtrVram::note_tex_info(const u8* tpage, s32 count, const u8* ee_mem, u32 s7_ptr) {
+  const u8* offsets = nullptr;
+  if (m_jak2_remap) {
+    // the page's dest offsets by texture index: a table search per texture, made once per page
+    u32 page_id;
+    memcpy(&page_id, tpage + offsetof(GoalTexturePageHeader, id), 4);
+    const size_t n = (size_t)std::clamp(count, 0, 1024);
+    auto it = m_page_offsets.find(page_id);
+    if (it == m_page_offsets.end() || it->second.size() < n) {
+      std::vector<u8> v(n);
+      for (size_t i = 0; i < n; i++) {
+        v[i] = (u8)lookup_jak2_texture_dest_offset((int)page_id, (int)i);
+      }
+      it = m_page_offsets.insert_or_assign(page_id, std::move(v)).first;
+    }
+    offsets = it->second.data();
+  }
   for (s32 i = 0; i < count && i < 1024; i++) {
     u32 ptr;
     memcpy(&ptr, tpage + sizeof(GoalTexturePageHeader) + 4 * i, 4);
@@ -440,9 +456,7 @@ void CtrVram::note_tex_info(const u8* tpage, s32 count, const u8* ee_mem, u32 s7
         // (AI-assisted) Jak II: the PC port moved this texture's dest by a few blocks
         // (__pc-get-tex-remap, so no two textures share an address); its data is where the
         // page put it, offset blocks lower
-        u32 page_id;
-        memcpy(&page_id, tpage + offsetof(GoalTexturePageHeader, id), 4);
-        m_remap[dest0] = (u8)lookup_jak2_texture_dest_offset((int)page_id, (int)i);
+        m_remap[dest0] = offsets[i];
         // (AI-assisted) where the texture record is: setup-font-texture changes the font
         // textures' height before relocating them (see relocate)
         m_tex_ptr[dest0] = ptr;
@@ -582,7 +596,7 @@ void CtrVram::write_upload(const u8* src, u32 dest_block, u32 words, u64 page_ke
     const u32 end = upload_end_block(block, n);
     if (n == kChunkWords && block % kChunkBlocks == 0 && block < kBlocks) {
       const u32 c = block / kChunkBlocks;
-      const u64 id = page_chunk_id(s, page_key);
+      const u64 id = chunk_id(s, page_key);
       u64& cur = m_chunk_id[c];
       if (cur == id && (!bytes || !m_lazy_src[c])) {
         m_stats.chunks_skipped++;
@@ -611,6 +625,24 @@ void CtrVram::write_upload(const u8* src, u32 dest_block, u32 words, u64 page_ke
     }
     note_write(block, end);
   }
+}
+
+u64 CtrVram::chunk_id(const u8* chunk_src, u64 page_key) {
+  if (!m_epoch) {
+    return page_chunk_id(chunk_src, page_key);
+  }
+  const u32 epoch = *m_epoch;
+  ChunkMemo& cm = m_chunk_memo[(((uintptr_t)chunk_src >> 14) ^ ((uintptr_t)chunk_src >> 22) ^
+                                (u32)page_key) % kChunkMemos];
+  if (cm.src == chunk_src && cm.key == page_key && cm.epoch == epoch) {
+    return cm.id;
+  }
+  const u64 id = page_chunk_id(chunk_src, page_key);
+  // (kept only if nothing was linked while the data was read)
+  if (*m_epoch == epoch) {
+    cm = ChunkMemo{chunk_src, epoch, page_key, id};
+  }
+  return id;
 }
 
 void CtrVram::materialize(u32 first_block, u32 end_block) {

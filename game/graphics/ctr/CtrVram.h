@@ -150,8 +150,8 @@ class CtrVram {
   /*! (AI-assisted) Jak II: textures whose dest the PC port moved (lookup_jak2_texture_dest_offset)
    * are read from where their page put them */
   // A counter that moves whenever texture page data in game memory can have changed (the
-  // kernel's count of linked object files). While it stands, a page uploaded again from the same
-  // place keeps the hash its data gave: the data is not read again.
+  // kernel's count of linked object files). While it stands, a page or page chunk uploaded again
+  // from the same place keeps the hash its data gave: the data is not read again.
   void set_epoch(const u32* epoch) { m_epoch = epoch; }
   void set_jak2_remap(bool on) {
     m_jak2_remap = on;
@@ -377,6 +377,18 @@ class CtrVram {
   static constexpr u32 kHashMemos = 64;
   HashMemo m_hash_memo[kHashMemos];
   const u32* m_epoch = nullptr;
+  // a page chunk's id (page_chunk_id's sampled hash), kept the same way
+  struct ChunkMemo {
+    const u8* src = nullptr;
+    u32 epoch = 0;
+    u64 key = 0;
+    u64 id = 0;
+  };
+  static constexpr u32 kChunkMemos = 256;
+  ChunkMemo m_chunk_memo[kChunkMemos];
+  u64 chunk_id(const u8* chunk_src, u64 page_key);
+  // Jak II: a page's dest offsets (lookup_jak2_texture_dest_offset) by texture index, by page id
+  std::unordered_map<u32, std::vector<u8>> m_page_offsets;
   // drop the upload records overlapping these blocks (their data is being overwritten)
   void forget_uploads(u32 first_block, u32 end_block);
   std::vector<u32> m_ct32_page_table;  // byte offset in a PSMCT32 page, by x + 64 * y
