@@ -304,9 +304,12 @@ void ctr_gpu_draw_quads_again(const ctr_draw_state* state);
  * next (the triangles in between have no area). State like ctr_gpu_draw. */
 void ctr_gpu_draw_strip(const ctr_draw_state* state, const ctr_vertex* verts, int count);
 
+/* GS screen lines from the centre to the top edge of the game's field, for the PS2 ocean's GS
+ * positions: 112 for Jak 1 (512 x 224, the default), 208 for Jak II (512 x 416). */
+void ctr_gpu_set_gs_half_height(float lines);
 /* (AI-assisted) The PS2 ocean (CtrOceanFull, config.ini ocean = full): vertices as the ocean's VU1
  * programs send them to the GS. x, y: screen position in GS units (12.4 fixed point, the screen
- * centered at 2048 * 16; Jak 1's 512 x 224 field like CtrDirect), z: GS depth (24 bits, larger =
+ * centered at 2048 * 16; the game's field, ctr_gpu_set_gs_half_height), z: GS depth (24 bits, larger =
  * closer), q: the GS Q (1 / w, > 0); s, t: the GS S, T (texture coordinates times q: the GPU
  * divides them per pixel, perspective correct like the GS); fog: the amount of fog color, 0..1
  * (the GS's (255 - F) / 255); rgba: GS vertex color. Colors like ctr_gpu_draw_mesh:

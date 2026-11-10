@@ -1202,6 +1202,19 @@ int ctr_gpu_shader_opt_ready(void) {
   return s_ps[1].ok;
 }
 
+static float s_gs_half_height = 112.0f; /* ctr_gpu_set_gs_half_height */
+
+static void setup_projection(void);
+
+void ctr_gpu_set_gs_half_height(float lines) {
+  if (lines > 0.0f && lines != s_gs_half_height) {
+    s_gs_half_height = lines;
+    if (g.ready) {
+      setup_projection();
+    }
+  }
+}
+
 static void setup_projection(void) {
   /* x, y in [-1, 1] cover the whole 400x240 screen: the game renders for 5:3 (the kernel reports
    * a 400x240 window, so it widens the view like the PC port's widescreen; HUD and text keep their
@@ -1228,13 +1241,14 @@ static void setup_projection(void) {
   gl_to_pica_check();
 
   /* (AI-assisted) the ocean's GS vertices -> g.projection's space like CtrDirect: x = (X / 16 -
-   * 2048) / 256, y = (2048 - Y / 16) / 112 (Jak 1's 512 x 224 field), z = Z / (2^24 - 1) */
+   * 2048) / 256, y = (2048 - Y / 16) / h (h: the field's half height, 112 for Jak 1's 512 x 224,
+   * 208 for Jak II's 512 x 416), z = Z / (2^24 - 1) */
   C3D_Mtx gs_to_ctr;
   Mtx_Identity(&gs_to_ctr);
   gs_to_ctr.r[0].x = 1.0f / 4096.0f;
   gs_to_ctr.r[0].w = -8.0f;
-  gs_to_ctr.r[1].y = -1.0f / 1792.0f;
-  gs_to_ctr.r[1].w = 2048.0f / 112.0f;
+  gs_to_ctr.r[1].y = -1.0f / (16.0f * s_gs_half_height);
+  gs_to_ctr.r[1].w = 2048.0f / s_gs_half_height;
   gs_to_ctr.r[2].z = 1.0f / 16777215.0f;
   Mtx_Multiply(&g.ocean_full_gs, &g.projection, &gs_to_ctr);
 }

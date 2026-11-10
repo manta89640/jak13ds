@@ -1966,7 +1966,14 @@ namespace {
 std::vector<ctr_ocean_full_vertex> g_ocean_full_verts;
 std::vector<uint16_t> g_ocean_full_indices;
 bool g_ocean_full_open = false;
+float s_gs_half_height = 112.f;  // ctr_gpu_set_gs_half_height
 }  // namespace
+
+void ctr_gpu_set_gs_half_height(float lines) {
+  if (lines > 0.f) {
+    s_gs_half_height = lines;
+  }
+}
 
 int ctr_gpu_ocean_full_reserve(int max_verts,
                           int max_indices,
@@ -2025,7 +2032,7 @@ void ocean_full_draw(const ctr_draw_state* state,
       ctr_vertex o;
       const float w = clip ? v.q : 1.f;  // screen position = (x, y, z) / w
       o.x = (v.x / w / 16.f - 2048.f) / 256.f;
-      o.y = (2048.f - v.y / w / 16.f) / 112.f;
+      o.y = (2048.f - v.y / w / 16.f) / s_gs_half_height;
       o.z = v.z / w / 16777215.f;
       const float q = clip ? 1.f / v.q : v.q;
       o.s = clip ? v.s * q : v.s;

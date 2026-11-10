@@ -664,6 +664,23 @@
     :from *pc-dead-pool* :to *pc-pool*)
   0)
 
+(define *pad-script-lift-meters* 0)
+
+(defun pad-script-lift ((meters int))
+  "'call pad-script-lift N' in a pad script (tests only): Jak is moved N meters up and falls back
+   (the camera follows him up and down)."
+  (set! *pad-script-lift-meters* meters)
+  (process-spawn-function process
+    (lambda ()
+      (suspend)
+      (when *target*
+        (+! (-> *target* control trans y) (* 4096.0 (the float *pad-script-lift-meters*)))
+        (format 0 "pad-script-lift: ~D m~%" *pad-script-lift-meters*)
+        )
+      (none))
+    :from *pc-dead-pool* :to *pc-pool*)
+  0)
+
 (define *pad-script-alert-level* 0)
 
 (defun pad-script-alert ((level int))
