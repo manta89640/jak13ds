@@ -664,6 +664,26 @@
     :from *pc-dead-pool* :to *pc-pool*)
   0)
 
+(define *pad-script-alert-level* 0)
+
+(defun pad-script-alert ((level int))
+  "'call pad-script-alert N' in a pad script (tests only): the city's guards hunt Jak at alert
+   level N for five minutes (a guard fight for frame time and sound tests)."
+  (set! *pad-script-alert-level* level)
+  ;; the pad script calls this while the game reads the pads: send the events from a process
+  (process-spawn-function process
+    (lambda ()
+      (suspend)
+      (when *traffic-manager*
+        (send-event *traffic-manager* 'set-max-alert-level (max 1 *pad-script-alert-level*))
+        (send-event *traffic-manager* 'increase-alert-level *pad-script-alert-level*)
+        (send-event *traffic-manager* 'set-alert-duration (seconds 300))
+        (format 0 "pad-script-alert: level ~D~%" *pad-script-alert-level*)
+        )
+      (none))
+    :from *pc-dead-pool* :to *pc-pool*)
+  0)
+
 ;; (AI-assisted) "print *pad-script-mem*" in a pad script (tests only): a memory report. print_object
 ;; calls the print method, which writes the report to stdout (format 0).
 (deftype pad-script-mem-report (basic) ())
