@@ -412,6 +412,7 @@ u32 StreamListThread() {
 
     SignalSema(EEStreamsList.sema);
     RequestedStreamsList.unk2_init0 = 1;
+    NotifyISOThread();
     SignalSema(RequestedStreamsList.sema);
 
     WaitSema(EEPlayList.sema);

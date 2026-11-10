@@ -11,6 +11,8 @@ namespace jak2 {
 void iso_init_globals();
 u32 ISOThread();
 extern u32 IsoThreadCounter;
+// ends the ISO thread's idle wait: a stream request list is ready for it
+void NotifyISOThread();
 
 struct LoadStackEntry {
   FileRecord* fr;

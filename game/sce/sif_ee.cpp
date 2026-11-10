@@ -185,8 +185,11 @@ s32 sceSifCallRpc(sceSifClientData* bd,
 }
 
 s32 sceSifCheckStatRpc(sceSifRpcData* bd) {
-  iop->signal_run_iop();
-  return iop->kernel.sif_busy(bd->id);
+  const bool busy = iop->kernel.sif_busy(bd->id);
+  if (busy) {
+    iop->signal_run_iop();  // a finished call has nothing for the IOP to do
+  }
+  return busy;
 }
 
 s32 sceSifBindRpc(sceSifClientData* bd, u32 request, u32 mode) {
