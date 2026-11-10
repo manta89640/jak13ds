@@ -642,8 +642,11 @@ void CtrMercRenderer::flush_queues() {
 void CtrMercRenderer::apply_blerc(const CtrLevelData& lev,
                                   const CtrMercModelData& model,
                                   const float* weights) {
+  if (model.scale <= 0.f) {
+    return;
+  }
   u8* verts = (u8*)ctr_gpu_mesh_vertices(model.mesh);
-  if (!verts || model.scale <= 0.f) {
+  if (!verts) {
     return;
   }
   const float inv_scale = 1.f / model.scale;
@@ -787,6 +790,45 @@ void CtrMercRenderer::gather_mod(const u8* ee_mem,
 
 void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos, float ys, float ns) {
   const double t0 = ctr_gpu_time_ms();
+  // the copy is followed to its end before the vertices' other buffer is taken (the loop below
+  // gives up where it can't be followed: the buffer would be left half written)
+  {
+    const size_t size = m_mod_bytes.size();
+    size_t at = pos;
+    for (const auto& e : model.mod) {
+      if (at + 4 > size) {
+        return;
+      }
+      u32 total;
+      memcpy(&total, m_mod_bytes.data() + at, 4);
+      at += 4;
+      if (total != e.vidx_end) {
+        if (total) {
+          m_mod_bad++;
+          return;
+        }
+        continue;
+      }
+      for (u32 done = 0; done < total;) {
+        if (at + 16 > size) {
+          m_mod_bad++;
+          return;
+        }
+        u32 nv;
+        memcpy(&nv, m_mod_bytes.data() + at, 4);
+        if (nv > total - done) {
+          m_mod_bad++;
+          return;
+        }
+        at += 16 + ((12 * (size_t)nv + 3) & ~(size_t)3);
+        done += nv;
+      }
+      if (at > size) {
+        m_mod_bad++;
+        return;
+      }
+    }
+  }
   u8* verts = (u8*)ctr_gpu_mesh_vertices(model.mesh);
   if (!verts) {
     return;
