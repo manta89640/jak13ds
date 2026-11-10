@@ -880,7 +880,8 @@ bool native_verify_inline_on() {
 u64 native_verify_inline(const char* name,
                          std::initializer_list<NativeVerifyRegion> regions,
                          const std::function<u64()>& native,
-                         const std::function<u64()>& goal) {
+                         const std::function<u64()>& goal,
+                         bool full_always) {
   InlineEntry* e = inline_entry(name);
   if (inline_instr_mode()) {
     // alternate calls: native, GOAL (counted as calls / 2 each)
@@ -900,7 +901,7 @@ u64 native_verify_inline(const char* name,
     const char* v = getenv("OPENGOAL_MIPS2C_VERIFY_INLINE_FULL_EVERY");
     return v ? strtoull(v, nullptr, 10) : (u64)64;
   }();
-  const bool full = full_every && (e->calls % full_every) == 1 % full_every;
+  const bool full = full_always || (full_every && (e->calls % full_every) == 1 % full_every);
   uintptr_t host_sp;
   GOALC_READ_HOST_SP(host_sp);
   const u32 sp = (u32)(host_sp - (uintptr_t)g_ee_main_mem);

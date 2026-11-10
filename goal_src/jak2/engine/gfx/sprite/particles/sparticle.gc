@@ -218,9 +218,18 @@
   (the-as sparticle-cpuinfo #f)
   )
 
+;; og:preserve-this 3DS: the cpuinfos pc-sp-process-block is updating where they are (first to past
+;; the last; 0: none). One of them is killed like a copy on the scratchpad: its timer stops.
+(#when TARGET_3DS
+  (define *sp-block-lo* 0)
+  (define *sp-block-hi* 0))
+
 (defun sp-kill-particle ((arg0 sparticle-system) (arg1 sparticle-cpuinfo))
   (cond
-    ((in-scratchpad? arg1)
+    ((or (in-scratchpad? arg1)
+         (#if TARGET_3DS
+           (and (>= (the-as int arg1) *sp-block-lo*) (< (the-as int arg1) *sp-block-hi*))
+           #f))
      (set! (-> arg1 timer) 0)
      0
      )
