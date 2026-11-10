@@ -12051,7 +12051,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           bool keep_far = (st & 4) != 0 && !g_screen_black;
           if (!ok) {
             v = 2;
-            if (late) {
+            if (late && !j2_hidden) {
               late_groups++;
               for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
                 if (lev.unit_ok[gu[j]] == 3) {
@@ -12198,7 +12198,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
               }
             }
 #endif
-            if (late) {
+            // a level its string hides whole asks for no near chunks: none of its groups is late
+            if (late && !j2_hidden) {
               late_groups++;
               for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
                 if (lev.unit_ok[gu[j]] == 3) {
@@ -12386,7 +12387,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
               lev.stream_units[gu[j]].late_seen = frame32p;
             }
           }
-          if (late) {
+          if (late && !j2_hidden) {
             late_groups++;
             for (u32 j = 0; j < cnt; j++) {
               if (lev.unit_ok[gu[j]] == 3) {
