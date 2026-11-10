@@ -208,6 +208,11 @@ class CtrRenderer {
     double last_ms = 0;
     double above_ms = 0;  // since the last log: x above the config (the far ring's extra detail)
     bool title = false;  // the title screen at the last frame (its relief ends with it)
+    // Jak II's relief while x is under 0 (the log's lines): since when, how deep, levers named
+    bool relief_on = false;
+    double relief_t0 = 0;
+    float relief_deep = 0;
+    int relief_logged = 0;
   } m_auto;
   bool m_menu_page_done = false;  // CtrVram::prewarm_page of the start menu's page
   bool m_title_loaded = false;  // (AI-assisted, levellod) note_levels: "title" is loaded

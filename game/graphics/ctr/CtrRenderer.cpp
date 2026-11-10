@@ -1214,7 +1214,7 @@ void CtrRenderer::auto_detail_frame(float /*gpu_busy_ms*/, float gpu_active_ms,
         cs.shrub_scale_max > cs.shrub_scale ||
         (cs.tie_distance_scale > 0 && cs.tie_distance_scale_max > cs.tie_distance_scale);
     m_auto.relief.init(cs.tie_lod_px, cs.lod_distance, cs.tie_distance_scale, cs.draw_distance,
-                       g_game_version == GameVersion::Jak1);
+                       g_game_version == GameVersion::Jak1, g_game_version == GameVersion::Jak2);
     m_auto.ctl.range(-(float)m_auto.relief.n, t_range ? 1.f : 0.f);
     if (g_game_version == GameVersion::Jak1) {
       m_auto.ctl.unit_costs(m_auto.relief, ctr_detail::kJak1LeverMs);
@@ -1273,6 +1273,38 @@ void CtrRenderer::auto_detail_frame(float /*gpu_busy_ms*/, float gpu_active_ms,
 
   if (moved) {
     ctr_level_set_detail(m_auto.ctl.x, snap);
+  }
+  if (m_jak2 && m_auto.relief.n > 0) {
+    // Jak II's relief (the far levers, under the config's detail): its begin, each lever as it
+    // starts to move, its end
+    const float r = m_auto.ctl.r();
+    const int n = m_auto.relief.n;
+    if (r > 0 && !m_auto.relief_on) {
+      m_auto.relief_on = true;
+      m_auto.relief_t0 = now;
+      m_auto.relief_deep = 0;
+      m_auto.relief_logged = 0;
+      lg::info("[ctr] detail relief on: load {:.1f} ms a frame against {:.0f} + {:.0f} with the "
+               "config's detail",
+               m_auto.ctl.mean, target, ctr_detail::Controller::kBand * k);
+    }
+    if (m_auto.relief_on) {
+      m_auto.relief_deep = std::max(m_auto.relief_deep, r);
+      if (r > (float)m_auto.relief_logged && m_auto.relief_logged < n) {
+        m_auto.relief_logged++;
+        const auto kn = m_auto.relief.at((float)m_auto.relief_logged);
+        lg::info("[ctr] detail relief level {} of {} begun (at its end: shrub fade bands x{:.2f} "
+                 "beyond {:.0f} m, ties by their vista copies from {})",
+                 m_auto.relief_logged, n, kn.shrub_far, ctr_detail::kNearRingMeters,
+                 kn.tie_far > 0 ? fmt::format("{:.0f} m", kn.tie_far)
+                                : std::string("the draw distance"));
+      }
+      if (r <= 0) {
+        m_auto.relief_on = false;
+        lg::info("[ctr] detail relief off after {:.0f} s (deepest level {:.2f} of {})",
+                 (now - m_auto.relief_t0) / 1000.0, m_auto.relief_deep, n);
+      }
+    }
   }
 #ifndef __3DS__
   // host: env CTR_DETAIL_LOG, the controller every 30 frames

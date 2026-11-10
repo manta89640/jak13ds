@@ -10115,7 +10115,7 @@ struct ReliefAt {
   ctr_detail::Knobs kn{};
   explicit ReliefAt(const CtrSettings& s) {
     rl.init(s.tie_lod_px, s.lod_distance, s.tie_distance_scale, s.draw_distance,
-            g_game_version == GameVersion::Jak1);
+            g_game_version == GameVersion::Jak1, g_game_version == GameVersion::Jak2);
   }
   const ctr_detail::Knobs& at(float tt) {
     if (tt != t) {
