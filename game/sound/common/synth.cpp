@@ -40,13 +40,57 @@ s16Output Synth::Tick() {
   return out;
 }
 
-#ifdef __3DS__
-void Synth::BeginBlock() {
+void Synth::BeginBlock(int audible) {
   mVoices.remove_if([](std::shared_ptr<Voice>& v) { return v->Dead(); });
+  int running = 0;
+  for (auto& v : mVoices) {
+    running += !v->Stopped();
+  }
+  mRunning = running;
+  if (running > audible) {
+    MuteQuietest(audible);
+  } else if (mMuted != 0) {
+    for (auto& v : mVoices) {
+      v->SetMuted(false);
+    }
+    mMuted = 0;
+  }
   for (auto& v : mVoices) {
     v->SetBusy(true);
   }
   mBusy = true;
+}
+
+// The loudest `audible` running voices stay heard (the permanent ones always do). A muted voice
+// counts a quarter quieter, so two voices of about the same loudness don't swap every block.
+void Synth::MuteQuietest(int audible) {
+  mRank.clear();
+  int permanent = 0;
+  for (auto& v : mVoices) {
+    if (v->Stopped()) {
+      continue;
+    }
+    if (v->Permanent()) {
+      permanent++;
+      continue;
+    }
+    u32 loudness = v->Loudness();
+    if (v->Muted()) {
+      loudness -= loudness >> 2;
+    }
+    mRank.push_back({loudness, v.get()});
+  }
+  const size_t keep = (size_t)std::max(audible - permanent, 0);
+  if (keep < mRank.size()) {
+    std::nth_element(mRank.begin(), mRank.begin() + keep, mRank.end(),
+                     [](const Rank& a, const Rank& b) { return a.loudness > b.loudness; });
+  }
+  mMuted = 0;
+  for (size_t i = 0; i < mRank.size(); i++) {
+    const bool mute = i >= keep;
+    mRank[i].voice->SetMuted(mute);
+    mMuted += mute;
+  }
 }
 
 void Synth::EndBlock() {
@@ -111,49 +155,40 @@ void Synth::Mix(s16Output* out, int samples, u32 ratio) {
     mVolume.Run();
   }
 }
-#endif
 
 void Synth::AddVoice(std::shared_ptr<Voice> voice) {
-#ifdef __3DS__
   if (mBusy) {
     mPendingVoices.push_back(std::move(voice));
     return;
   }
-#endif
   mVoices.emplace_front(voice);
 }
 
 void Synth::SetReverbMode(u32 mode) {
-#ifdef __3DS__
   if (mBusy) {
     mPendingReverbMode = mode;
     mReverbModePending = true;
     return;
   }
-#endif
   mReverb.SetMode(mode);
 }
 
 void Synth::SetReverbDepth(s16 left, s16 right) {
-#ifdef __3DS__
   if (mBusy) {
     mPendingDepthL = left;
     mPendingDepthR = right;
     mReverbDepthPending = true;
     return;
   }
-#endif
   mReverb.SetDepth(left, right);
 }
 
 void Synth::SetMasterVol(u32 volume) {
-#ifdef __3DS__
   if (mBusy) {
     mPendingMasterVol = volume;
     mMasterVolPending = true;
     return;
   }
-#endif
   mVolume.left.Set(volume);
   mVolume.right.Set(volume);
 }

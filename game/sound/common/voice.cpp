@@ -198,11 +198,18 @@ void Voice::DecodeSamples() {
 // to an address 7 past a block start: then the header word is decoded as data first, as before.
 void Voice::DecodeBlock() {
   const u32 count = 8 - (mNAX & 7);
-  s32 hist1 = mDecodeHist1, hist2 = mDecodeHist2;
-  DecodeWords(mDecodeBuf.Reserve(4 * count), mSample + mNAX, count, mDecShift, mDecCoef1, mDecCoef2,
-              hist1, hist2);
-  mDecodeHist1 = static_cast<s16>(hist1);
-  mDecodeHist2 = static_cast<s16>(hist2);
+  s16* const dst = mDecodeBuf.Reserve(4 * count);
+  if (mMuted) {
+    // not heard: silence in place of the samples, the positions move as usual
+    std::memset(dst, 0, 4 * count * sizeof(s16));
+    mDecodeHist1 = 0;
+    mDecodeHist2 = 0;
+  } else {
+    s32 hist1 = mDecodeHist1, hist2 = mDecodeHist2;
+    DecodeWords(dst, mSample + mNAX, count, mDecShift, mDecCoef1, mDecCoef2, hist1, hist2);
+    mDecodeHist1 = static_cast<s16>(hist1);
+    mDecodeHist2 = static_cast<s16>(hist2);
+  }
   mBlockEnd = mNAX + count;
 }
 
@@ -252,6 +259,7 @@ static s16 ApplyVolume(s16 sample, s32 volume) {
 }
 
 void Voice::KeyOn() {
+  mKeyedOff = false;
   if (mBusy) {
     // published now, as a key on outside the mixer's block would
     mPubNAX.store((mDeferredSsa != ~0u ? mDeferredSsa : mSSA) + 1, std::memory_order_relaxed);
@@ -276,6 +284,7 @@ void Voice::KeyOn() {
 }
 
 void Voice::KeyOff() {
+  mKeyedOff = true;
   if (mBusy) {
     return Defer(Op::KeyOff, 0);
   }
@@ -366,7 +375,10 @@ int Voice::RunBlockImpl(s16Output* out, int n, u32 ratio) {
     for (; i < n && !Stopped(); i++) {
       const u32 acc = mTickFrac + ratio;
       mTickFrac = acc & 0xFFFF;
-      out[i] += RunTicks(step, acc >> 16, ahead);
+      const s16Output s = RunTicks(step, acc >> 16, ahead);
+      if (!mMuted) {
+        out[i] += s;
+      }
     }
     return i;
   }
@@ -377,6 +389,8 @@ int Voice::RunBlockImpl(s16Output* out, int n, u32 ratio) {
     DecodeBlock();  // (AI-assisted) after a key on: the first block
   }
   const s32 vol_l = mVolume.left.GetCurrent(), vol_r = mVolume.right.GetCurrent();
+  // nothing to add to the output whatever the level
+  const bool no_out = mMuted || (vol_l == 0 && vol_r == 0);
   // (AI-assisted) 1 / ratio as a 0.32 fixed point number, for the span lengths below: a 32-bit
   // division per span was a libgcc call (the 3DS's ARM11 has no divide instruction), and in
   // Jak II's city about a quarter of the voice samples are in spans shorter than 16 samples.
@@ -474,7 +488,7 @@ int Voice::RunBlockImpl(s16Output* out, int n, u32 ratio) {
         const s16 lv = mADSR.Level();
         const u32 acc = mTickFrac + ratio;
         mTickFrac = acc & 0xFFFF;
-        if (!run_sample(out[i], lv, lv == 0 || (vol_l == 0 && vol_r == 0))) {
+        if (!run_sample(out[i], lv, lv == 0 || no_out)) {
           i++;
           stopped = true;
           break;
@@ -494,7 +508,7 @@ int Voice::RunBlockImpl(s16Output* out, int n, u32 ratio) {
       continue;
     }
     const s16 level = mADSR.Level();
-    const bool silent = level == 0 || (vol_l == 0 && vol_r == 0);
+    const bool silent = level == 0 || no_out;
     const u32 left = (u32)(n - i);
     u32 run;
     if ((u64)mTickFrac + (u64)left * ratio < (((u64)quiet + 1) << 16)) {

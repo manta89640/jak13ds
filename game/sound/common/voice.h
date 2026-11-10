@@ -1,7 +1,9 @@
 // Copyright: 2021 - 2024, Ziemas
 // SPDX-License-Identifier: ISC
 #pragma once
+#include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <vector>
 
 #include "bitfield.h"
@@ -140,8 +142,27 @@ class Voice {
   void SetReverbSend(bool on) { mReverbSend = on; }
   bool ReverbSend() const { return mReverbSend; }
 
+  // Muted (Synth::BeginBlock, between blocks): RunBlock() moves the voice on as if it played
+  // (address, envelope, loops, its end) but decodes and mixes nothing. Heard again, it starts
+  // from silence in its current block.
+  void SetMuted(bool muted) { mMuted = muted; }
+  bool Muted() const { return mMuted; }
+  bool Permanent() const { return mAlloc == AllocationType::Permanent; }
+  // KeyOff() came after the last KeyOn() (set when called, also while busy)
+  bool KeyedOff() const { return mKeyedOff; }
+  // how loud the voice plays now: its envelope level (an attack counts as its peak) times the
+  // louder side's volume
+  u32 Loudness() const {
+    const u32 level = mADSR.GetPhase() == ADSR::Phase::Attack ? 0x7FFFu : (u32)mADSR.Level();
+    const u32 left = (u32)std::abs((s32)mVolume.left.GetCurrent());
+    const u32 right = (u32)std::abs((s32)mVolume.right.GetCurrent());
+    return level * std::max(left, right);
+  }
+
  private:
   bool mReverbSend{false};
+  bool mMuted{false};
+  bool mKeyedOff{false};
   enum class Op : u8 { Pitch, Adsr1, Adsr2, VolumeL, VolumeR, Sample, Ssa, Lsa, KeyOn, KeyOff, Stop };
   struct Deferred {
     Op op;
