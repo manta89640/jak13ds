@@ -1255,6 +1255,7 @@ const CtrTexture* CtrVram::get_texture_impl(u64 tex0, bool lazy_all) {
                         t.psm() == GsTex0::PSM::PSMT4HL;
   // textures moved by texture-relocate use the CLUT they had when they were moved
   const Relocation* reloc = find_relocation(t.tbp0(), (u32)t.psm());
+  const double decode_t0 = reloc ? ctr_gpu_time_ms() : 0.0;
   const bool decoded =
       reloc ? decode_impl(this, view(), data_key, &data, &w, &h, &tex_range,
                           [reloc](u32, u32, u32 e) { return reloc->clut[e % reloc->clut.size()]; })
@@ -1361,6 +1362,10 @@ const CtrTexture* CtrVram::get_texture_impl(u64 tex0, bool lazy_all) {
   // (AI-assisted) a texture relocated with a new CLUT: relocate() gives its chunks new ids
   e.sig = entry_sig(e);
   m_stats.decoded++;
+  if (reloc) {
+    lg::info("[ctr] font page tbp {} psm {}: {} x {} made in {:.0f} ms", t.tbp0(), (int)t.psm(),
+             gw, gh, ctr_gpu_time_ms() - decode_t0);
+  }
   if (cached) {
     keep_stale(key, *cached);  // the outdated version: the same data often comes back
     *cached = e;
