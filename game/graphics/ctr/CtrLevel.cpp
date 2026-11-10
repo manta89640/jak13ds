@@ -13176,6 +13176,23 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   run_in.shown_out = m_run_shown.data();
   run_in.nomerge_out = m_run_nomerge.data();
   // (AI-assisted) vista tier: a chunk not drawn because of its distance, within vista_distance
+  // the string shows none of chunk ci's runs, by the rule emit_chunk tests its tier's runs with: its
+  // vista copy isn't drawn either (the PS2 hides a neighbour's low resolution tfrag by the bits)
+  auto bits_hide = [&](size_t ci) {
+    const auto& ch = lev.chunks[ci];
+    if (!m_vis || !ch.vis_run_count ||
+        !(ch.lod_tier == 0 || (vis_own && ch.lod_tier < 3) || (vis_nb && ch.lod_tier <= 3))) {
+      return false;
+    }
+    const u32 r0 = lev.chunk_first_run[ci];
+    for (u32 r = r0; r < r0 + ch.vis_run_count; r++) {
+      const u16 id = lev.vis_runs[r].vis;
+      if (id == 0xffff || (m_vis[id >> 3] & (0x80 >> (id & 7)))) {
+        return false;
+      }
+    }
+    return true;
+  };
   auto vista_source = [&](size_t ci) {
     if (!lev.has_vista) {
       return;
@@ -13184,7 +13201,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
                 dz = ch.bsphere[2] - cam.trans[2];
     const float lim = vista_dist + ch.bsphere[3];
-    m_vista_src[ci] = vista_dist <= 0 || dx * dx + dy * dy + dz * dz < lim * lim;
+    m_vista_src[ci] = (vista_dist <= 0 || dx * dx + dy * dy + dz * dz < lim * lim) && !bits_hide(ci);
   };
   // (AI-assisted, title-popin) the cell spheres of tiers 1 / 2 (lod_cell_sphere), once per load
   if (lev.lod_cell_sphere.size() != lev.chunks.size() * 4) {
@@ -13352,6 +13369,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         const float out_r = (vista_dist + cl.a) * 1.0002f + 256.f;
         if (vista_dist <= 0 || (in_r > 0 && cl_d2 < in_r * in_r)) {
           memset(&m_vista_src[cl.first], 1, cl.count);
+          for (u32 ci = cl.first; m_vis && ci < cl.first + cl.count; ci++) {
+            m_vista_src[ci] = !bits_hide(ci);
+          }
         } else if (!(cl_d2 > out_r * out_r)) {
           for (u32 ci = cl.first; ci < cl.first + cl.count; ci++) {
             vista_source(ci);
@@ -13595,7 +13615,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     if (lev.has_vista && ch.lod_tier == 3) {
       // (AI-assisted) drawn through its copies in the vista tier (merged into large cells)
-      m_vista_src[ci] = 1;
+      m_vista_src[ci] = !bits_hide(ci);
       continue;
     }
     emit_chunk(ci, vista_chunk);
