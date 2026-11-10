@@ -1884,6 +1884,10 @@ int ctr_gpu_clip_reserve(int max_verts, int max_indices, ctr_clip_vertex** verts
   return 1;
 }
 
+unsigned int ctr_gpu_vertex_room(void) {
+  return ~0u;  // (no frame vertex buffer here)
+}
+
 namespace {
 // (AI-assisted, j2gpu) ctr_gpu_clip_draw_ranges_mtx: the matrix the GPU's clip program applies to
 // the first g_clip_n_mtx ranges (row major, clip = M (x y z 1))

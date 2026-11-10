@@ -207,6 +207,9 @@ void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts
  * the rest of the room (n = 0: all of it). Nothing else may be drawn between the two calls. */
 int ctr_gpu_clip_reserve(int max_verts, int max_indices, ctr_clip_vertex** verts,
                          uint16_t** indices);
+/* The bytes of this frame's vertex memory still free (a reservation rounds its vertices and its
+ * indices up to 16 bytes each). */
+unsigned int ctr_gpu_vertex_room(void);
 void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, const int* count,
                               int n, int vert_count, int index_count);
 /* (AI-assisted, j2gpu) ctr_gpu_clip_draw_ranges whose first n_mtx ranges have their vertices'
