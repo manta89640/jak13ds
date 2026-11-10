@@ -1236,6 +1236,15 @@ void CtrRenderer::auto_detail_frame(float /*gpu_busy_ms*/, float gpu_active_ms,
     return;
   }
 #endif
+  // Jak II, linear memory short (CtrLevels::need_update): the position stays under its cap
+  if (const float cap = ctr_level_mem_cap(); cap < 1.f) {
+    m_auto.ctl.ceil = std::min(m_auto.ctl.ceil, cap);
+    m_auto.ctl.ceil_frame = m_auto.ctl.frame;
+    if (m_auto.ctl.x > cap) {
+      m_auto.ctl.x = cap;
+      ctr_level_set_detail(cap);
+    }
+  }
   if (!gpu_busy_frames) {
     return;  // no GPU time this frame (frame_pacing = fast): the detail stays
   }

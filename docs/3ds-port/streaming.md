@@ -453,37 +453,91 @@ colors, no load failures.
   hides nothing); textures not streamed. Hardware SD timing not measured (Azahar reads the host's
   disk; the cost model is 5.5 MB/s + 8 ms per request).
 
-## Jak II: dormant levels and the arena size (AI-assisted, j2-mem, Oct 18)
+## Jak II: residency by need
 
-**Dormant levels** (config `dormant_levels`, Jak II only; CtrLevel.cpp "Dormant levels"). Haven
-City keeps a neighbouring district loaded that the game's visibility string hides whole (ctyindb
-from the slums: 7.4 MB of linear memory, nothing drawn). After 90 level draws with the string all
-zero (the bytes of the level's ids) the level is dormant: its near chunks aren't wanted (stream_k
-0: the scheduler frees them first), and its tie chunks with a distance limit (the small and medium
-objects, the bulk of a district: ctyindb 4.4 of 7.4 MB) are freed where they are more than 100 m
-from the camera (sphere surface). They come back (a detail job of those chunks, `#dormant`) within
-75 m of the camera, of where it is 1.5 s ahead, or of Jak, and all of them as soon as the string
-shows the level again. Kept: everything within 100 m, the tfrag (small in Jak II: 13-376 KB a
-district), the ties without a distance limit (landmarks, LOD far versions), the vista tier, the
-chunks the string can't hide (shrubs have no visibility runs: they are drawn by distance alone),
-textures and merc models. Freed ties nearer than their own draw distance stay possible: the
-string hides them, and the game's per-leaf string can't be predicted from the renderer (the
-level's own BSP decides; the levels' bounds overlap, so distance to them says nothing: ctyindb
-went dormant with the camera inside its bounds). What the string shows first is therefore there
-within 75-100 m; farther freed ties come with the job (~1 s on the SD card for ctyindb's 4.3 MB).
-A freed tie still missing within its distance in view is not drawn; once its mesh comes it stays
-hidden while in view, at most 120 frames from when that began (the near chunks' rule): no pop
-on screen. Host check (`CTR_STREAM_CHECK=1`): `dormant check: N chunk frames of freed ties
-within their distance in view (not drawn), M shown in view after a hold`.
+Code: CtrLevel.cpp "Residency by need" (`CtrLevels::need_update`, `need_scan`, `need_make_room`),
+the level load's part in `load_file`. It replaces the dormant levels' freeing, the distance
+freeing at a load short of memory and the distance freeing in play: those freed and read back the
+same chunks by three rules with their own thresholds, timers and job flags, each after something
+had already failed.
 
-Measured on the host (jak2_route.pad, `CTR_STREAM_SIM=5.5`, `CTR_STREAM_CHECK=1`): ctyindb dormant
-from the slums frees 4325 KB, ctygena from main town / farms 1.5 MB, ctysluma and ctywide during
-the title's flight (read back when it comes near); 4 tie chunk frames missing in view, 2 holds run
-out in view over the whole route; 0 near versions drawn without their data.
+**Why.** Haven City's sets (two districts, ctywide, lwidea, a mission level) hold more meshes
+than the linear heap has. Of a slum district's 16-18 MB, 3.5-4.5 MB is always needed (tfrag, the
+ties without a draw distance and the tie LOD groups' far versions, the vista tier, merc models,
+textures); 6-7 MB is shrubs and 3 MB ties with a draw distance, drawn only within it; 4-6 MB is
+near chunks, already streamed into the arena. A whole-level load of 12-13 MB of meshes did not
+fit next to another district: the load made room (the loader waiting a second for the render
+thread, twice), left parts out, and at its second try gave the stream arena back, which then
+needed 5.6 MB free to come back and stayed away while two districts were loaded.
 
-Freeing only the ties beyond their worst-case draw distance (x3 auto_detail, x1.5 hold) freed
-76 KB (city ties are within their distances from the neighbouring district); a coarse-tfrag
-stand-in for the detailed cells was tried and dropped (tfrag is small in Jak II).
+**Managed chunks**: shrub and tie chunks of tier 0 with a draw distance, not near chunks
+(`dist_frees`). Each is resident (`chunk_dormant` 0, a mesh), absent (`kDistFreed`) or being read
+(`kDistReading`). Its **reach** is its draw limit at the auto_detail position the memory allows
+(below), times 1.1 (the hysteresis a shrub goes by, the fade band of a tie), plus its radius; its
+**excess** `e` is how far the nearest position is beyond that reach. The positions: the camera
+now, 1 s and 2 s ahead at its speed, Jak, and while the game is black the continue point's
+camera. A dormant level's ties that the visibility string hides have a reach of at most 45 m; a
+level every position sees in far mode (beyond `far_level_distance` x 1.1 + 30 m outside its
+bounds) has 10 km added: nothing of it is wanted, and it goes first.
+
+**One budget.** Every 4 frames `need_update` takes the free linear memory less what is kept: the
+floor (`stream_reserve_kb`), the meshes of the parts jobs in flight, and either the claim of what
+waits for memory or 2 MB for the start of the next load. Claims: a level load in flight (the
+loader publishes what it still takes, `m_load_left`: its meshes, merc models and textures; 4 MB
+before it knows), the repair of an incomplete level, the stream arena's first segment when it was
+given back, and the growth segment a near chunk needed now had no linear memory for (the arena's
+growth itself keeps its rule: while the heap keeps the floor + 256 KB). Then, in this order:
+
+1. A claim not covered: resident chunks beyond their reach are freed, the farthest first (without
+   a claim only those more than 45 m beyond). What is still missing is `m_need_deficit`: only for
+   that the arena's growth is given back while a level loads (before: all of it at every load
+   that left less than the floor + 12 MB).
+2. Absent chunks within 30 m of their reach are read, the nearest first, one job per level, 256
+   KB a job (2 MB while the screen is black or within 3 s of a camera cut). One that has no room
+   gets it for the next pass: resident chunks give way, the farthest first, when they are more
+   than 45 m beyond their reach and 30 m farther than the one they make room for; to one within
+   its draw distance, any beyond theirs.
+3. With more than 8 MB to spare, no claim and no stream job in flight, the nearest of the other
+   absent chunks are read too: with enough memory every chunk ends up resident, as a whole-level
+   load had it.
+
+A chunk within its draw distance by the last draw's decision (`chunk_state` bit 2) is never
+freed, in view or not: nothing is freed that a frame draws. A chunk the draw wants and that is not
+there is the nearest candidate (excess -1 at most).
+
+**A level's load** reads its other chunks and the managed ones within 30 m of their reach from
+the positions of the moment (none without a camera). `ready()` is as before (the load is in);
+what a continue or a cut needs beyond that is read in 2 MB jobs under the renderer's black hold.
+
+**More needed than fits.** When a chunk within its draw distance has no room after step 2 (or
+got it only by freeing within the 45 m margin) for 4 passes in a row, or a claim stays uncovered
+for 16, the auto_detail position is capped an eighth lower (`ctr_level_set_mem_cap`;
+`CtrRenderer::auto_detail_frame` holds the controller's ceiling there). The tie distances come in
+between x3.0 and x1.5 of the PS2's and the shrubs between 1.0 and 0.8 of theirs, by the
+controller's slew and fades; what is in view keeps its distance until it is out of view (the
+held auto_detail position per chunk). The cap goes up a step when 3 MB stays spare for 10 s, not
+within 30 s of its last move. Log: `[ctr] linear memory short: N KB ... auto detail X now`.
+
+**Time of day.** A chunk left out of the load keeps room for its groups (one per visibility id:
+`tod_reserve_groups`), made from its mesh's indices when it is first scanned
+(`tod_fill_groups`, in `tod_recolor`'s once-per-chunk branch): the same groups a whole-level load
+made, so a rewrite touches only the groups shown.
+
+**Loader.** A read by need that finds no linear memory stops (what it made is taken) and is asked
+for again after 30 frames; it does not call `make_room`. A level load out of memory still does:
+`need_make_room` frees the chunks beyond their reach for what it wants, the arena's growth only
+if that was not enough, the whole arena at the second try. The arena then comes back as a claim.
+
+**Dormant levels** (config `dormant_levels`): a level whose visibility string is all zero for 90
+level draws is dormant: no near chunks are wanted (stream_k 0), and its hidden ties are needed
+only within 45 m (above). When the string shows it again their reach is their own; one not back
+yet within its distance in view is not drawn, and once its mesh comes it stays hidden while in
+view, at most 120 frames from when that began.
+
+Log, every stats period: `[ctr] chunks by need: R of M KB there; N freed for room (KB; KB for a
+load out of memory), J reads of K chunks (KB needed, KB to fill), P passes short of room (at
+most KB ...); auto detail at most X`. At a load: `[ctr] <level>: N KB of meshes with the level;
+K chunks with a draw distance (KB) not needed now come by need`.
 
 **Arena size.** The near chunks needed at once on jak2_route.pad: 0.25-1.0 MB on average per stop,
 at most 1.14 MB in the city, 1.53 MB in the sewer. Jak II's first segment is 1536 KB
@@ -495,20 +549,6 @@ Host switches: `CTR_SOFT_NO_RASTER=1` (no pixels: long memory runs ~10x faster),
 period: per level linear / heap KB, the linear memory by kind, the free linear memory and heap on
 the 3DS), `CTR_MEM_FIELDS=1` (a level's biggest heap tables at load).
 
-## Jak II: distance freeing in play (citymem)
-
-Haven City's sets (two districts, ctywide, lwidea) hold more meshes than the linear heap has; most
-of it is shrubs and distance-limited ties, never drawn beyond their distance. Every Jak II level
-has `dist_free` on from its load. While the loaded levels leave less than 12 MB above the stream
-arena's floor (`kDistPlayRoom`, the room a level load wants; the arena's growth counted as free),
-`dist_update` frees, every 15 frames and not within 2 s of a camera cut, the chunks more than 90 m
-(`kDistPlayFreeMeters`) beyond their largest draw distance from the camera, its lead positions and
-Jak, the farthest first. They come back as before, 30 m beyond their distance (no back and forth
-in between). A load short of memory still leaves far chunks out and makes room as before. The
-statistics line `distance freeing: N chunks freed (KB; M times in play), J read backs of K chunks
-(KB)` replaces the per-read log lines.
-
-Failed or left-out parts now log an error with the level, the section (tfrag tier, ties,
-distance-limited ties, shrubs, vista, merc model, textures, a read back's kind), the bytes needed
-and the linear heap's free memory and largest block.
-
+Failed or left-out parts log an error with the level, the section (tfrag tier, ties,
+distance-limited ties, shrubs, vista, merc model, textures, a read's kind), the bytes needed and
+the linear heap's free memory and largest block.
