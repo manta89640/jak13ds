@@ -287,7 +287,38 @@ bool CtrVram::ct32_same(const u8* data, u32 dest_block, u32 width, u32 height) c
   const u32 pages_per_row = std::max(1u, width / 64);
   const u32 base = dest_block * kBlockBytes;
   const View v = view();
-  for (u32 y = 0; y < height; y++) {
+  u32 y = 0;
+  const u32 end = base + (height + 31) / 32 * pages_per_row * 8192;
+  if (height >= 2 && ctr_gpu_asm_tex() && m_ct32_lines && width % 64 == 0 && base % 8192 == 0 &&
+      end <= kVramBytes) {
+    // write_ct32's layout: 32 byte lines of two rows, where every chunk has all of its bytes
+    bool full = true;
+    for (u32 c = base >> 14; c <= (end - 1) >> 14; c++) {
+      full = full && !m_is_top[c];
+    }
+    for (; full && y + 1 < height; y += 2) {
+      const u32 row_addr = base + (y / 32) * pages_per_row * 8192;
+      const u32* ytab = &m_ct32_page_table[64 * (y % 32)];
+      const u8* s0 = data + 4 * y * width;
+      const u8* s1 = s0 + 4 * width;
+      for (u32 page = 0; page < pages_per_row; page++, s0 += 256, s1 += 256) {
+        const u32 a = row_addr + page * 8192;
+        const u8* row_dst = m_rd[a >> 14] + (a & (kChunkBytes - 1));
+        for (u32 x = 0; x < 64; x += 4) {
+          u64 line[4], src[4];
+          memcpy(line, row_dst + ytab[x], 32);
+          memcpy(&src[0], s0 + 4 * x, 8);
+          memcpy(&src[1], s1 + 4 * x, 8);
+          memcpy(&src[2], s0 + 4 * x + 8, 8);
+          memcpy(&src[3], s1 + 4 * x + 8, 8);
+          if ((line[0] ^ src[0]) | (line[1] ^ src[1]) | (line[2] ^ src[2]) | (line[3] ^ src[3])) {
+            return false;
+          }
+        }
+      }
+    }
+  }
+  for (; y < height; y++) {
     const u32 page_row = (y / 32) * pages_per_row;
     const u32* ytab = &m_ct32_page_table[64 * (y % 32)];
     const u8* src_row = data + 4 * y * width;
