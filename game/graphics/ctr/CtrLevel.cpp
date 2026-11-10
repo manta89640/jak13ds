@@ -5103,6 +5103,101 @@ void load_proto_vis(c3l::Reader& f,
            lev->protos.size(), found, bad ? fmt::format(" ({} bad runs)", bad) : "");
 }
 
+// the shine tables (CtrShineTable) of the levels logged in, until their unload
+std::mutex g_shine_mutex;
+std::map<std::string, std::shared_ptr<const CtrShineTable>> g_shine;
+std::atomic<u32> g_shine_gen{0};
+
+void shine_forget(const std::string& level) {
+  std::lock_guard<std::mutex> lk(g_shine_mutex);
+  g_shine.erase(level);
+}
+
+int shine_fade(const CtrShineTable::Inst& in, const float* cam) {
+  const float x = in.c[0] - cam[0], y = in.c[1] - cam[1], z = in.c[2] - cam[2];
+  const float f = (in.reach - std::sqrt(x * x + y * y + z * z)) * in.rfade;
+  return f >= 128.f ? CtrShineTable::kFull : f >= 1.f ? (int)f : 0;
+}
+
+// lev's table as it is now, and per chunk the camera distances that settle its envmapped draws
+void shine_bind(CtrLevelData& lev) {
+  std::shared_ptr<const CtrShineTable> now;
+  {
+    std::lock_guard<std::mutex> lk(g_shine_mutex);
+    lev.shine_gen = g_shine_gen.load();
+    auto it = g_shine.find(lev.name);
+    if (it != g_shine.end()) {
+      now = it->second;
+    }
+  }
+  if (now == lev.shine) {
+    return;  // another level's login
+  }
+  lev.shine = std::move(now);
+  lev.chunk_shine_full.clear();
+  lev.chunk_shine_none.clear();
+  const CtrShineTable* const t = lev.shine.get();
+  const size_t nd = lev.draws.size();
+  if (!t || t->insts.empty() || lev.draw_env.size() != nd || lev.draw_first_run.size() != nd ||
+      lev.draw_run_count.size() != nd) {
+    return;
+  }
+  constexpr float kMargin = 64.f;
+  lev.chunk_shine_full.assign(lev.chunks.size(), -1.f);
+  lev.chunk_shine_none.assign(lev.chunks.size(), FLT_MAX);
+  for (size_t ci = 0; ci < lev.chunks.size(); ci++) {
+    const auto& ch = lev.chunks[ci];
+    float full = FLT_MAX, none = 0.f;
+    bool any = false;
+    for (u32 di = ch.first_draw; di < ch.first_draw + ch.draw_count && di < nd; di++) {
+      if (lev.draw_env[di] < 0) {
+        continue;
+      }
+      any = true;
+      const u32 r0 = lev.draw_first_run[di], rn = lev.draw_run_count[di];
+      if (!rn || r0 + rn > lev.vis_runs.size()) {
+        none = FLT_MAX;  // drawn whole: with its shine
+        continue;
+      }
+      for (u32 r = r0; r < r0 + rn; r++) {
+        const u32 k = (u32)lev.vis_runs[r].vis - t->vis0;
+        if (k + 1 >= t->node_first.size() || t->node_first[k] == t->node_first[k + 1]) {
+          none = FLT_MAX;  // a run without a node: it keeps its shine
+          continue;
+        }
+        for (u32 i = t->node_first[k]; i < t->node_first[k + 1]; i++) {
+          const auto& in = t->insts[i];
+          if (!(in.rfade > 0.f)) {
+            full = -1.f;
+            none = FLT_MAX;
+            continue;
+          }
+          const float x = in.c[0] - ch.bsphere[0], y = in.c[1] - ch.bsphere[1],
+                      z = in.c[2] - ch.bsphere[2];
+          const float dc = std::sqrt(x * x + y * y + z * z) + kMargin;
+          full = std::min(full, in.reach - 128.f / in.rfade - dc);
+          none = std::max(none, in.reach - 1.f / in.rfade + dc);
+        }
+      }
+    }
+    if (any) {
+      lev.chunk_shine_full[ci] = full > 0.f && full < 1e18f ? full * full : -1.f;
+      lev.chunk_shine_none[ci] = none < 1e18f ? none * none : FLT_MAX;
+    }
+  }
+}
+
+template <typename T>
+T ee_read(const u8* mem, u32 size, u32 a, bool* ok) {
+  T v{};
+  if (a > size || sizeof(T) > size - a) {
+    *ok = false;
+  } else {
+    memcpy(&v, mem + a, sizeof(T));
+  }
+  return v;
+}
+
 // c3l v21 envmapped ties (c3l::ExtEnvTie): the table of the chunks with
 // normals, read before the chunks' meshes are made. Each chunk carries its normals in its own
 // mesh's tail (kNormalsInMesh: normals_offset_in_mesh), so they are freed and read back with it
@@ -6127,6 +6222,128 @@ void make_cull_clusters(CtrLevelData& lev) {
             lev.name, n, lev.chunk_clusters.size(), plain, ng, lev.lod_clusters.size());
 }
 }  // namespace
+
+// level.gc (TARGET_3DS), game thread, at a tie tree's login: the instances of its envmapped
+// prototypes (flag 2) under their tie nodes, with the prototype's envmap-fade-far and envmap-rfade.
+// A basic's field at type offset n is at its address + n - 4.
+void ctr_tie_shine(const char* level, const u8* mem, u32 size, u32 tree) {
+  bool ok = true;
+  auto u = [&](u32 a) { return ee_read<u32>(mem, size, a, &ok); };
+  auto h = [&](u32 a) { return ee_read<u16>(mem, size, a, &ok); };
+  auto b = [&](u32 a) { return ee_read<u8>(mem, size, a, &ok); };
+  auto f = [&](u32 a) { return ee_read<float>(mem, size, a, &ok); };
+  const int arrays = (s16)h(tree + 2);
+  const u32 protos = u(u(tree + 4));
+  const u32 proto_count = u(protos);
+  // (a tree of instances only has no nodes: its runs have no vis id)
+  if (!ok || arrays < 2 || proto_count > 4096) {
+    return;
+  }
+  struct Proto {
+    float far, rfade;
+    bool env;
+    u32 name, insts;
+    float rmin, rmax;
+  };
+  std::vector<Proto> ps(proto_count);
+  for (u32 i = 0; i < proto_count; i++) {
+    const u32 p = u(protos + 12 + 4 * i);
+    ps[i] = {f(p + 128), f(p + 124), (u(p + 4) & 2) != 0, u(p), 0, 0.f, 0.f};
+  }
+  const u32 nodes = u(tree + 28 + 4 * (arrays - 2));
+  const u32 node_count = h(nodes + 2);
+  std::vector<CtrShineTable::Inst> insts;
+  std::vector<bool> mine(65536);
+  for (u32 k = 0; k < node_count && ok; k++) {
+    const u32 n = nodes + 28 + 32 * k;
+    if (b(n + 7)) {
+      continue;  // its children are nodes
+    }
+    const u32 vis = h(n + 4), kids = b(n + 6), first = u(n + 8) - 4;
+    for (u32 j = 0; j < kids && ok; j++) {
+      const u32 in = first + 64 * j;
+      const u32 pi = h(in + 6);
+      if (pi >= proto_count || !ps[pi].env) {
+        continue;
+      }
+      const float r = f(in + 28);
+      const CtrShineTable::Inst o{{f(in + 16), f(in + 20), f(in + 24)}, ps[pi].far + r,
+                                  ps[pi].rfade, vis};
+      if (ok && std::isfinite(o.c[0]) && std::isfinite(o.c[1]) && std::isfinite(o.c[2]) &&
+          std::isfinite(o.reach) && std::isfinite(o.rfade)) {
+        insts.push_back(o);
+        mine[vis] = true;
+        Proto& p = ps[pi];
+        p.rmin = p.insts ? std::min(p.rmin, r) : r;
+        p.rmax = p.insts ? std::max(p.rmax, r) : r;
+        p.insts++;
+      }
+    }
+  }
+  if (!ok || insts.size() >= 65535) {
+    lg::warn("[ctr] {}: tie tree not read: its shine at any distance", level);
+    return;
+  }
+  u32 env_protos = 0;
+  float lo = FLT_MAX, hi = 0.f;
+  for (const auto& p : ps) {
+    if (p.env && p.insts) {
+      env_protos++;
+      lo = std::min(lo, p.far);
+      hi = std::max(hi, p.far);
+    }
+  }
+#ifndef __3DS__
+  static const bool list = getenv("CTR_SHINE_LOG") != nullptr;
+  for (const auto& p : ps) {
+    if (list && p.env) {
+      const u32 len = std::min<u32>(u(p.name), 63);
+      char name[64] = {};
+      if (ok && p.name + 4 <= size && len <= size - p.name - 4) {
+        memcpy(name, mem + p.name + 4, len);
+      }
+      lg::info("[shine] {} {} fade-far {:.2f} m rfade {:.6g} (fades over {:.2f} m) instances {} "
+               "radius {:.2f}-{:.2f} m",
+               level, name, p.far / 4096.f, p.rfade,
+               p.rfade > 0.f ? 127.f / p.rfade / 4096.f : 0.f, p.insts, p.rmin / 4096.f,
+               p.rmax / 4096.f);
+    }
+  }
+#endif
+  auto t = std::make_shared<CtrShineTable>();
+  size_t total = 0;
+  {
+    std::lock_guard<std::mutex> lk(g_shine_mutex);
+    auto& slot = g_shine[level];
+    if (slot) {
+      // the level's other trees' nodes stay
+      for (const auto& in : slot->insts) {
+        if (!mine[in.vis]) {
+          t->insts.push_back(in);
+        }
+      }
+    }
+    t->insts.insert(t->insts.end(), insts.begin(), insts.end());
+    std::stable_sort(t->insts.begin(), t->insts.end(),
+                     [](const auto& a, const auto& c) { return a.vis < c.vis; });
+    if (!t->insts.empty()) {
+      t->vis0 = (u16)t->insts.front().vis;
+      t->node_first.assign(t->insts.back().vis - t->vis0 + 2, 0);
+      for (const auto& in : t->insts) {
+        t->node_first[in.vis - t->vis0 + 1]++;
+      }
+      for (size_t k = 1; k < t->node_first.size(); k++) {
+        t->node_first[k] += t->node_first[k - 1];
+      }
+    }
+    total = t->insts.size();
+    slot = std::move(t);
+    g_shine_gen++;
+  }
+  lg::info("[ctr] {}: tie shine: {} envmapped prototypes, {} instances ({} in the level), "
+           "envmap-fade-far {:.0f}-{:.0f} m",
+           level, env_protos, insts.size(), total, env_protos ? lo / 4096.f : 0.f, hi / 4096.f);
+}
 
 // A level's texture pools: VRAM first by the level's priority, within it the earlier pieces (the
 // background's textures) first.
@@ -7799,6 +8016,7 @@ void CtrLevels::set_wanted(const std::vector<std::string>& names) {
     }
     if (!wanted) {
       lg::info("[ctr] unloading {}", it->first);
+      shine_forget(it->first);
       unload(*it->second);
       it = m_levels.erase(it);
       rebuild_merc_index();
@@ -10658,11 +10876,12 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
   }
   if (rs.log_now && m_env_frames) {
     // (AI-assisted, j2water2) c3l v21
-    lg::info("[ctr] {}: envmapped ties: {:.1f} draws, {:.0f} tris per level draw with them ({} "
-             "level draws), env color {:.0f} {:.0f} {:.0f}",
+    lg::info("[ctr] {}: envmapped ties: {:.1f} draws, {:.0f} tris per level draw with them, {:.0f} "
+             "tris beyond their shine drawn plain ({} level draws), env color {:.0f} {:.0f} {:.0f}",
              m_name, (double)m_env_draws / m_env_frames, (double)m_env_tris / m_env_frames,
-             m_env_frames, m_env_color[0], m_env_color[1], m_env_color[2]);
-    m_env_draws = m_env_tris = m_env_frames = 0;
+             (double)m_env_plain_tris / m_env_frames, m_env_frames, m_env_color[0],
+             m_env_color[1], m_env_color[2]);
+    m_env_draws = m_env_tris = m_env_plain_tris = m_env_frames = 0;
   }
   if (rs.log_now && m_proto_frames) {
     // (AI-assisted, j2vis) c3l v20
@@ -13125,7 +13344,48 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // (AI-assisted, j2water2) c3l v21: an envmapped tie draw (its shine in the same draw, drawn
   // after the pass: ctr_gpu_etie_draw has its own program and state)
   m_env_calls.clear();
-  auto env_submit = [&](u32 di, const VisibleChunk& vc, int env, u32 first, u32 count) {
+  // the PS2's shine distance: a run's fade is its tie node's, the largest of its instances'
+  if (lev.shine_gen != g_shine_gen.load(std::memory_order_relaxed)) {
+    shine_bind(lev);
+  }
+#ifndef __3DS__
+  // host A/B, env CTR_SHINE_AB: full = the shine at any distance (1); alt = that in odd frames;
+  // seam = no envmapped draw through the shine program in odd frames (2), all through it with
+  // no shine in even ones (3): the same picture if the cut is seamless
+  static const char* const shine_ab = getenv("CTR_SHINE_AB");
+  const bool shine_odd = rs.frame_idx & 1;
+  const int shine_test = !shine_ab                  ? 0
+                         : !strcmp(shine_ab, "full") ? 1
+                         : !strcmp(shine_ab, "alt")  ? (shine_odd ? 1 : 0)
+                         : !strcmp(shine_ab, "seam") ? (shine_odd ? 2 : 3)
+                                                     : 0;
+#else
+  constexpr int shine_test = 0;
+#endif
+  const CtrShineTable* const shine =
+      shine_test == 1 || shine_test == 3 || lev.chunk_shine_full.empty() ? nullptr
+                                                                         : lev.shine.get();
+  if (shine) {
+    m_shine_fade.assign(shine->node_first.size(), 0xff);
+  }
+  auto shine_of = [&](u32 vis) -> int {
+    const u32 k = vis - shine->vis0;
+    if (k + 1 >= shine->node_first.size()) {
+      return CtrShineTable::kFull;
+    }
+    u8& f = m_shine_fade[k];
+    if (f == 0xff) {
+      const u32 i0 = shine->node_first[k], i1 = shine->node_first[k + 1];
+      int best = i0 == i1 ? CtrShineTable::kFull : 0;
+      for (u32 i = i0; i < i1; i++) {
+        best = std::max(best, shine_fade(shine->insts[i], cam.trans.data()));
+      }
+      f = (u8)best;
+    }
+    return f;
+  };
+  auto env_submit = [&](u32 di, const VisibleChunk& vc, int env, u32 first, u32 count,
+                        int fade) {
     const auto& e = lev.env_draws[env];
     const auto& ch = lev.chunks[vc.chunk];
     EnvCall c;
@@ -13152,11 +13412,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     c.d.st_scale = (c.state->tcc & CTR_TCC_ST_ATLAS) ? 1.f / 32768.f : 1.f / 1024.f;
     // the shine: proto tint (0xff = 1) * env color (0x80 = 1), as Tie3 (Jak II: env / 128),
-    // halved for the combiner's x2 (not decal)
+    // halved for the combiner's x2 (not decal), times the PS2's fade (128 = 1)
     u32 shine = 0xff000000u;
     for (int k = 0; k < 3; k++) {
       float v = e.tint[k] * m_env_color[k] / (m_jak2_slot < 0 ? 64.f : 128.f);
-      if (!settings.envmap) {
+      v *= (float)fade * (1.f / CtrShineTable::kFull);
+      if (!settings.envmap || shine_test == 3) {
         v = 0;
       }
       if (!c.state->decal) {
@@ -13324,6 +13585,24 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const VisibleChunk& vc = m_visible[slot];
     tf_all_move = vc.floor > 0.f;
     const int env = dr.env;  // (AI-assisted, j2water2)
+    // an envmapped draw: the shine fade of the range submitted (0: the plain program), and
+    // whether its runs differ (the chunk is neither within all its full shines nor beyond all)
+    int sf = CtrShineTable::kFull;
+    bool srun = false;
+    if (env >= 0 && shine && vc.chunk < lev.chunk_shine_full.size()) {
+      const float* const bs = lev.chunks[vc.chunk].bsphere;
+      const float x = bs[0] - cam.trans[0], y = bs[1] - cam.trans[1], z = bs[2] - cam.trans[2];
+      const float d2 = x * x + y * y + z * z;
+      if (d2 >= lev.chunk_shine_none[vc.chunk]) {
+        sf = 0;
+      } else {
+        srun = !(d2 <= lev.chunk_shine_full[vc.chunk]);
+      }
+    }
+    if (shine_test == 2) {
+      sf = 0;
+      srun = false;
+    }
     const bool wind = wind_on && !vista_pass && env < 0 && dr.wind;
     // the tie geomorph: a draw whose vertices move
     const u32 mlist = morph_draws && !vista_pass && !wind && env < 0 ? dr.morph_rows : UINT32_MAX;
@@ -13353,8 +13632,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         return;
       }
       if (env >= 0) {
-        env_submit(di, vc, env, first, count);
-        return;
+        if (sf) {
+          env_submit(di, vc, env, first, count, sf);
+          return;
+        }
+        m_env_plain_tris += count / 3;
       }
       if (morph) {
         m_morph_prog_tris[0] += count / 3;
@@ -13381,8 +13663,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         return;
       }
       if (env >= 0) {
-        env_submit(di, vc, env, first, count);  // (AI-assisted, j2water2)
-        return;
+        if (sf) {
+          env_submit(di, vc, env, first, count, sf);
+          return;
+        }
+        m_env_plain_tris += count / 3;
       }
       if (m_late_collect) {
         // (AI-assisted, j2water) Jak II's blended draws, drawn later (draw_jak2_late)
@@ -13442,7 +13727,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
            nullptr, 0, 0, 0, nullptr, 0});
       m_fade_runs++;
     };
-    if (!dr.run_count || (!vc.partly && !tsplit)) {
+    if (!dr.run_count || (!vc.partly && !tsplit && !srun)) {
       if (tmorph && part == kPartStill) {
         return;
       }
@@ -13523,6 +13808,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         fade_submit(idx, run.index_count, run_fade[r]);
         drawn += run.index_count;
       } else if (shown) {
+        if (srun) {
+          const int f = shine_of(run.vis);
+          if (open && f != sf) {
+            emit();
+          }
+          sf = f;
+        }
         if (!open) {
           open = true;
           start = idx;

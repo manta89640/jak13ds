@@ -57,6 +57,9 @@ extern "C" int ctr_config_bool(const char* key, int def);              // platfo
 
 using namespace ee;
 
+// game/graphics/ctr/CtrLevel.cpp
+void ctr_tie_shine(const char* level, const u8* mem, u32 size, u32 tree);
+
 #ifdef __3DS__
 bool ctr_level_ready(const char* name);  // game/graphics/ctr/CtrRenderer.cpp
 #endif
@@ -640,6 +643,11 @@ void InitMachine_PCPort() {
   // Called from the game thread at each frame to tell the PC rendering code which levels to start
   // loading. The loader internally handles locking.
   make_function_symbol_from_c("__pc-set-levels", pc_set_levels);
+  // level-update-after-load (TARGET_3DS): a tie tree at its login, for the PS2's shine distance
+  make_function_symbol_from_c("pc-3ds-tie-shine", +[](u32 name, u32 tree) -> u64 {
+    ctr_tie_shine(Ptr<String>(name).c()->data(), g_ee_main_mem, (u32)EE_MAIN_MEM_SIZE, tree);
+    return 0;
+  });
 #ifdef __3DS__
   // (AI-assisted) level-update-after-load waits for the 3DS renderer's .c3l of the level
   make_function_symbol_from_c("pc-3ds-level-ready?", pc_3ds_level_ready);
