@@ -670,6 +670,11 @@
   "'call pad-script-alert N' in a pad script (tests only): the city's guards hunt Jak at alert
    level N for five minutes (a guard fight for frame time and sound tests)."
   (set! *pad-script-alert-level* level)
+  ;; Jak takes no damage meanwhile (the game's invulnerable secret), so the fight lasts
+  (if (> level 0)
+      (logior! (-> *game-info* secrets) (game-secrets invulnerable))
+      (logclear! (-> *game-info* secrets) (game-secrets invulnerable))
+      )
   ;; the pad script calls this while the game reads the pads: send the events from a process
   (process-spawn-function process
     (lambda ()
