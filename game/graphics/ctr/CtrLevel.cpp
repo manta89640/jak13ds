@@ -336,7 +336,7 @@ std::string level_mem_text(const LevelMem& m) {
 
 // (AI-assisted, j2-mem) the stream arena's first segment (KB): config stream_kb, else Jak II's
 // own (its near chunks needed at once in Haven City: docs/3ds-port/streaming.md "Jak II")
-constexpr u32 kJak2StreamKb = 1536;
+constexpr u32 kJak2StreamKb = 2560;
 u32 ctr_stream_kb() {
   const auto& s = ctr_settings();
   return s.stream_kb_set || !ctr_is_jak2() ? (u32)s.stream_kb : kJak2StreamKb;

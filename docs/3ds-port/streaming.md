@@ -540,8 +540,8 @@ most KB ...); auto detail at most X`. At a load: `[ctr] <level>: N KB of meshes 
 K chunks with a draw distance (KB) not needed now come by need`.
 
 **Arena size.** The near chunks needed at once on jak2_route.pad: 0.25-1.0 MB on average per stop,
-at most 1.14 MB in the city, 1.53 MB in the sewer. Jak II's first segment is 1536 KB
-(`kJak2StreamKb`, `stream_kb` overrides it); the growth rule adds segments above the floor
+at most 1.14 MB in the city, 1.53 MB in the sewer; on hardware the slums need 1.6-2.1 MB on
+average, up to 3.2 MB. Jak II's first segment is 2560 KB (`kJak2StreamKb`, `stream_kb` overrides it); the growth rule adds segments above the floor
 (the farms and the sewer grew to 2.5 MB on the host). Jak 1 keeps 4096.
 
 Host switches: `CTR_SOFT_NO_RASTER=1` (no pixels: long memory runs ~10x faster),
