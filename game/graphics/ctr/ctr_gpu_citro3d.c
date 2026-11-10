@@ -7678,6 +7678,11 @@ int ctr_gpu_clip_reserve(int max_verts, int max_indices, ctr_clip_vertex** verts
   return 1;
 }
 
+unsigned int ctr_gpu_vertex_room(void) {
+  return g.ready && g.in_frame && g.vbuf_used < VBUF_BYTES ? (unsigned int)(VBUF_BYTES - g.vbuf_used)
+                                                           : 0;
+}
+
 static void gl_to_pica_mul(const float clip[16], C3D_Mtx* m);
 
 /* (AI-assisted, j2gpu) matrix (row major) != NULL: the first n_mtx ranges' vertices go through it

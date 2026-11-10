@@ -510,6 +510,8 @@ CtrRenderer::CtrRenderer()
     // the VRAM copy only where something is written (sparse); Jak 1 prewarms its boot pages
     : m_vram(std::make_unique<CtrVram>(true, g_game_version != GameVersion::Jak2)),
       m_levels(std::make_unique<CtrLevels>()) {
+  // texture page data in game memory only changes with a link (both games)
+  m_vram->set_epoch(&g_link_generation);
 #if !defined(__3DS__) || defined(OG3DS_GAME_JAK2)
   // (AI-assisted) Jak II: its own bucket table (CtrRendererJak2.cpp)
   if (g_game_version == GameVersion::Jak2) {
@@ -522,8 +524,6 @@ CtrRenderer::CtrRenderer()
   }
 #endif
   using jak1::BucketId;
-  // (Jak 1 only: its texture page data in game memory only changes with a link)
-  m_vram->set_epoch(&g_link_generation);
   m_sprite_bucket = (int)BucketId::SPRITE;
   m_buckets.resize((int)BucketId::MAX_BUCKETS);
   auto set = [&](BucketId id, std::unique_ptr<CtrBucketRenderer> r) {

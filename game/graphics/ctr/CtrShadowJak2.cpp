@@ -38,7 +38,15 @@ bool CtrShadowJak2Renderer::reserve() {
     // memory: after a busy particle bucket (SHADOW2 comes after PARTICLES) it didn't fit and the
     // bucket drew no shadow at all. Smaller ones before giving up (a frame's shadow volumes
     // usually take a few thousand vertices); the room not used goes back after the draw.
+    // (a step that can't fit isn't asked for: a refused reservation counts as a dropped draw)
+    const size_t room = ctr_gpu_vertex_room();
     for (int div = 1; div <= 8 && !m_reserved; div *= 2) {
+      const size_t need =
+          (((size_t)(kReserveVerts / div) * sizeof(ctr_clip_vertex) + 15) & ~(size_t)15) +
+          (((size_t)(kReserveIndices / div) * 2 + 15) & ~(size_t)15);
+      if (need > room && div < 8) {
+        continue;
+      }
       m_reserved = ctr_gpu_clip_reserve(kReserveVerts / div, kReserveIndices / div, &m_verts,
                                         &m_indices) != 0;
       if (m_reserved) {

@@ -13,13 +13,15 @@
  *    run_fixed_animation, CtrTexAnimJak2Defs.h) and the slime go to the animated texture slots:
  *    the level and model draws of a slot's base texture (c3l::texture_anim_slot) use the slot's
  *    GPU texture instead (ctr_gpu_anim_slot_set). Sources from texanim.c3t (next to the .c3l
- *    files), loaded when an animation first runs; an animation not sent for kIdleFrames frames
- *    gives its texture and sources back. Outputs at most 64 x 64 (fixed animations 32 x 32);
+ *    files, kept open), read when the game first sends an animation's array or group and kept;
+ *    an animation not drawn for kIdleFrames frames gives its texture back. Outputs at most
+ *    64 x 64 (fixed animations 32 x 32);
  *    a fixed animation runs only while its slot is drawn (ctr_gpu_anim_slots_drawn), at most every
  *    kFixedRate frames, only when its input changed, and one a frame; a CLUT blend only when its
  *    weight changes.
  */
 
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <string>
@@ -82,6 +84,10 @@ class CtrTexAnimJak2 {
   Noise m_noise[kCloudLayers];
   std::vector<float> m_acc, m_acc2, m_tmp;
   std::vector<u32> m_out;
+  // the alpha ramp by 8-bit sum, for these limits of the game's
+  u32 m_ramp[256];
+  float m_ramp_min = 0, m_ramp_max = 0;
+  bool m_ramp_valid = false;
   int m_frames = 0;
  public:
   /*! the clouds' render thread time: ms in all runs, runs (taken and reset by the stats line) */
@@ -107,11 +113,11 @@ class CtrTexAnimJak2 {
     int w = 0, h = 0, kind = 0;
     u32 offset = 0, size = 0;
     std::vector<u8> data;  // loaded when used (kRgba: RGBA8; kIndex: indices, then 256 colors)
-    u64 used_frame = 0;
   };
   bool m_c3t_tried = false;
   std::string m_c3t_path;
-  std::vector<Src> m_srcs;
+  FILE* m_c3t_file = nullptr;
+  std::vector<Src> m_srcs;  // (filled once: pointers to its elements stay valid)
   Src* src(const char* name, const char* dgo, bool load);
   // a slot's output: its GPU texture and texels
   struct Out {
@@ -128,8 +134,24 @@ class CtrTexAnimJak2 {
   };
   std::map<std::string, Out> m_outs;  // by slot name
   Out* out(const char* name, int w, int h);
-  void fixed_anim(const void* def, const u8* in, float time, const u8* vals, int nvals);
-  void clut_group(const void* group, const u8* data, int bytes);
+  Out* ready(Out* o, int w, int h);
+  // an animation of kArrays / a texture of kClutGroups, by its place in the table: what the names
+  // stand for, looked up once (from: the layers' sources; a CLUT blend's indices and two CLUTs)
+  struct Def {
+    int slot = -2;  // -2: not looked up yet
+    int w = 0, h = 0;
+    Out* out = nullptr;
+    const Src* from[5] = {};
+  };
+  static constexpr int kMaxArrays = 32, kMaxGroups = 8;
+  Def m_anim_def[kMaxArrays][4];
+  Def m_clut_def[kMaxGroups][8];
+  bool m_array_loaded[kMaxArrays] = {};
+  bool m_group_loaded[kMaxGroups] = {};
+  void load_array(int array);
+  void load_group(int group);
+  void fixed_anim(int array, int anim, float time, const u8* vals, int nvals);
+  void clut_group(int group, const u8* data, int bytes);
   u64 m_frame = 0;
   int m_fixed_this_frame = 0;
   double m_slot_ms = 0;

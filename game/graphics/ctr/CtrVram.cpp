@@ -287,7 +287,38 @@ bool CtrVram::ct32_same(const u8* data, u32 dest_block, u32 width, u32 height) c
   const u32 pages_per_row = std::max(1u, width / 64);
   const u32 base = dest_block * kBlockBytes;
   const View v = view();
-  for (u32 y = 0; y < height; y++) {
+  u32 y = 0;
+  const u32 end = base + (height + 31) / 32 * pages_per_row * 8192;
+  if (height >= 2 && ctr_gpu_asm_tex() && m_ct32_lines && width % 64 == 0 && base % 8192 == 0 &&
+      end <= kVramBytes) {
+    // write_ct32's layout: 32 byte lines of two rows, where every chunk has all of its bytes
+    bool full = true;
+    for (u32 c = base >> 14; c <= (end - 1) >> 14; c++) {
+      full = full && !m_is_top[c];
+    }
+    for (; full && y + 1 < height; y += 2) {
+      const u32 row_addr = base + (y / 32) * pages_per_row * 8192;
+      const u32* ytab = &m_ct32_page_table[64 * (y % 32)];
+      const u8* s0 = data + 4 * y * width;
+      const u8* s1 = s0 + 4 * width;
+      for (u32 page = 0; page < pages_per_row; page++, s0 += 256, s1 += 256) {
+        const u32 a = row_addr + page * 8192;
+        const u8* row_dst = m_rd[a >> 14] + (a & (kChunkBytes - 1));
+        for (u32 x = 0; x < 64; x += 4) {
+          u64 line[4], src[4];
+          memcpy(line, row_dst + ytab[x], 32);
+          memcpy(&src[0], s0 + 4 * x, 8);
+          memcpy(&src[1], s1 + 4 * x, 8);
+          memcpy(&src[2], s0 + 4 * x + 8, 8);
+          memcpy(&src[3], s1 + 4 * x + 8, 8);
+          if ((line[0] ^ src[0]) | (line[1] ^ src[1]) | (line[2] ^ src[2]) | (line[3] ^ src[3])) {
+            return false;
+          }
+        }
+      }
+    }
+  }
+  for (; y < height; y++) {
     const u32 page_row = (y / 32) * pages_per_row;
     const u32* ytab = &m_ct32_page_table[64 * (y % 32)];
     const u8* src_row = data + 4 * y * width;
@@ -385,6 +416,22 @@ void CtrVram::write_ct32(const u8* data, u32 dest_block, u32 width, u32 height) 
 }
 
 void CtrVram::note_tex_info(const u8* tpage, s32 count, const u8* ee_mem, u32 s7_ptr) {
+  const u8* offsets = nullptr;
+  if (m_jak2_remap) {
+    // the page's dest offsets by texture index: a table search per texture, made once per page
+    u32 page_id;
+    memcpy(&page_id, tpage + offsetof(GoalTexturePageHeader, id), 4);
+    const size_t n = (size_t)std::clamp(count, 0, 1024);
+    auto it = m_page_offsets.find(page_id);
+    if (it == m_page_offsets.end() || it->second.size() < n) {
+      std::vector<u8> v(n);
+      for (size_t i = 0; i < n; i++) {
+        v[i] = (u8)lookup_jak2_texture_dest_offset((int)page_id, (int)i);
+      }
+      it = m_page_offsets.insert_or_assign(page_id, std::move(v)).first;
+    }
+    offsets = it->second.data();
+  }
   for (s32 i = 0; i < count && i < 1024; i++) {
     u32 ptr;
     memcpy(&ptr, tpage + sizeof(GoalTexturePageHeader) + 4 * i, 4);
@@ -409,9 +456,7 @@ void CtrVram::note_tex_info(const u8* tpage, s32 count, const u8* ee_mem, u32 s7
         // (AI-assisted) Jak II: the PC port moved this texture's dest by a few blocks
         // (__pc-get-tex-remap, so no two textures share an address); its data is where the
         // page put it, offset blocks lower
-        u32 page_id;
-        memcpy(&page_id, tpage + offsetof(GoalTexturePageHeader, id), 4);
-        m_remap[dest0] = (u8)lookup_jak2_texture_dest_offset((int)page_id, (int)i);
+        m_remap[dest0] = offsets[i];
         // (AI-assisted) where the texture record is: setup-font-texture changes the font
         // textures' height before relocating them (see relocate)
         m_tex_ptr[dest0] = ptr;
@@ -551,7 +596,7 @@ void CtrVram::write_upload(const u8* src, u32 dest_block, u32 words, u64 page_ke
     const u32 end = upload_end_block(block, n);
     if (n == kChunkWords && block % kChunkBlocks == 0 && block < kBlocks) {
       const u32 c = block / kChunkBlocks;
-      const u64 id = page_chunk_id(s, page_key);
+      const u64 id = chunk_id(s, page_key);
       u64& cur = m_chunk_id[c];
       if (cur == id && (!bytes || !m_lazy_src[c])) {
         m_stats.chunks_skipped++;
@@ -580,6 +625,24 @@ void CtrVram::write_upload(const u8* src, u32 dest_block, u32 words, u64 page_ke
     }
     note_write(block, end);
   }
+}
+
+u64 CtrVram::chunk_id(const u8* chunk_src, u64 page_key) {
+  if (!m_epoch) {
+    return page_chunk_id(chunk_src, page_key);
+  }
+  const u32 epoch = *m_epoch;
+  ChunkMemo& cm = m_chunk_memo[(((uintptr_t)chunk_src >> 14) ^ ((uintptr_t)chunk_src >> 22) ^
+                                (u32)page_key) % kChunkMemos];
+  if (cm.src == chunk_src && cm.key == page_key && cm.epoch == epoch) {
+    return cm.id;
+  }
+  const u64 id = page_chunk_id(chunk_src, page_key);
+  // (kept only if nothing was linked while the data was read)
+  if (*m_epoch == epoch) {
+    cm = ChunkMemo{chunk_src, epoch, page_key, id};
+  }
+  return id;
 }
 
 void CtrVram::materialize(u32 first_block, u32 end_block) {
@@ -1241,6 +1304,16 @@ const CtrTexture* CtrVram::get_texture_impl(u64 tex0, bool lazy_all) {
     }
   }
 
+  // a texture the GPU had no memory for is not decoded again at every lookup
+  if (!m_failed.empty()) {
+    auto failed = m_failed.find(key);
+    if (failed != m_failed.end()) {
+      if (ctr_gpu_time_ms() < failed->second) {
+        return nullptr;
+      }
+      m_failed.erase(failed);
+    }
+  }
   if (lazy_all) {
     materialize_all();
   } else {
@@ -1345,9 +1418,13 @@ const CtrTexture* CtrVram::get_texture_impl(u64 tex0, bool lazy_all) {
   // (AI-assisted) the smallest 3DS format that holds it (sprites, HUD, font), checked for being a
   // radial glow (CtrSpriteRenderer draws those with the procedural texture unit)
   e.tex.handle = ctr_gpu_tex_create_compact(gw, gh, (const uint8_t*)data.data(), CTR_TEX_CHECK_RADIAL);
-  // (AI-assisted) Allocation pressure is temporary. Keep any old entry for its stale cache,
-  // but never publish a failed handle with a valid signature: the next lookup must retry.
+  // Allocation pressure is temporary: no failed handle is kept, the lookups try again, as often
+  // as keeps the decodes that end here near 1% of the render thread (1 ms per 32 texels)
   if (e.tex.handle < 0) {
+    if (m_failed.size() >= 64) {
+      m_failed.clear();
+    }
+    m_failed[key] = ctr_gpu_time_ms() + (double)(((u32)gw * (u32)gh) >> 5);
     return nullptr;
   }
   e.first_block = tex_range.lo / kBlockBytes;
@@ -1528,6 +1605,7 @@ void CtrVram::clear_cache() {
   }
   m_cache.clear();
   m_cache_gen++;
+  m_failed.clear();
   clear_stale();
 }
 
