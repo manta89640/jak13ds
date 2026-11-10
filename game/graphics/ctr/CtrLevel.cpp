@@ -10160,12 +10160,13 @@ void CtrLevels::pop_log() {
            "frames ({} without their mesh), {} of {:.1f} s or more ended, {} open, longest {:.1f} "
            "s; {} chunk frames drawn by a vista copy within the config's distance; {} tfrag chunk "
            "frames beyond the draw distance with nothing in place; {} group frames kept far with "
-           "that version not drawn; near chunks under a morph: {} in, {} out",
+           "that version not drawn; near chunks under a morph: {} in, {} out; far mode switches "
+           "waiting in view {} level frames, made in view {}",
            m_sst.frames, pops, pops * 1800.0 / frames, by, m_pop.hole_frames[ctr_pop::kHoleTfrag],
            m_pop.hole_frames[ctr_pop::kHoleTie], m_pop.hole_frames[ctr_pop::kHoleVista],
            m_pop.hole_mesh_frames, m_pop.holes, ctr_pop::kHoleFrames / 30.0, open,
            m_pop.hole_longest / 30.0, m_pop.copy_frames, m_pop.hole_draw_frames,
-           m_pop.hole_groups, m_pop.morph_in, m_pop.morph_out);
+           m_pop.hole_groups, m_pop.morph_in, m_pop.morph_out, m_pop.far_held, m_pop.far_forced);
   m_pop = ctr_pop::Stats();
 }
 
@@ -11730,6 +11731,47 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           (after_cut && d2 < unload_d * unload_d)) {
         m_levels->request_detail(lev);
       }
+    }
+    // The switch is level-wide (tiers 1/2 and tier 3 overlap: no chunk by chunk): it waits while
+    // something it changes was drawn last frame, near kept out to 1.5 x the distance (not past the
+    // unload distance) for at most 10 s, far kept in to half of it for at most 2 s
+    {
+      constexpr u64 kFarHoldNearFrames = 300, kFarHoldFarFrames = 60;
+      const u8 want = far_level ? 1 : 0;
+      if (lev.far_eff > 1 || reveal || g_screen_black) {
+        lev.far_eff = want;
+      }
+      if (lev.far_eff != want) {
+        if (!lev.far_want_frame) {
+          lev.far_want_frame = rs.frame_idx;
+        }
+        const u64 waited = rs.frame_idx - lev.far_want_frame;
+        const float rn = std::min(m * 1.5f, unload_d), rf = m * 0.5f;
+        const bool bound = want ? (d2 > rn * rn || waited >= kFarHoldNearFrames)
+                                : (d2 < rf * rf || waited >= kFarHoldFarFrames);
+        bool seen = false;
+        for (const u32 ci : lev.pop_drawn) {
+          if (ci >= lev.chunks.size()) {
+            continue;
+          }
+          const auto& ch = lev.chunks[ci];
+          const bool fc = far_chunk(lev, ch) && !lev.is_unit(ci);
+          if (want ? !fc : (fc && (ch.lod_tier != 0 || ch.kind == c3l::CHUNK_KIND_VISTA))) {
+            seen = true;
+            break;
+          }
+        }
+        if (!seen || bound) {
+          lev.far_eff = want;
+          pst.far_forced += seen;
+        } else {
+          pst.far_held++;
+        }
+      }
+      if (lev.far_eff == want) {
+        lev.far_want_frame = 0;
+      }
+      far_level = lev.far_eff != 0;
     }
     far_tfrag = far_level || (!lev.detail_loaded && lev.detail_tfrag_missing > 0);
   }
