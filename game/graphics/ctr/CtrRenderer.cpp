@@ -2089,6 +2089,11 @@ u32 ctr_frame_vblanks() {
   return g_frame_vblanks;
 }
 
+// the 3DS renderer draws the frames (not the null or the OpenGL renderer)
+bool ctr_renderer_draws() {
+  return g_ctr_ready.load(std::memory_order_relaxed);
+}
+
 void ctr_game_watchdog_tick(void) {
   kperf::watchdog_tick();
 }

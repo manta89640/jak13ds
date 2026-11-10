@@ -212,6 +212,13 @@ this is done by a linked list of "bone calculations", which is stashed in the dm
   (def-mips2c pc-new-bones-mtx-calc
               (function (inline-array pris-mtx) (inline-array joint) (inline-array bone) matrix int symbol)))
 
+;; og:preserve-this 3DS: the same for the t-mtx only (native_bones.cpp), for the calculations
+;; foreground-draw marks (bncfl02): models only merc draws, and the 3DS merc renderer reads no n-mtx.
+;; #f when another renderer draws: new-bones-mtx-calc-asm then does all of it.
+(#when TARGET_3DS
+  (def-mips2c pc-new-bones-tmtx-calc
+              (function (inline-array pris-mtx) (inline-array joint) (inline-array bone) matrix int symbol)))
+
 (defun new-bones-mtx-calc-asm ((output (inline-array pris-mtx)) (joints (inline-array joint)) (bones (inline-array bone)) (cam matrix) (count int))
   ;; (declare (print-asm))
   ;; og:preserve-this (AI-assisted) 3DS: the native did all of it: no bones left for the loop
@@ -388,7 +395,12 @@ this is done by a linked list of "bone calculations", which is stashed in the dm
                     )
                 ;; calculate!
                 (if *use-new-bones*
-                    (new-bones-mtx-calc-asm (-> s4-1 matrix-area) (-> s4-1 joints) (-> s4-1 bones) v1-29 (the int (-> s4-1 num-bones)))
+                    ;; og:preserve-this 3DS: see pc-new-bones-tmtx-calc
+                    (#if TARGET_3DS
+                      (if (not (and (logtest? (-> s4-1 flags) (bone-calc-flags bncfl02))
+                                    (pc-new-bones-tmtx-calc (-> s4-1 matrix-area) (-> s4-1 joints) (-> s4-1 bones) v1-29 (the int (-> s4-1 num-bones)))))
+                          (new-bones-mtx-calc-asm (-> s4-1 matrix-area) (-> s4-1 joints) (-> s4-1 bones) v1-29 (the int (-> s4-1 num-bones))))
+                      (new-bones-mtx-calc-asm (-> s4-1 matrix-area) (-> s4-1 joints) (-> s4-1 bones) v1-29 (the int (-> s4-1 num-bones))))
                     (bones-mtx-calc
                       (-> s4-1 matrix-area)
                       (-> s4-1 joints)

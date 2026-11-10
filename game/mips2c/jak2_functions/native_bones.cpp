@@ -31,6 +31,8 @@
 extern "C" int ctr_config_get(const char* key, char* out, int size);  // platform/3ds/port
 #endif
 
+bool ctr_renderer_draws();  // game/graphics/ctr/CtrRenderer.cpp
+
 namespace Mips2C::jak2::native {
 
 namespace {
@@ -157,6 +159,44 @@ inline void bone_mtx(u32 out_addr, u32 b_addr, u32 j_addr, const float* __restri
       x = x + p1;
       const float p2 = c2 * q[3 * k + 2];
       o[16 + 4 * k + l] = x + p2;
+    }
+  }
+}
+
+//! bone_mtx without the normal matrix (the same operations for the t-mtx)
+inline void bone_tmtx(u32 out_addr, u32 b_addr, u32 j_addr, const float* __restrict c) {
+  const bones_f32* __restrict nb = fptr(b_addr);
+  const bones_f32* __restrict tb = fptr(j_addr);
+  float m[16];
+  {
+    float n[16];
+    for (int k = 0; k < 16; k++) {
+      n[k] = nb[k];
+    }
+    for (int r = 0; r < 4; r++) {
+      const float tx = tb[4 * r + 0], ty = tb[4 * r + 1], tz = tb[4 * r + 2], tw = tb[4 * r + 3];
+      for (int l = 0; l < 4; l++) {
+        float x = n[l] * tx;
+        const float p1 = n[4 + l] * ty;
+        x = x + p1;
+        const float p2 = n[8 + l] * tz;
+        x = x + p2;
+        const float p3 = n[12 + l] * tw;
+        m[4 * r + l] = x + p3;
+      }
+    }
+  }
+  bones_f32* __restrict o = fptr_w(out_addr);
+  for (int l = 0; l < 4; l++) {
+    const float c0 = c[l], c1 = c[4 + l], c2 = c[8 + l], c3 = c[12 + l];
+    for (int r = 0; r < 4; r++) {
+      float x = c0 * m[4 * r + 0];
+      const float p1 = c1 * m[4 * r + 1];
+      x = x + p1;
+      const float p2 = c2 * m[4 * r + 2];
+      x = x + p2;
+      const float p3 = c3 * m[4 * r + 3];
+      o[4 * r + l] = x + p3;
     }
   }
 }
@@ -423,6 +463,168 @@ inline void bone_mtx_vfp(const float* n, const float* t, float* o, const float* 
       : "r12", "memory", "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8", "d9", "d10", "d11",
         "d12", "d13", "d14", "d15");
 }
+
+//! bone_mtx_vfp without the normal matrix: the t-mtx rows get the same bits
+inline void bone_tmtx_vfp(const float* n, const float* t, float* o, const float* ct, float* scratch) {
+  asm volatile(
+      "vldmia %[n], {s16-s31}\n"
+      "vldmia %[t], {s0-s7}\n"
+      "vmul.f32 s8, s16, s0\n"
+      "vmul.f32 s12, s16, s4\n"
+      "vmul.f32 s9, s17, s0\n"
+      "vmul.f32 s13, s17, s4\n"
+      "vmul.f32 s10, s18, s0\n"
+      "vmul.f32 s14, s18, s4\n"
+      "vmul.f32 s11, s19, s0\n"
+      "vmul.f32 s15, s19, s4\n"
+      "vmla.f32 s8, s20, s1\n"
+      "vmla.f32 s12, s20, s5\n"
+      "vmla.f32 s9, s21, s1\n"
+      "vmla.f32 s13, s21, s5\n"
+      "vmla.f32 s10, s22, s1\n"
+      "vmla.f32 s14, s22, s5\n"
+      "vmla.f32 s11, s23, s1\n"
+      "vmla.f32 s15, s23, s5\n"
+      "vmla.f32 s8, s24, s2\n"
+      "vmla.f32 s12, s24, s6\n"
+      "vmla.f32 s9, s25, s2\n"
+      "vmla.f32 s13, s25, s6\n"
+      "vmla.f32 s10, s26, s2\n"
+      "vmla.f32 s14, s26, s6\n"
+      "vmla.f32 s11, s27, s2\n"
+      "vmla.f32 s15, s27, s6\n"
+      "vmla.f32 s8, s28, s3\n"
+      "vmla.f32 s12, s28, s7\n"
+      "vmla.f32 s9, s29, s3\n"
+      "vmla.f32 s13, s29, s7\n"
+      "vmla.f32 s10, s30, s3\n"
+      "vmla.f32 s14, s30, s7\n"
+      "vmla.f32 s11, s31, s3\n"
+      "vmla.f32 s15, s31, s7\n"
+      "vstmia %[m], {s8-s15}\n"
+      "vldmia %[t2], {s0-s7}\n"
+      "vmul.f32 s8, s16, s0\n"
+      "vmul.f32 s12, s16, s4\n"
+      "vmul.f32 s9, s17, s0\n"
+      "vmul.f32 s13, s17, s4\n"
+      "vmul.f32 s10, s18, s0\n"
+      "vmul.f32 s14, s18, s4\n"
+      "vmul.f32 s11, s19, s0\n"
+      "vmul.f32 s15, s19, s4\n"
+      "vmla.f32 s8, s20, s1\n"
+      "vmla.f32 s12, s20, s5\n"
+      "vmla.f32 s9, s21, s1\n"
+      "vmla.f32 s13, s21, s5\n"
+      "vmla.f32 s10, s22, s1\n"
+      "vmla.f32 s14, s22, s5\n"
+      "vmla.f32 s11, s23, s1\n"
+      "vmla.f32 s15, s23, s5\n"
+      "vmla.f32 s8, s24, s2\n"
+      "vmla.f32 s12, s24, s6\n"
+      "vmla.f32 s9, s25, s2\n"
+      "vmla.f32 s13, s25, s6\n"
+      "vmla.f32 s10, s26, s2\n"
+      "vmla.f32 s14, s26, s6\n"
+      "vmla.f32 s11, s27, s2\n"
+      "vmla.f32 s15, s27, s6\n"
+      "vmla.f32 s8, s28, s3\n"
+      "vmla.f32 s12, s28, s7\n"
+      "vmla.f32 s9, s29, s3\n"
+      "vmla.f32 s13, s29, s7\n"
+      "vmla.f32 s10, s30, s3\n"
+      "vmla.f32 s14, s30, s7\n"
+      "vmla.f32 s11, s31, s3\n"
+      "vmla.f32 s15, s31, s7\n"
+      "vldmia %[m], {s16-s23}\n"
+      "add r12, %[ct], #0\n"
+      "vldmia r12, {s0-s7}\n"
+      "vmul.f32 s24, s0, s16\n"
+      "vmul.f32 s28, s4, s16\n"
+      "vmul.f32 s25, s0, s20\n"
+      "vmul.f32 s29, s4, s20\n"
+      "vmul.f32 s26, s0, s8\n"
+      "vmul.f32 s30, s4, s8\n"
+      "vmul.f32 s27, s0, s12\n"
+      "vmul.f32 s31, s4, s12\n"
+      "vmla.f32 s24, s1, s17\n"
+      "vmla.f32 s28, s5, s17\n"
+      "vmla.f32 s25, s1, s21\n"
+      "vmla.f32 s29, s5, s21\n"
+      "vmla.f32 s26, s1, s9\n"
+      "vmla.f32 s30, s5, s9\n"
+      "vmla.f32 s27, s1, s13\n"
+      "vmla.f32 s31, s5, s13\n"
+      "vmla.f32 s24, s2, s18\n"
+      "vmla.f32 s28, s6, s18\n"
+      "vmla.f32 s25, s2, s22\n"
+      "vmla.f32 s29, s6, s22\n"
+      "vmla.f32 s26, s2, s10\n"
+      "vmla.f32 s30, s6, s10\n"
+      "vmla.f32 s27, s2, s14\n"
+      "vmla.f32 s31, s6, s14\n"
+      "vmla.f32 s24, s3, s19\n"
+      "vmla.f32 s28, s7, s19\n"
+      "vmla.f32 s25, s3, s23\n"
+      "vmla.f32 s29, s7, s23\n"
+      "vmla.f32 s26, s3, s11\n"
+      "vmla.f32 s30, s7, s11\n"
+      "vmla.f32 s27, s3, s15\n"
+      "vmla.f32 s31, s7, s15\n"
+      "vstr s24, [%[o], #0]\n"
+      "vstr s28, [%[o], #4]\n"
+      "vstr s25, [%[o], #16]\n"
+      "vstr s29, [%[o], #20]\n"
+      "vstr s26, [%[o], #32]\n"
+      "vstr s30, [%[o], #36]\n"
+      "vstr s27, [%[o], #48]\n"
+      "vstr s31, [%[o], #52]\n"
+      "add r12, %[ct], #32\n"
+      "vldmia r12, {s0-s7}\n"
+      "vmul.f32 s24, s0, s16\n"
+      "vmul.f32 s28, s4, s16\n"
+      "vmul.f32 s25, s0, s20\n"
+      "vmul.f32 s29, s4, s20\n"
+      "vmul.f32 s26, s0, s8\n"
+      "vmul.f32 s30, s4, s8\n"
+      "vmul.f32 s27, s0, s12\n"
+      "vmul.f32 s31, s4, s12\n"
+      "vmla.f32 s24, s1, s17\n"
+      "vmla.f32 s28, s5, s17\n"
+      "vmla.f32 s25, s1, s21\n"
+      "vmla.f32 s29, s5, s21\n"
+      "vmla.f32 s26, s1, s9\n"
+      "vmla.f32 s30, s5, s9\n"
+      "vmla.f32 s27, s1, s13\n"
+      "vmla.f32 s31, s5, s13\n"
+      "vmla.f32 s24, s2, s18\n"
+      "vmla.f32 s28, s6, s18\n"
+      "vmla.f32 s25, s2, s22\n"
+      "vmla.f32 s29, s6, s22\n"
+      "vmla.f32 s26, s2, s10\n"
+      "vmla.f32 s30, s6, s10\n"
+      "vmla.f32 s27, s2, s14\n"
+      "vmla.f32 s31, s6, s14\n"
+      "vmla.f32 s24, s3, s19\n"
+      "vmla.f32 s28, s7, s19\n"
+      "vmla.f32 s25, s3, s23\n"
+      "vmla.f32 s29, s7, s23\n"
+      "vmla.f32 s26, s3, s11\n"
+      "vmla.f32 s30, s7, s11\n"
+      "vmla.f32 s27, s3, s15\n"
+      "vmla.f32 s31, s7, s15\n"
+      "vstr s24, [%[o], #8]\n"
+      "vstr s28, [%[o], #12]\n"
+      "vstr s25, [%[o], #24]\n"
+      "vstr s29, [%[o], #28]\n"
+      "vstr s26, [%[o], #40]\n"
+      "vstr s30, [%[o], #44]\n"
+      "vstr s27, [%[o], #56]\n"
+      "vstr s31, [%[o], #60]\n"
+      :
+      : [n] "r"(n), [t] "r"(t), [t2] "r"(t + 8), [o] "r"(o), [ct] "r"(ct), [m] "r"(scratch)
+      : "r12", "memory", "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8", "d9", "d10", "d11",
+        "d12", "d13", "d14", "d15");
+}
 #endif
 
 
@@ -431,7 +633,7 @@ constexpr u32 kJointStride = 80;  // joint (basic): bind-pose at +12
 constexpr u32 kPrisStride = 128;  // pris-mtx: t-mtx, then n-mtx's three rows
 
 //! the native loop: bone i + 1 with joint i's bind pose into output i + 1, for i < n
-void bones_native_loop(u32 output, u32 joints, u32 bones, u32 cam, s64 n) {
+void bones_native_loop(u32 output, u32 joints, u32 bones, u32 cam, s64 n, bool t_only = false) {
   // the camera matrix isn't in the output (math-camera or the identity matrix): loaded once
   float c[16];
   const bones_f32* cp = fptr(cam);
@@ -453,15 +655,25 @@ void bones_native_loop(u32 output, u32 joints, u32 bones, u32 cam, s64 n) {
   const float* j = (const float*)(mem + joints + 12);
   float* o = (float*)(mem + output + kPrisStride);
   for (s64 i = 0; i < n; i++) {
-    bone_mtx_vfp(b, j, o, ct, scratch);
+    if (t_only) {
+      bone_tmtx_vfp(b, j, o, ct, scratch);
+    } else {
+      bone_mtx_vfp(b, j, o, ct, scratch);
+    }
     b += kBoneStride / 4;
     j += kJointStride / 4;
     o += kPrisStride / 4;
   }
 #else
   for (s64 i = 0; i < n; i++) {
-    bone_mtx(output + kPrisStride * (u32)(i + 1), bones + kBoneStride * (u32)(i + 1),
-             joints + kJointStride * (u32)i + 12, c);
+    const u32 out = output + kPrisStride * (u32)(i + 1);
+    const u32 bone = bones + kBoneStride * (u32)(i + 1);
+    const u32 joint = joints + kJointStride * (u32)i + 12;
+    if (t_only) {
+      bone_tmtx(out, bone, joint, c);
+    } else {
+      bone_mtx(out, bone, joint, c);
+    }
   }
 #endif
 }
@@ -472,6 +684,11 @@ int g_verify = -1;
 bool g_nested = false;
 u64 g_verify_calls = 0, g_verify_bones = 0, g_verify_mismatches = 0;
 std::vector<u8> g_verify_buf;
+// pc-new-bones-tmtx-calc's rows, compared when the GOAL code has written the same output
+u64 g_tmtx_calls = 0, g_tmtx_mismatches = 0;
+std::vector<u8> g_tmtx_buf;
+u32 g_tmtx_out = 0;
+s64 g_tmtx_n = 0;
 
 bool bones_verify_on() {
   if (g_verify < 0) {
@@ -481,6 +698,7 @@ bool bones_verify_on() {
       atexit([] {
         lg::info("bones verify: {} calls, {} bones compared, {} mismatches", g_verify_calls,
                  g_verify_bones, g_verify_mismatches);
+        lg::info("bones t-mtx verify: {} calls, {} mismatches", g_tmtx_calls, g_tmtx_mismatches);
       });
     }
   }
@@ -517,6 +735,41 @@ void bones_verify(const NativeArgs& args, u32 output, u32 joints, u32 bones, u32
     }
   }
 }
+
+//! the t-mtx only version's rows into g_tmtx_buf; the output is left as it was
+void tmtx_verify_begin(u32 output, u32 joints, u32 bones, u32 cam, s64 n) {
+  const u32 count = n > 0 ? (u32)n : 0;
+  const u32 out = output + kPrisStride;
+  std::vector<u8> before(g_ee_main_mem + out, g_ee_main_mem + out + kPrisStride * count);
+  bones_native_loop(output, joints, bones, cam, n, true);
+  g_tmtx_buf.resize(64 * count);
+  for (u32 i = 0; i < count; i++) {
+    memcpy(g_tmtx_buf.data() + 64 * i, g_ee_main_mem + out + kPrisStride * i, 64);
+  }
+  memcpy(g_ee_main_mem + out, before.data(), before.size());
+  g_tmtx_out = output;
+  g_tmtx_n = n;
+}
+
+//! after the GOAL code wrote `output`: the rows kept by tmtx_verify_begin against its t-mtx
+void tmtx_verify_end(u32 output, s64 n) {
+  if (!g_tmtx_out || g_tmtx_out != output || g_tmtx_n != n) {
+    return;
+  }
+  g_tmtx_out = 0;
+  g_tmtx_calls++;
+  const u32 count = n > 0 ? (u32)n : 0;
+  const u32 out = output + kPrisStride;
+  for (u32 i = 0; i < count; i++) {
+    if (memcmp(g_tmtx_buf.data() + 64 * i, g_ee_main_mem + out + kPrisStride * i, 64)) {
+      g_tmtx_mismatches++;
+      if (g_tmtx_mismatches <= 10) {
+        lg::error("bones t-mtx verify MISMATCH (call {}, bone {} of {})", g_tmtx_calls, i, count);
+      }
+      break;
+    }
+  }
+}
 #endif
 
 }  // namespace
@@ -541,6 +794,7 @@ u64 pc_new_bones_mtx_calc_impl(const NativeArgs& args) {
       return args.st;  // #f: the GOAL loop runs (the reference)
     }
     bones_verify(args, output, joints, bones, cam, n);
+    tmtx_verify_end(output, n);
     return goal_true(args.st);
   }
 #endif
@@ -551,11 +805,44 @@ u64 pc_new_bones_mtx_calc_impl(const NativeArgs& args) {
 const NativeImpl pc_new_bones_mtx_calc =
     MIPS2C_NATIVE_IMPL_GOAL(pc_new_bones_mtx_calc_impl, NATIVE_V0_UNDEFINED);
 
+/*!
+ * (pc-new-bones-tmtx-calc output joints bones cam count): the same loop for the t-mtx of each
+ * pris-mtx only. For the models bones-mtx-calc-execute finds marked by foreground-draw: drawn by
+ * merc alone, and the 3DS merc renderer reads no n-mtx. #f (the GOAL code computes all of it)
+ * unless the 3DS renderer draws.
+ */
+u64 pc_new_bones_tmtx_calc_impl(const NativeArgs& args) {
+  if (!bones_native_on()) {
+    return args.st;
+  }
+  const u32 output = (u32)args.a[0];
+  const u32 joints = (u32)args.a[1];
+  const u32 bones = (u32)args.a[2];
+  const u32 cam = (u32)args.a[3];
+  const s64 n = (s64)(s32)(u32)args.a[4] - 1;
+#if MIPS2C_WRITE_LOG
+  if (bones_verify_on()) {
+    tmtx_verify_begin(output, joints, bones, cam, n);
+    return args.st;  // #f: the GOAL code runs, and pc-new-bones-mtx-calc's check compares
+  }
+#endif
+  if (!ctr_renderer_draws()) {
+    return args.st;
+  }
+  bones_native_loop(output, joints, bones, cam, n, true);
+  return goal_true(args.st);
+}
+
+const NativeImpl pc_new_bones_tmtx_calc =
+    MIPS2C_NATIVE_IMPL_GOAL(pc_new_bones_tmtx_calc_impl, NATIVE_V0_UNDEFINED);
+
 }  // namespace Mips2C::jak2::native
 
 namespace Mips2C::jak2::pc_new_bones_mtx_calc {
 void link() {
   gLinkedFunctionTable.reg("pc-new-bones-mtx-calc", native::pc_new_bones_mtx_calc.as_exec, 64,
                            &native::pc_new_bones_mtx_calc);
+  gLinkedFunctionTable.reg("pc-new-bones-tmtx-calc", native::pc_new_bones_tmtx_calc.as_exec, 64,
+                           &native::pc_new_bones_tmtx_calc);
 }
 }  // namespace Mips2C::jak2::pc_new_bones_mtx_calc

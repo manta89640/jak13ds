@@ -1601,6 +1601,16 @@
 
 
 
+                      ;; og:preserve-this 3DS: drawn by merc alone and no ripple copy: nothing reads
+                      ;; this model's normal matrices (bones-mtx-calc-execute, pc-new-bones-tmtx-calc)
+                      (#when TARGET_3DS
+                        (if (and (zero? (-> (scratchpad-object foreground-work) regs mercneric-used))
+                                 (zero? (-> (scratchpad-object foreground-work) regs emerc-used))
+                                 (not (logtest? (-> bone-calc flags) (bone-calc-flags write-ripple-data)))
+                                 )
+                            (logior! (-> bone-calc flags) (bone-calc-flags bncfl02))
+                            )
+                        )
                       (when (nonzero? (-> (scratchpad-object foreground-work) regs mercneric-used))
                         (if (logtest? (-> *display* vu1-enable-user) (vu1-renderer-mask generic))
                             (set! dma-ptr (foreground-generic-merc dc dma-ptr 0))
