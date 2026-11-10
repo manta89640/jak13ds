@@ -389,7 +389,8 @@ void Player::Tick(s16Output* stream, int samples) {
   // are mixed without the lock (Synth::BeginBlock): a sound call waits only for the handler
   // ticks, not for the mixing, which on a core the system shares can be held up for milliseconds.
   static u64 spu = 200ull * kMixRate;
-  const int audible = mBudget.Limit();
+  const int audible =
+      mBudget.Limit() >= MixBudget::kNoLimit ? Synth::kAllAudible : mBudget.Limit();
   for (int i = 0; i < samples;) {
     int n;
     {
