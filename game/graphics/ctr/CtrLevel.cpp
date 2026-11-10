@@ -10161,12 +10161,14 @@ void CtrLevels::pop_log() {
            "s; {} chunk frames drawn by a vista copy within the config's distance; {} tfrag chunk "
            "frames beyond the draw distance with nothing in place; {} group frames kept far with "
            "that version not drawn; near chunks under a morph: {} in, {} out; far mode switches "
-           "waiting in view {} level frames, made in view {}",
+           "waiting in view {} level frames, made in view {}; tie chunk frames kept off their "
+           "vista copies {}",
            m_sst.frames, pops, pops * 1800.0 / frames, by, m_pop.hole_frames[ctr_pop::kHoleTfrag],
            m_pop.hole_frames[ctr_pop::kHoleTie], m_pop.hole_frames[ctr_pop::kHoleVista],
            m_pop.hole_mesh_frames, m_pop.holes, ctr_pop::kHoleFrames / 30.0, open,
            m_pop.hole_longest / 30.0, m_pop.copy_frames, m_pop.hole_draw_frames,
-           m_pop.hole_groups, m_pop.morph_in, m_pop.morph_out, m_pop.far_held, m_pop.far_forced);
+           m_pop.hole_groups, m_pop.morph_in, m_pop.morph_out, m_pop.far_held, m_pop.far_forced,
+           m_pop.copy_held);
   m_pop = ctr_pop::Stats();
 }
 
@@ -11936,17 +11938,32 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   for (const u32 vi : lev.vista_chunks) {
     vista_ok = vista_ok && lev.meshes[vi] >= 0;
   }
+  // the copies came (the vista chunks all there): for kVistaHoldFrames a tie chunk in view that was
+  // decided without them keeps that until it leaves view (decide_dist)
+  constexpr u64 kVistaHoldFrames = 300;
+  if (vista_ok && !lev.vista_ok_last) {
+    lev.vista_ok_frame = rs.frame_idx;
+  }
+  lev.vista_ok_last = vista_ok;
+  const bool vok_hold = vista_ok && !reveal && !g_screen_black &&
+                        rs.frame_idx < lev.vista_ok_frame + kVistaHoldFrames;
+  if (lev.chunk_vok.size() != lev.chunks.size()) {
+    lev.chunk_vok.assign(lev.chunks.size(), 0xff);
+  }
   // a tie chunk's limit at position t (0: none): its own, and where its vista copy stands in the
-  // relief's tie limit and far cap, never under ring 0
-  auto tie_limit = [&](size_t ci, const c3l::Chunk& ch, float t) {
+  // relief's tie limit and far cap, never under ring 0 (vok: the copies can be drawn)
+  auto tie_limit_v = [&](size_t ci, const c3l::Chunk& ch, float t, bool vok) {
     const float own = ch.max_dist * (tie_k0 + tie_k_span * std::max(t, 0.f)) * det;
-    if (t >= 0 || !vista_ok || !lev.vista_copy[ci]) {
+    if (t >= 0 || !vok || !lev.vista_copy[ci]) {
       return own;
     }
     const auto& kn = relief.at(t);
     return ctr_detail::far_cap(
         ctr_detail::ring_limit(ch.max_dist * kn.tie_distance_scale * det, own, ring0),
         kn.tie_far * 4096.f, ring0);
+  };
+  auto tie_limit = [&](size_t ci, const c3l::Chunk& ch, float t) {
+    return tie_limit_v(ci, ch, t, vista_ok);
   };
   auto is_tfrag = [](const c3l::Chunk& ch) {
     return ch.kind == c3l::CHUNK_KIND_TFRAG && (ch.lod_tier == 1 || ch.lod_tier == 2);
@@ -12014,10 +12031,21 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     bool dist_ok = true;
     dist_cfg = true;
     if (ch.kind == c3l::CHUNK_KIND_TIE && !lev.is_unit(ci)) {
+      bool vok = vista_ok;
+      if (lev.vista_copy[ci]) {
+        u8& cv = lev.chunk_vok[ci];
+        if (vok_hold && cv == 0 &&
+            tie_limit_v(ci, ch, t_pos, true) != tie_limit_v(ci, ch, t_pos, false) &&
+            sphere_in_view(cam, ch.bsphere)) {
+          vok = false;
+          pst.copy_held++;
+        }
+        cv = vok ? 1 : 0;
+      }
       // a tie chunk: whole up to its limit; over the band beyond it its vista copy fades in over
       // it, then it fades out over the copy (no copy: it fades out; at the draw distance: the haze)
       auto lim_of = [&](float t) {
-        const float own = tie_limit(ci, ch, t);
+        const float own = tie_limit_v(ci, ch, t, vok);
         return own > 0 ? (draw_dist > 0 ? std::min(draw_dist, own) : own) : draw_dist;
       };
       const float lim = lim_of(t_pos);
@@ -12028,12 +12056,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         if (!(l > 0) || d2 <= in * in) {
           return 1.f;
         }
-        const bool band = l < draw_dist || !(draw_dist > 0) || (vista_ok && lev.vista_copy[ci]);
+        const bool band = l < draw_dist || !(draw_dist > 0) || (vok && lev.vista_copy[ci]);
         return !band || d2 >= out * out ? 0.f
                                         : ctr_detail::band_alpha(std::sqrt(d2) - ch.bsphere[3], l);
       };
       const bool was_in = state & 4;
-      const bool copy = vista_ok && lev.vista_copy[ci];
+      const bool copy = vok && lev.vista_copy[ci];
       const float a = alpha(lim);
       auto q = [](float v) { return (u8)(std::lround(std::clamp(v, 0.f, 1.f) * 16.f) * 8); };
       const u8 fade = copy ? q(2.f * a) : q(a);

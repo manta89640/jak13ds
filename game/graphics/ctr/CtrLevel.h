@@ -79,6 +79,7 @@ struct Stats {
   u32 morph_in = 0, morph_out = 0;   // near chunks that came / went in view under a morph
   u32 far_held = 0;    // level draws a far mode switch waited: something it changes in view
   u32 far_forced = 0;  // far mode switches made at a hold's bound with something it changes in view
+  u32 copy_held = 0;   // tie chunk frames in view kept off the vista copies that came
   u32 holes = 0, hole_longest = 0;   // holes of kHoleFrames or more that ended; frames
   u32 frames = 0;
 };
@@ -320,6 +321,11 @@ struct CtrLevelData {
   // changes is in view (draw_level), since far_want_frame
   u8 far_eff = 0xff;
   u64 far_want_frame = 0;
+  // the vista copies became drawable (vista_ok) at this frame; per tie chunk whether it was last
+  // decided with them (0xff: not yet): one in view keeps deciding without them for a while
+  bool vista_ok_last = false;
+  u64 vista_ok_frame = 0;
+  std::vector<u8> chunk_vok;
   // (AI-assisted, j2-mem) Jak II: a level the game's visibility string has hidden whole for a while
   // (dormant_levels; CtrLevel.cpp "Dormant levels")
   bool dormant = false;
