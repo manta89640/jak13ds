@@ -480,7 +480,7 @@ constexpr float kDomeZ = 2.f * 65536.f / 16777215.f - 1.f;
 constexpr int kHazeVerts = 72, kHazeIndices = 36 * 6;
 constexpr int kCloudVerts = 200, kCloudIndices = 162 * 6;
 
-u8 color_byte(float f) {
+u8 dome_color(float f) {
   return (u8)std::clamp(f, 0.f, 255.f);
 }
 
@@ -711,7 +711,7 @@ void CtrSkyJak2::draw_haze(const u8* data, const ctr_draw_state& st) {
   for (int i = 0; i < 36; i++) {
     ctr_sky_jak2::HazeVertex hv;
     memcpy(&hv, data + sizeof(h) + i * sizeof(hv), sizeof(hv));
-    const u8 r = color_byte(hv.col[0]), g = color_byte(hv.col[1]), b = color_byte(hv.col[2]);
+    const u8 r = dome_color(hv.col[0]), g = dome_color(hv.col[1]), b = dome_color(hv.col[2]);
     v[2 * i] = {hv.pos[0], hv.pos[1], hv.pos[2], 1.f, 0.f, 0.f, r, g, b, 128};
     v[2 * i + 1] = {hv.pos[0], 3.f, hv.pos[2], 1.f, 0.f, 0.f, r, g, b, 0};
   }
@@ -748,10 +748,10 @@ void CtrSkyJak2::draw_clouds(const u8* data, const ctr_draw_state& st) {
                             1.f,
                             (stq[layer][0] + h.tex_off[0]) * inv,
                             (stq[layer][1] + h.tex_off[1]) * inv,
-                            color_byte(col[layer][0]),
-                            color_byte(col[layer][1]),
-                            color_byte(col[layer][2]),
-                            color_byte(col[layer][3])};
+                            dome_color(col[layer][0]),
+                            dome_color(col[layer][1]),
+                            dome_color(col[layer][2]),
+                            dome_color(col[layer][3])};
     }
   }
   memcpy(idx, dome_indices().clouds, sizeof(dome_indices().clouds));
