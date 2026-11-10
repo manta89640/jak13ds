@@ -1241,6 +1241,16 @@ const CtrTexture* CtrVram::get_texture_impl(u64 tex0, bool lazy_all) {
     }
   }
 
+  // a texture the GPU had no memory for is not decoded again at every lookup
+  if (!m_failed.empty()) {
+    auto failed = m_failed.find(key);
+    if (failed != m_failed.end()) {
+      if (ctr_gpu_time_ms() < failed->second) {
+        return nullptr;
+      }
+      m_failed.erase(failed);
+    }
+  }
   if (lazy_all) {
     materialize_all();
   } else {
@@ -1345,9 +1355,13 @@ const CtrTexture* CtrVram::get_texture_impl(u64 tex0, bool lazy_all) {
   // (AI-assisted) the smallest 3DS format that holds it (sprites, HUD, font), checked for being a
   // radial glow (CtrSpriteRenderer draws those with the procedural texture unit)
   e.tex.handle = ctr_gpu_tex_create_compact(gw, gh, (const uint8_t*)data.data(), CTR_TEX_CHECK_RADIAL);
-  // (AI-assisted) Allocation pressure is temporary. Keep any old entry for its stale cache,
-  // but never publish a failed handle with a valid signature: the next lookup must retry.
+  // Allocation pressure is temporary: no failed handle is kept, the lookups try again, as often
+  // as keeps the decodes that end here near 1% of the render thread (1 ms per 32 texels)
   if (e.tex.handle < 0) {
+    if (m_failed.size() >= 64) {
+      m_failed.clear();
+    }
+    m_failed[key] = ctr_gpu_time_ms() + (double)(((u32)gw * (u32)gh) >> 5);
     return nullptr;
   }
   e.first_block = tex_range.lo / kBlockBytes;
@@ -1528,6 +1542,7 @@ void CtrVram::clear_cache() {
   }
   m_cache.clear();
   m_cache_gen++;
+  m_failed.clear();
   clear_stale();
 }
 

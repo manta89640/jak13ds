@@ -352,6 +352,8 @@ class CtrVram {
   std::unordered_map<u64, Entry> m_stale;
   void clear_stale();
   void keep_stale(u64 key, const Entry& e);
+  // textures whose GPU texture couldn't be made: the time (ctr_gpu_time_ms) of the next try
+  std::unordered_map<u64, double> m_failed;
   // (AI-assisted) entries are checked when they are looked up: once the cache has grown this far,
   // the ones whose VRAM changed move to m_stale (bounded), so they don't keep GPU memory
   size_t m_sweep_at = 256;
