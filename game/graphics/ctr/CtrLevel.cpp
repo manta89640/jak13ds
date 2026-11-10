@@ -3582,7 +3582,7 @@ constexpr u64 kTodFreshRatio = 3;
 // (village2 on hardware: ~90k vertices, 14-22 ms on the render thread, 13 times per 15 s); a group
 // a step behind for a few frames differs by at most ~4 color units. Two moves behind (the title's
 // fast day): rewritten at once.
-// (the title's fast day: kTodSpreadFast)
+// (the title's fast day and Jak II: kTodSpreadFast)
 constexpr u64 kTodSpreadFrames = 24, kTodSpreadFast = 6;
 constexpr s64 kTodSpreadMin = 4000;
 // the vertices of the groups rewritten in a level draw while the screen is black
@@ -7415,6 +7415,7 @@ void CtrLevels::tod_sweep(u64 frame) {
   if (g_game_version != GameVersion::Jak1 || m_title_on || !m_tod_sweep_ok) {
     return;
   }
+  const double t0 = ctr_gpu_time_ms();
   s64 left = kVerts;
   for (auto& [name, lp] : m_levels) {
     auto& lev = *lp;
@@ -7462,6 +7463,11 @@ void CtrLevels::tod_sweep(u64 frame) {
   }
   if (left != kVerts) {
     tod_finish();
+    const double ms = ctr_gpu_time_ms() - t0;
+    m_tod_sweep_stats.verts += (u64)(kVerts - left);
+    m_tod_sweep_stats.frames++;
+    m_tod_sweep_stats.ms += ms;
+    m_tod_sweep_stats.max_ms = std::max(m_tod_sweep_stats.max_ms, ms);
   }
 }
 
@@ -13083,10 +13089,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                      : 0;
       }
       ps.fresh_ok = drawn >= kTodFreshRatio * t.table.size();
-      const u64 spread_frames = t.fast_day ? kTodSpreadFast : kTodSpreadFrames;
+      const u64 spread_frames = t.fast_day || m_jak2_slot >= 0 ? kTodSpreadFast : kTodSpreadFrames;
       ps.spread = t.day_move_frame && rs.frame_idx - t.day_move_frame < spread_frames;
       ps.spread_left = std::max<s64>(kTodSpreadMin, (s64)(drawn / spread_frames));
-      ps.black = g_screen_black && !t.fast_day;
+      ps.black = g_screen_black && !t.fast_day && m_jak2_slot < 0;
       ps.black_left = kTodBlackVerts;
       for (const auto& vc : m_visible) {
         tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
@@ -13129,7 +13135,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_tod_light_verts += ps.light_verts;
     m_tod_deferred += ps.deferred;
     m_tod_unchanged += ps.unchanged;
-    if (ps.black_late && m_jak2_slot < 0) {
+    if (ps.black_late) {
       m_tod_black_late += ps.black_late;
       m_levels->note_late_in_view(rs.frame_idx, ps.black_late,
                                   rs.frame_idx < lev.reveal_frame + 90, ps.black_late);

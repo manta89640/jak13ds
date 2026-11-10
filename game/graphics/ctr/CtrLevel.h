@@ -755,6 +755,17 @@ class CtrLevels {
   /*! The render thread's time for the last frame: the time of day catch-up of what isn't drawn
    * (tod_sweep) runs after frames that left room. */
   void note_frame_ms(double ms) { m_tod_sweep_ok = ms < 26.0; }
+  struct TodSweepStats {
+    u64 verts = 0;
+    u32 frames = 0;
+    double ms = 0, max_ms = 0;
+  };
+  /*! tod_sweep's work since the last call (the statistics line) */
+  TodSweepStats take_tod_sweep_stats() {
+    const TodSweepStats s = m_tod_sweep_stats;
+    m_tod_sweep_stats = TodSweepStats();
+    return s;
+  }
   /*! Levels the game wants (set_levels): others are unloaded. */
   void set_wanted(const std::vector<std::string>& names);
   /*! The level's .c3l is loaded (or failed, or there is none, or no load is pending for it):
@@ -1166,6 +1177,7 @@ class CtrLevels {
 
   void tod_sweep(u64 frame);
   bool m_tod_sweep_ok = true;
+  TodSweepStats m_tod_sweep_stats;
 
   // ---- (AI-assisted, streaming) ----
   void stream_update(u64 frame);

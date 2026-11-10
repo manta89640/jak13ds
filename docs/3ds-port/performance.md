@@ -394,6 +394,51 @@ Not changed: the loop itself. `target-continue` waits for its levels to be activ
 could end after the DGO and let the frames run, but the frames would take core 2 time from the
 `.c3l` loader (the long pole on hardware) for a black screen.
 
+### Level loads while the game plays (loadsmooth)
+
+A neighbouring level loading in the background cost one frame at a time 40-65 ms (Azahar, the
+route `reports/nov09/tools/vram.pad`, `hitch_ms = 38`). What those frames were:
+
+| what | in one frame | why |
+|---|---|---|
+| `__pc-set-levels` | 11-32 ms | the game waited for the render thread in the middle of its frame, every time the level list changed (a level discarded, a level loaded) |
+| the tfrag texture page's `upload-now!` (in `link-finish`) | 14-20 ms | 10-16 ms of the same wait, 4-5 ms writing the near textures into the VRAM copy |
+| the level's bsp, linked in one call | 5-8 ms | the PS2's linker stops every 0.5 ms; the port had the checks commented out |
+| `level-update-after-load` (the login) | 20-35 ms | the PS2 stops it by a timer; the port had that commented out |
+| a level's first draw | 17-27 ms of render thread | every time of day group in view rewritten at once (below) |
+
+Now:
+- **One budget per frame** (`pc-3ds-load-begin`, `klink.h` `load_budget_*`): the time to the
+  frame's flip less 4 ms, at least 2 ms, at most 12 ms. `load-continue`'s loop, the linker's v2
+  pointer and symbol passes and the login's units all stop by it and go on in the next frame. A
+  level's tfrag texture page (its upload can't be split) and the 1 MB texture move start a
+  budget or wait for the next frame.
+- **The load steps run last before `dma-sync`** (`level-load-work`, main.gc): the frame's other
+  work is done, so the time left is known, and a step that needs the render thread idle waits
+  where the frame would wait anyway.
+- **The level list is taken at the frame's hand-over** (`ctr_send_chain`), where the render
+  thread is idle. The frames drawn see the same list as before.
+- **Check:** host, `OPENGOAL_LEVEL_DUMP=DIR` with `OPENGOAL_LOAD_BUDGET_MS=1000` twice and `0.2`
+  once: the six levels' heaps at login end are the same bytes (the two runs of one budget differ
+  only in the C function stubs' host addresses).
+- **Result** (Azahar, same route, `hitch_ms = 35`): no frame of 38 ms or more from the link, the
+  login, the texture upload or the level list at the three background loads (before: 5, 6 and
+  3). The game side of a load is done 44-73 ms later; the level is there when its `.c3l` is,
+  0.6-1.2 s after that, as before.
+- **What a load still costs in one frame:** the tfrag page's VRAM write (4-5 ms) and the texture
+  move (2 ms), each first in a frame; the GOAL side of a discard (`unload!`, 2.4 ms a level); the
+  renderer's unload at the hand-over (1-5 ms a level); the IOP's 8-11 ms on the game's core when
+  a DGO or a sound bank starts.
+
+The time of day at a level's first draw: a level that is loaded and not drawn kept the colors of
+its load, and a drawn level's groups out of view those of their last draw. `tod_sweep`
+(`CtrLevel.cpp`, before each frame, 4000 vertices, after render frames under 26 ms) brings them
+up to date, so a first draw, a camera turn or the end of a black finds them a day move behind
+at most. While the screen is black a level draw rewrites 8000 vertices of groups; the rest
+counts as late in view, so an arrival's black lasts until the colors are there. A day move's
+rewrites are spread over 24 frames instead of 6 (the title keeps 6): 7-14 ms in each of 6
+frames before, one frame of up to 13 ms and 3-7 ms in the others now.
+
 ### Linear memory with two levels (vista tier, c3l v13)
 
 `platform/3ds/tests/level_pairs.pad` loads the tightest pairs (emulator, Oct 11 batch levels; the

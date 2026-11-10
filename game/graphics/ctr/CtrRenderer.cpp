@@ -1019,6 +1019,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
         lg::info("[ctr] time of day ms/frame {:.2f}, most {:.2f} in one frame, {} frames over 2 ms",
                  m_timing.tod_ms / n, m_timing.tod_max_ms, m_timing.tod_over);
       }
+      if (const auto sw = m_levels->take_tod_sweep_stats(); sw.frames) {
+        lg::info("[ctr] time of day catch-up of what isn't drawn: {} vertices in {} frames, "
+                 "{:.2f} ms in each, most {:.2f} (before the frame, not in its build)",
+                 sw.verts, sw.frames, sw.ms / sw.frames, sw.max_ms);
+      }
       {
         // (AI-assisted, gpu-rt) gpu_breakdown, gpu_micro's statistics
         char line[2048];
@@ -2043,11 +2048,13 @@ void ctr_set_levels(const std::vector<std::string>& levels) {
   if (!g_ctr) {
     return;
   }
-  if (g_async) {
+  if (g_async && !g_is_jak2) {
     g_levels_pending = levels;
     g_levels_pending_set = true;
     return;
   }
+  kperf::Stage stage("set-levels (the renderer's level list)");
+  wait_render_idle();
   apply_levels(levels);
 }
 void ctr_set_active_levels(const std::vector<std::string>&) {}
