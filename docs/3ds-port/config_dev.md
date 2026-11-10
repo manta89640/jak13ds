@@ -107,6 +107,10 @@ button_art = off           # (off by default since Oct 12: the PS2 symbols) on: 
   the large font (256x512) and +64 KB for the small one (128x256); the progress menu's four icons
   (64x64) were 32-bit already. Drawing the symbols takes a few ms once, when the font is first
   read (`[ctr] 3DS button symbols drawn into the ... font in N ms`).
+- Jak II reads `button_art` too (off by default): the pad symbols' cells of its two western font
+  pages get the font's own capitals (cross B, square Y, triangle X, circle A; L1 L, R1 R, L2 ZL,
+  R2 ZR) in the 3DS buttons' colors; the disc, highlight and shade glyphs stay (the mission icons
+  use them). The pages stay gray, so no more texture memory.
 - The 3DS build's wording (`game/assets/jak1/game_text_3ds.gp`, used by `goal_src/jak1/game.gp`
   when goalc runs with `OPENGOAL_SMALL_MEMORY=1`): the memory card and disc messages say SD card
   and game files, in the seven original languages. The options menus have no graphic options

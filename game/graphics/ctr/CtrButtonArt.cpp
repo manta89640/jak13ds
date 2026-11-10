@@ -25,6 +25,7 @@
 namespace ctr_button_art {
 namespace {
 std::atomic<bool> g_enabled{true};
+std::atomic<bool> g_jak2{false};
 std::atomic<u32> g_gen{1};
 std::atomic<u64> g_tex[(int)Ps2Button::COUNT];  // (psm << 32) | (tbp0 + 1), 0 = none
 
@@ -268,6 +269,107 @@ bool patch_font(u32* rgba, int w, int h) {
   return true;
 }
 
+// Jak II: font-data.gc's entry c - 6, 10 cells of 0.09375 x 0.03125 per row
+void cell_of_jak2(int c, int w, int h, int* x0, int* y0, int* x1, int* y1) {
+  const int i = c - 6, col = i % 10, row = i / 10;
+  *x0 = (int)std::floor(col * 0.09375f * w);
+  *x1 = std::min(w, (int)std::floor((col + 1) * 0.09375f * w));
+  *y0 = (int)std::floor(row * 0.03125f * h);
+  *y1 = std::min(h, (int)std::floor((row + 1) * 0.03125f * h));
+}
+
+// Jak II: the font's capitals into the cell of character dst, as tall as what it held and
+// centered on it. False (nothing changed): the cell or a letter's is empty
+bool stamp_letters(u32* rgba, int w, int h, const char* letters, int dst) {
+  int dx0, dy0, dx1, dy1;
+  cell_of_jak2(dst, w, h, &dx0, &dy0, &dx1, &dy1);
+  Box box;
+  if (!alpha_box(rgba, w, dx0, dy0, dx1, dy1, 0x40, &box)) {
+    return false;
+  }
+  struct Letter {
+    int cx0, cy0, cx1, cy1;  // its cell
+    Box ink;
+    float x;  // where its ink starts in the destination
+  } ls[4];
+  int n = 0;
+  float ink_h = 0;
+  for (const char* c = letters; *c && n < 4; c++, n++) {
+    Letter& l = ls[n];
+    cell_of_jak2(*c, w, h, &l.cx0, &l.cy0, &l.cx1, &l.cy1);
+    if (!alpha_box(rgba, w, l.cx0, l.cy0, l.cx1, l.cy1, 0x40, &l.ink)) {
+      return false;
+    }
+    ink_h = std::max(ink_h, l.ink.y1 - l.ink.y0);
+  }
+  const float k = (box.y1 - box.y0) / ink_h;  // destination texels per letter texel
+  const float gap = n > 1 ? std::max(1.f, 2.f * k) : 0.f;
+  float total = gap * (n - 1);
+  for (int i = 0; i < n; i++) {
+    total += (ls[i].ink.x1 - ls[i].ink.x0) * k;
+  }
+  float x = (box.x0 + box.x1) * 0.5f - total * 0.5f;
+  for (int i = 0; i < n; i++) {
+    ls[i].x = x;
+    x += (ls[i].ink.x1 - ls[i].ink.x0) * k + gap;
+  }
+  constexpr int kSs = 4;
+  for (int y = dy0; y < dy1; y++) {
+    for (int px = dx0; px < dx1; px++) {
+      float pr = 0, pg = 0, pb = 0, pa = 0;  // premultiplied sums
+      for (int sy = 0; sy < kSs; sy++) {
+        for (int sx = 0; sx < kSs; sx++) {
+          const float fx = px + (sx + 0.5f) / kSs, fy = y + (sy + 0.5f) / kSs;
+          for (int i = 0; i < n; i++) {
+            const Letter& l = ls[i];
+            const int u = (int)std::floor(l.ink.x0 + (fx - l.x) / k);
+            const int v = (int)std::floor(l.ink.y0 + (fy - box.y0) / k);
+            if (u < l.cx0 || u >= l.cx1 || v < l.cy0 || v >= l.cy1 || u < (int)l.ink.x0 - 1 ||
+                u > (int)l.ink.x1 || v < (int)l.ink.y0 - 1 || v > (int)l.ink.y1) {
+              continue;
+            }
+            const u32 t = rgba[u + v * w];
+            const float a = (float)(t >> 24);
+            pr += (float)(t & 0xff) * a;
+            pg += (float)((t >> 8) & 0xff) * a;
+            pb += (float)((t >> 16) & 0xff) * a;
+            pa += a;
+            break;
+          }
+        }
+      }
+      u32 out = 0;
+      if (pa > 0) {
+        const float inv = 1.f / pa;
+        const u32 r = (u32)std::clamp(pr * inv + 0.5f, 0.f, 255.f);
+        const u32 g = (u32)std::clamp(pg * inv + 0.5f, 0.f, 255.f);
+        const u32 bl = (u32)std::clamp(pb * inv + 0.5f, 0.f, 255.f);
+        const u32 a = (u32)std::clamp(pa / (kSs * kSs) + 0.5f, 0.f, 128.f);
+        out = a ? r | (g << 8) | (bl << 16) | (a << 24) : 0;
+      }
+      rgba[px + y * w] = out;
+    }
+  }
+  return true;
+}
+
+// Jak II, by position (platform/3ds/port/ctr_port.c map_buttons)
+bool patch_font_jak2(u32* rgba, int w, int h) {
+  if (w < 64 || h < 64) {
+    return false;
+  }
+  const struct {
+    int cell;
+    const char* letters;
+  } map[] = {{'*', "B"},  {'#', "Y"},  {';', "X"},   {'@', "A"},
+             {0x95, "L"}, {0x94, "R"}, {0x97, "ZL"}, {0x96, "ZR"}};
+  bool any = false;
+  for (const auto& m : map) {
+    any |= stamp_letters(rgba, w, h, m.letters, m.cell);
+  }
+  return any;
+}
+
 bool patch_icon(Ps2Button button, u32* rgba, int w, int h) {
   // the PS2 icon's own disc (its opaque part) is where the button goes
   Box b;
@@ -308,6 +410,12 @@ bool enabled() {
   return g_enabled.load(std::memory_order_relaxed);
 }
 
+void set_jak2(bool jak2) {
+  if (g_jak2.exchange(jak2) != jak2) {
+    g_gen++;
+  }
+}
+
 void register_texture(int ps2_button, u32 tbp0, u32 psm) {
   if (ps2_button < 0 || ps2_button >= (int)Ps2Button::COUNT) {
     return;
@@ -325,8 +433,15 @@ u32 generation() {
 namespace {
 // the font atlases with the PS2 button glyphs: ascii.12lo / ascii.24lo, which
 // setup-font-texture! (texture.gc) moves to #xe0000 / #xe6000 (words) as PSMT4HL
+// Jak II: font.24lo / font.12lo
 bool is_font(const GsTex0& t) {
-  return t.psm() == GsTex0::PSM::PSMT4HL && (t.tbp0() == 0x3800 || t.tbp0() == 0x3980);
+  if (t.psm() != GsTex0::PSM::PSMT4HL) {
+    return false;
+  }
+  if (g_jak2.load(std::memory_order_relaxed)) {
+    return t.tbp0() == 0x90000 / 64 || t.tbp0() == 0xc2000 / 64;
+  }
+  return t.tbp0() == 0x3800 || t.tbp0() == 0x3980;
 }
 
 int icon_of(const GsTex0& t) {
@@ -352,7 +467,8 @@ bool patch(u64 tex0, u32* rgba, int w, int h) {
   GsTex0 t(tex0);
   if (is_font(t)) {
     Timer timer;
-    const bool done = patch_font(rgba, w, h);
+    const bool done = g_jak2.load(std::memory_order_relaxed) ? patch_font_jak2(rgba, w, h)
+                                                            : patch_font(rgba, w, h);
     if (done) {
       lg::info("[ctr] 3DS button symbols drawn into the {}x{} font in {:.1f} ms", w, h,
                timer.getMs());

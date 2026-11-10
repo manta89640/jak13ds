@@ -146,6 +146,9 @@
 
 ;; ERROR: function was not converted to expressions. Cannot decompile.
 
+;; og:preserve-this draw-string has left 128 in every alpha of *font-work*'s color table
+(define *font-alpha-at-rest* #f)
+
 (defun draw-string ((arg0 string) (arg1 dma-buffer) (arg2 font-context))
   ;; og:preserve-this modified a bit for debug font scaling.
   (let  ((result (the draw-string-result #f))
@@ -155,25 +158,33 @@
     (unless (logtest? (-> arg2 flags) (font-flags large pc-hack))
       (*! (-> arg2 scale) (get-debug-font-scale-factor))))
 
-  (let ((v1-1 (the int (* 128.0 (-> arg2 alpha)))))
+  ;; og:preserve-this a string of alpha 1.0 finds the table's alpha as it needs it
+  (let* ((v1-1 (the int (* 128.0 (-> arg2 alpha))))
+         (write-alpha (or (!= v1-1 128) (not *font-alpha-at-rest*)))
+         )
     (-> arg2 origin quad)
-    (dotimes (a0-2 40)
-      (dotimes (a1-1 4)
-        (set! (-> *font-work* color-table a0-2 color a1-1 a) v1-1)
+    (when write-alpha
+      (dotimes (a0-2 40)
+        (dotimes (a1-1 4)
+          (set! (-> *font-work* color-table a0-2 color a1-1 a) v1-1)
+          )
         )
+      (set! (-> *font-work* color-shadow w) v1-1)
       )
-    (set! (-> *font-work* color-shadow w) v1-1)
+    (if (< (the-as uint (dma-buffer-free arg1)) (the-as uint (* (length arg0) 32)))
+        (set! result (the-as draw-string-result (-> arg2 origin quad)))
+        (set! result (draw-string-asm arg0 arg1 arg2))
+        )
+    (when write-alpha
+      (dotimes (v1-7 40)
+        (dotimes (a0-9 4)
+          (set! (-> *font-work* color-table v1-7 color a0-9 a) #x80)
+          )
+        )
+      (set! (-> *font-work* color-shadow w) 128)
+      (set! *font-alpha-at-rest* #t)
+      )
     )
-  (if (< (the-as uint (dma-buffer-free arg1)) (the-as uint (* (length arg0) 32)))
-      (set! result (the-as draw-string-result (-> arg2 origin quad)))
-      (set! result (draw-string-asm arg0 arg1 arg2))
-      )
-  (dotimes (v1-7 40)
-    (dotimes (a0-9 4)
-      (set! (-> *font-work* color-table v1-7 color a0-9 a) #x80)
-      )
-    )
-  (set! (-> *font-work* color-shadow w) 128)
   (set! (-> arg2 scale) orig-scale)
 
   result

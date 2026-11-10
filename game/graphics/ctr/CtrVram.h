@@ -57,7 +57,8 @@ class CtrVram {
    * (AI-assisted, j2-mem2) sparse: the VRAM copy is kept per 16 KB chunk, made when something is
    * first written there (unwritten chunks read as zeros, as the whole copy did); uploads are
    * lazy, so only the areas something reads are written (Jak II ~1.4 MB, Jak 1 ~2.7 MB of the
-   * 4). Else one 4 MB block. prewarm: Jak 1's boot pages and fonts decoded ahead (queue_prewarm).
+   * 4). Else one 4 MB block. prewarm: Jak 1's boot pages and fonts decoded ahead (queue_prewarm);
+   * Jak II (set_jak2_remap) queues its large font's first page.
    */
   explicit CtrVram(bool sparse = false, bool prewarm = false);
   ~CtrVram();
@@ -197,11 +198,17 @@ class CtrVram {
   std::vector<u64> m_page_keys;  // prewarm_page's
   size_t m_page_at = 0;
   double m_prewarm_ms = 0;
-  // the decode; lazy_all: write every lazy chunk first (else only the texture's and its CLUT's)
-  const CtrTexture* get_texture_impl(u64 tex0, bool lazy_all);
+  bool m_prewarming = false;
   void write_rows(const u8* src, u32 dest_block, u32 words);
   void write_ct32(const u8* data, u32 dest_block, u32 width, u32 height);
   bool ct32_same(const u8* data, u32 dest_block, u32 width, u32 height) const;  // (AI-assisted)
+  // upload_ct32's images: a texture over one reads the image's rows only
+  struct RawImage {
+    u32 dest_block, end_block, width, height;
+  };
+  std::vector<RawImage> m_raw_images;
+  int raw_rows(u64 data_tex0) const;
+  void drop_raw_images(u32 first_block, u32 end_block);
   // write the pending uploads (all, or only those overlapping the given block ranges)
   void flush_pending();
   void flush_pending(u32 first_block, u32 end_block, bool bytes = true);
@@ -275,6 +282,8 @@ class CtrVram {
   struct View {
     const u8* const* chunks;
     const u8* is_top;
+    // a texel's place in its page by x + page width * y, for PSMCT32, 16, T8, T4 (half bytes)
+    const u16* const* page_tab;
     u32 rd32(u32 a) const {
       const u32 c = a >> 14;
       if (is_top[c]) {
@@ -301,9 +310,11 @@ class CtrVram {
       return chunks[c][a & 16383u];
     }
   };
-  View view() const { return View{m_rd, m_is_top}; }
+  View view() const { return View{m_rd, m_is_top, m_page_tab_ptr}; }
 
  private:
+  std::vector<u16> m_page_tab[4];
+  const u16* m_page_tab_ptr[4] = {};
   std::unordered_map<u32, CtrTexture> m_overrides;  // (AI-assisted) see set_override
   std::unordered_map<u32, bool> m_borrowed;  // (AI-assisted) set_override_handle's
   bool m_jak2_remap = false;

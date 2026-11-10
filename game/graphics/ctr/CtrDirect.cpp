@@ -213,6 +213,7 @@ void CtrDirect::reset_state() {
   m_strip_count = 0;
   m_strip_quad = false;
   m_skip_prims = false;
+  m_scissor = false;
   m_state_dirty = true;
   m_xyoff[0] = m_xyoff[1] = 0;
 }
@@ -481,10 +482,113 @@ void CtrDirect::handle_ad(const u8* data) {
         m_xyoff[1] = ((float)((value >> 32) & 0xffff) - (float)0x7300) / 16.f;
       }
       break;
+    case GsRegisterAddress::SCISSOR_1:
+      handle_scissor(value);
+      break;
     default:
-      // SCISSOR, FRAME, TEXA, TEXCLUT, FOGCOL, TEXFLUSH, MIPTBP, PABE, COLCLAMP, XYOFFSET...
+      // FRAME, TEXA, TEXCLUT, FOGCOL, TEXFLUSH, MIPTBP, PABE, COLCLAMP, XYOFFSET...
       break;
   }
+}
+
+void CtrDirect::handle_scissor(u64 val) {
+  if (!ctr_is_jak2()) {
+    return;
+  }
+  // inclusive frame pixels; a vertex's is (x + 1) * 256, (1 - y) * 208
+  const u32 x0 = val & 0x7ff, x1 = (val >> 16) & 0x7ff;
+  const u32 y0 = (val >> 32) & 0x7ff, y1 = (val >> 48) & 0x7ff;
+  m_scissor = x0 > 0 || y0 > 0 || x1 < 511 || y1 < 415;
+  m_sc_x0 = (float)x0 * (1.f / 256.f) - 1.f;
+  m_sc_x1 = (float)(x1 + 1) * (1.f / 256.f) - 1.f;
+  m_sc_y1 = 1.f - (float)y0 * m_y_scale;
+  m_sc_y0 = 1.f - (float)(y1 + 1) * m_y_scale;
+}
+
+bool CtrDirect::scissor_tri(const BuildVert& a, const BuildVert& b, const BuildVert& c) {
+  if (!m_scissor || m_offscreen || m_envmap) {
+    return false;
+  }
+  if (in_scissor(a) && in_scissor(b) && in_scissor(c)) {
+    return false;
+  }
+  // Sutherland-Hodgman, at most 7 vertices
+  BuildVert buf[2][8];
+  buf[0][0] = a;
+  buf[0][1] = b;
+  buf[0][2] = c;
+  int n = 3, cur = 0;
+  for (int edge = 0; edge < 4 && n; edge++) {
+    const BuildVert* src = buf[cur];
+    BuildVert* dst = buf[cur ^ 1];
+    const float lim = edge == 0 ? m_sc_x0 : edge == 1 ? m_sc_x1 : edge == 2 ? m_sc_y0 : m_sc_y1;
+    auto inside = [&](const BuildVert& v) {
+      return edge == 0 ? v.x - lim : edge == 1 ? lim - v.x : edge == 2 ? v.y - lim : lim - v.y;
+    };
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+      const BuildVert& p = src[i];
+      const BuildVert& q = src[i + 1 == n ? 0 : i + 1];
+      const float dp = inside(p), dq = inside(q);
+      if (dp >= 0.f) {
+        dst[m++] = p;
+      }
+      if ((dp >= 0.f) != (dq >= 0.f)) {
+        const float k = dp / (dp - dq);
+        BuildVert v;
+        v.x = p.x + (q.x - p.x) * k;
+        v.y = p.y + (q.y - p.y) * k;
+        if (edge < 2) {
+          v.x = lim;
+        } else {
+          v.y = lim;
+        }
+        v.z = p.z + (q.z - p.z) * k;
+        v.s = p.s + (q.s - p.s) * k;
+        v.t = p.t + (q.t - p.t) * k;
+        for (int j = 0; j < 4; j++) {
+          v.rgba[j] = (u8)((float)p.rgba[j] + ((float)q.rgba[j] - (float)p.rgba[j]) * k + 0.5f);
+        }
+        dst[m++] = v;
+      }
+    }
+    n = m;
+    cur ^= 1;
+  }
+  if (n >= 3) {
+    batch_mode(false);
+    const BuildVert* poly = buf[cur];
+    for (int i = 1; i + 1 < n; i++) {
+      push_vertex(poly[0]);
+      push_vertex(poly[i]);
+      push_vertex(poly[i + 1]);
+      m_stats.triangles++;
+    }
+  }
+  return true;
+}
+
+bool CtrDirect::scissor_quad(const BuildVert& p0,
+                             const BuildVert& p1,
+                             const BuildVert& p2,
+                             const BuildVert& p3) {
+  if (!m_scissor || m_offscreen || m_envmap) {
+    return false;
+  }
+  if (in_scissor(p0) && in_scissor(p1) && in_scissor(p2) && in_scissor(p3)) {
+    return false;
+  }
+  const BuildVert* tri[2][3] = {{&p0, &p1, &p3}, {&p3, &p1, &p2}};
+  for (const auto& t : tri) {
+    if (!scissor_tri(*t[0], *t[1], *t[2])) {
+      batch_mode(false);
+      push_vertex(*t[0]);
+      push_vertex(*t[1]);
+      push_vertex(*t[2]);
+      m_stats.triangles++;
+    }
+  }
+  return true;
 }
 
 void CtrDirect::handle_prim(u64 val) {
@@ -686,7 +790,7 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
   switch (m_prim.kind()) {
     case GsPrim::Kind::TRI:
       if (m_build_idx == 3) {
-        if (advance) {
+        if (advance && !scissor_tri(m_build[0], m_build[1], m_build[2])) {
           batch_mode(false);
           push_vertex(0);
           push_vertex(1);
@@ -710,6 +814,9 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
         }
         m_strip_quad = false;
         if (m_quad_adv[2] && m_quad_adv[3]) {
+          if (scissor_quad(m_quad[0], m_quad[1], m_quad[3], m_quad[2])) {
+            break;
+          }
           batch_mode(true);
           push_vertex(m_quad[0]);
           push_vertex(m_quad[1]);
@@ -718,7 +825,7 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
           m_stats.triangles += 2;
         } else {
           for (int k = 2; k < 4; k++) {
-            if (m_quad_adv[k]) {
+            if (m_quad_adv[k] && !scissor_tri(m_quad[k - 2], m_quad[k - 1], m_quad[k])) {
               batch_mode(false);
               push_vertex(m_quad[k - 2]);
               push_vertex(m_quad[k - 1]);
@@ -729,7 +836,7 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
         }
         break;
       }
-      if (m_strip_count >= 3 && advance) {
+      if (m_strip_count >= 3 && advance && !scissor_tri(m_build[0], m_build[1], m_build[2])) {
         batch_mode(false);
         for (int i = 0; i < 3; i++) {
           push_vertex(i);
@@ -739,7 +846,7 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
       break;
     case GsPrim::Kind::TRI_FAN:
       if (m_build_idx == 3) {
-        if (advance) {
+        if (advance && !scissor_tri(m_build[0], m_build[1], m_build[2])) {
           batch_mode(false);
           push_vertex(0);
           push_vertex(1);
@@ -811,6 +918,10 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
           break;
         }
         // a quad: c1, c4, c2, c3 around (triangles c1 c4 c3, c3 c4 c2)
+        if (scissor_quad(c1, c4, c2, c3)) {
+          m_build_idx = 0;
+          break;
+        }
         batch_mode(true);
         m_build[0] = c1;
         m_build[1] = c4;

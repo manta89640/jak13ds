@@ -47,6 +47,8 @@ constexpr u32 kChunks = kBlocks / kChunkBlocks;
 [[maybe_unused]] constexpr u32 kPrewarmLinearKeep = 6u << 20;
 // and from this many frames after the last boot page upload or relocation (each makes new chunk ids)
 constexpr int kPrewarmHoldFrames = 30;
+// Jak II's font.24lo after setup-font-texture
+constexpr u32 kJak2LargeFont0 = 0x90000 / 64;
 
 // the blocks a 128 pixel wide PSMCT32 upload of `words` writes: whole chunks (the rows of a partial
 // chunk still spread over all of its pages' blocks)
@@ -173,6 +175,24 @@ CtrVram::CtrVram(bool sparse, bool prewarm) : m_sparse(sparse), m_prewarm_on(pre
       m_ct32_page_table[x + 64 * y] = psmct32_addr(x, y, 64);
     }
   }
+  // decode_impl's tables: a texel's place in one page
+  const struct {
+    u32 w, h;
+    u32 (*addr)(u32, u32, u32);
+  } layouts[4] = {{64, 32, psmct32_addr},
+                  {64, 64, psmct16_addr},
+                  {128, 64, psmt8_addr},
+                  {128, 128, psmt4_addr_half_byte}};
+  for (int k = 0; k < 4; k++) {
+    const auto& l = layouts[k];
+    m_page_tab[k].resize(l.w * l.h);
+    for (u32 y = 0; y < l.h; y++) {
+      for (u32 x = 0; x < l.w; x++) {
+        m_page_tab[k][x + l.w * y] = (u16)l.addr(x, y, l.w);
+      }
+    }
+    m_page_tab_ptr[k] = m_page_tab[k].data();
+  }
   // (AI-assisted) in PSMCT32 the texels 2k and 2k+1 of a row are next to each other: uploads
   // copy pairs (checked here rather than assumed)
   m_ct32_pairs = true;
@@ -269,17 +289,45 @@ void CtrVram::upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height)
              same ? "unchanged, not written" : "written");
   }
 #endif
-  if (same) {
-    return;
+  if (!same) {
+    write_ct32(data, dest_block, width, height);
+    if (m_jak2_remap) {
+      // no page textures (with moved dests) there any more
+      std::fill(m_remap.begin() + std::min<u32>(dest_block, 16384),
+                m_remap.begin() + std::min<u32>(end, 16384), 0);
+    }
+    mark_unique(dest_block, end);
+    note_write(dest_block, end);
   }
-  write_ct32(data, dest_block, width, height);
-  if (m_jak2_remap) {
-    // no page textures (with moved dests) there any more
-    std::fill(m_remap.begin() + std::min<u32>(dest_block, 16384),
-              m_remap.begin() + std::min<u32>(end, 16384), 0);
+  for (const auto& r : m_raw_images) {
+    if (r.dest_block == dest_block && r.end_block == end && r.width == width &&
+        r.height == height) {
+      return;
+    }
   }
-  mark_unique(dest_block, end);
-  note_write(dest_block, end);
+  drop_raw_images(dest_block, end);
+  m_raw_images.push_back(RawImage{dest_block, end, width, height});
+}
+
+void CtrVram::drop_raw_images(u32 first_block, u32 end_block) {
+  for (size_t i = m_raw_images.size(); i-- > 0;) {
+    if (m_raw_images[i].dest_block < end_block && first_block < m_raw_images[i].end_block) {
+      m_raw_images.erase(m_raw_images.begin() + i);
+    }
+  }
+}
+
+int CtrVram::raw_rows(u64 tex0) const {
+  const GsTex0 t(tex0);
+  if (t.psm() != GsTex0::PSM::PSMCT32 && t.psm() != GsTex0::PSM::PSMCT24) {
+    return 0;
+  }
+  for (const auto& r : m_raw_images) {
+    if (r.dest_block == t.tbp0() && r.width == std::max(1u, t.tbw()) * 64) {
+      return (int)r.height;
+    }
+  }
+  return 0;
 }
 
 // (AI-assisted, j2intro) VRAM holds this CT32 image at dest_block already (write_ct32's layout)
@@ -347,6 +395,9 @@ void CtrVram::mark_unique(u32 first_block, u32 end_block) {
 
 void CtrVram::note_write(u32 first_block, u32 end_block) {
   m_stats.uploads_changed++;
+  if (!m_raw_images.empty()) {
+    drop_raw_images(first_block, end_block);
+  }
   // a texture relocated there has to be relocated again (relocate() skips unchanged ones)
   for (auto it = m_last_relocate.begin(); it != m_last_relocate.end();) {
     if (it->second.first_block < end_block && first_block < it->second.end_block) {
@@ -853,12 +904,15 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
     m_stats.relocates_skipped++;
     return;
   }
-  if (m_prewarm_on) {
+  // Jak II: only the large font's first page (512 KB each)
+  if (m_prewarm_on || (m_jak2_remap && dest_block == kJak2LargeFont0 &&
+                       dest_psm == (u32)GsTex0::PSM::PSMT4HL)) {
     // the font, as font-set-tex0 gives it to the font templates (its CBP is not in the key)
     auto lg2 = [](u32 x) { return (u64)(31 - __builtin_clz(std::max(x, 1u))) & 0xf; };
+    const u64 th = m_jak2_remap ? lg2(std::max<u32>(info.h, 2) - 1) + 1 : lg2(info.h);
     const u64 tex0 = (u64)(dest_block & 0x3fff) | (u64)(info.width & 0x3f) << 14 |
-                     (u64)(dest_psm & 0x3f) << 20 | lg2(info.w) << 26 | lg2(info.h) << 30 |
-                     1ull << 34 | 1ull << 61;
+                     (u64)(dest_psm & 0x3f) << 20 | lg2(info.w) << 26 | th << 30 | 1ull << 34 |
+                     1ull << 61;
     if (std::find(m_prewarm.begin(), m_prewarm.end(), tex0) == m_prewarm.end()) {
       m_prewarm.push_back(tex0);
     }
@@ -993,17 +1047,17 @@ u32 CtrVram::clut_color(u32 cbp, u32 cpsm, u32 entry) const {
 }
 
 namespace {
-// clut(cbp, cpsm, index) -> RGBA8: a template (inlined per texel), not a std::function
+// clut(cbp, cpsm, index) -> RGBA8. A texel is at tbp + page * 8192 + View::page_tab's entry;
+// rows > 0: only that many rows are read, the last one repeated below them
 template <typename Clut>
-bool decode_impl(const CtrVram* self,
-                 const CtrVram::View& vram,
+bool decode_impl(const CtrVram::View& vram,
                  u64 tex0,
                  std::vector<u32>* out,
                  int* w_out,
                  int* h_out,
                  Range* tex_range,
-                 const Clut& clut) {
-  (void)self;
+                 const Clut& clut,
+                 int rows = 0) {
   GsTex0 t(tex0);
   u32 tw = std::min(t.tw(), 10u);
   u32 th = std::min(t.th(), 10u);
@@ -1015,11 +1069,47 @@ bool decode_impl(const CtrVram* self,
   u32 cpsm = t.cpsm();
   u32 csa = (tex0 >> 56) & 0x1f;
   out->resize(w * h);
+  const auto psm = t.psm();
+  // page size (texels, as shifts) and pages per buffer row, as the format's address function
+  u32 pw_log2, ph_log2, ppr;
+  int tab_id;
+  switch (psm) {
+    case GsTex0::PSM::PSMCT32:
+    case GsTex0::PSM::PSMCT24:
+    case GsTex0::PSM::PSMT8H:
+    case GsTex0::PSM::PSMT4HH:
+    case GsTex0::PSM::PSMT4HL:
+      tab_id = 0;
+      pw_log2 = 6;
+      ph_log2 = 5;
+      ppr = width / 64;
+      break;
+    case GsTex0::PSM::PSMCT16:
+    case GsTex0::PSM::PSMCT16S:
+      tab_id = 1;
+      pw_log2 = 6;
+      ph_log2 = 6;
+      ppr = width / 64;
+      break;
+    case GsTex0::PSM::PSMT8:
+      tab_id = 2;
+      pw_log2 = 7;
+      ph_log2 = 6;
+      ppr = std::max(1u, width / 128);
+      break;
+    case GsTex0::PSM::PSMT4:
+      tab_id = 3;
+      pw_log2 = 7;
+      ph_log2 = 7;
+      ppr = width / 128;
+      break;
+    default:
+      return false;
+  }
   // (AI-assisted) the CLUT entries the texture can use, read once instead of per texel: 256, or
   // the 16 from CSA for 4 bit indices
   u32 clut_tab[256];
   {
-    const auto psm = t.psm();
     const bool idx8 = psm == GsTex0::PSM::PSMT8 || psm == GsTex0::PSM::PSMT8H;
     const bool idx4 = psm == GsTex0::PSM::PSMT4 || psm == GsTex0::PSM::PSMT4HH ||
                       psm == GsTex0::PSM::PSMT4HL;
@@ -1030,79 +1120,123 @@ bool decode_impl(const CtrVram* self,
       }
     }
   }
-  auto rd32 = [&](u32 a) {
-    tex_range->add(a);
-    a &= kVramMask & ~3u;
-    return vram.rd32(a);
-  };
-
-  switch (t.psm()) {
-    case GsTex0::PSM::PSMCT32:
-    case GsTex0::PSM::PSMCT24:
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          u32 v = rd32(psmct32_addr(x, y, width) + tbp * kBlockBytes);
-          if (t.psm() == GsTex0::PSM::PSMCT24) {
-            v = (v & 0xffffff) | (0x80u << 24);
-          }
-          (*out)[x + y * w] = v;
-        }
-      }
-      break;
-    case GsTex0::PSM::PSMCT16:
-    case GsTex0::PSM::PSMCT16S:
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          u32 a = psmct16_addr(x, y, width) + tbp * kBlockBytes;
-          tex_range->add(a);
-          a &= kVramMask;
-          const u16 c = vram.rd16(a & ~1u);
-          (*out)[x + y * w] = ct16_to_rgba(c);
-        }
-      }
-      break;
-    case GsTex0::PSM::PSMT8:
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          u32 a = psmt8_addr(x, y, width) + tbp * kBlockBytes;
-          tex_range->add(a);
-          a &= kVramMask;
-          (*out)[x + y * w] = clut_tab[vram.rd8(a)];
-        }
-      }
-      break;
-    case GsTex0::PSM::PSMT4:
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          u32 a = psmt4_addr_half_byte(x, y, width) + tbp * kBlockBytes * 2;
-          tex_range->add(a / 2);
-          a &= kVramMask * 2 + 1;
-          u8 b = vram.rd8(a / 2);
-          u32 idx = (a & 1) ? (b >> 4) : (b & 0xf);
-          (*out)[x + y * w] = clut_tab[idx];
-        }
-      }
-      break;
-    case GsTex0::PSM::PSMT8H:
-    case GsTex0::PSM::PSMT4HH:
-    case GsTex0::PSM::PSMT4HL:
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          u32 v = rd32(psmct32_addr(x, y, width) + tbp * kBlockBytes);
-          u32 idx;
-          if (t.psm() == GsTex0::PSM::PSMT8H) {
-            idx = v >> 24;
-          } else if (t.psm() == GsTex0::PSM::PSMT4HH) {
-            idx = v >> 28;
+  const bool indexed = psm == GsTex0::PSM::PSMT8H || psm == GsTex0::PSM::PSMT4HH ||
+                       psm == GsTex0::PSM::PSMT4HL;
+  const u32 idx_shift = psm == GsTex0::PSM::PSMT4HH ? 28 : 24;
+  const u32 idx_mask = psm == GsTex0::PSM::PSMT8H ? 0xff : 0xf;
+  const u32 keep = psm == GsTex0::PSM::PSMCT24 ? 0xffffffu : 0xffffffffu;
+  const u32 set = psm == GsTex0::PSM::PSMCT24 ? 0x80u << 24 : 0u;
+  const u16* const tab = vram.page_tab[tab_id];
+  const u32 pw = 1u << pw_log2;
+  const u32 ph_mask = (1u << ph_log2) - 1;
+  const int read_h = rows > 0 && rows < h ? rows : h;
+  u32 lo = UINT32_MAX, hi = 0;
+  for (int y = 0; y < read_h; y++) {
+    const u16* const row_tab = tab + ((u32)y & ph_mask) * pw;
+    const u32 row_page = ((u32)y >> ph_log2) * ppr;
+    for (int x0 = 0; x0 < w; x0 += (int)pw) {
+      const u32 n = std::min(pw, (u32)(w - x0));
+      const u32 base = tbp * kBlockBytes + (row_page + ((u32)x0 >> pw_log2)) * 8192u;
+      u32* const d = out->data() + (size_t)y * w + x0;
+      const u32 chunk = base >> 14;
+      const bool in_chunk = base <= kVramBytes - 8192u && (base & 16383u) <= 8192u;
+      const bool top = in_chunk && vram.is_top[chunk];
+      if (in_chunk && tab_id == 0) {
+        const u8* const p = vram.chunks[chunk] + (top ? (base & 16383u) >> 2 : (base & 16383u));
+        u32 omin = 8192, omax = 0;
+        for (u32 i = 0; i < n; i++) {
+          const u32 off = row_tab[i];
+          omin = std::min(omin, off);
+          omax = std::max(omax, off);
+          u32 v;
+          if (top) {
+            v = (u32)p[off >> 2] << 24;
           } else {
-            idx = (v >> 24) & 0xf;
+            memcpy(&v, p + off, 4);
           }
-          (*out)[x + y * w] = clut_tab[idx];
+          d[i] = indexed ? clut_tab[(v >> idx_shift) & idx_mask] : ((v & keep) | set);
         }
+        lo = std::min(lo, base + omin);
+        hi = std::max(hi, base + omax);
+        continue;
       }
-      break;
-    default:
-      return false;
+      if (in_chunk && !top) {
+        const u8* const p = vram.chunks[chunk] + (base & 16383u);
+        u32 omin = 16384, omax = 0;
+        if (tab_id == 1) {
+          for (u32 i = 0; i < n; i++) {
+            const u32 off = row_tab[i];
+            omin = std::min(omin, off);
+            omax = std::max(omax, off);
+            u16 c;
+            memcpy(&c, p + off, 2);
+            d[i] = ct16_to_rgba(c);
+          }
+        } else if (tab_id == 2) {
+          for (u32 i = 0; i < n; i++) {
+            const u32 off = row_tab[i];
+            omin = std::min(omin, off);
+            omax = std::max(omax, off);
+            d[i] = clut_tab[p[off]];
+          }
+        } else {
+          for (u32 i = 0; i < n; i++) {
+            const u32 off = row_tab[i];  // in half bytes
+            omin = std::min(omin, off >> 1);
+            omax = std::max(omax, off >> 1);
+            const u8 b = p[off >> 1];
+            d[i] = clut_tab[(off & 1) ? (b >> 4) : (b & 0xf)];
+          }
+        }
+        lo = std::min(lo, base + omin);
+        hi = std::max(hi, base + omax);
+        continue;
+      }
+      // the page crosses a chunk boundary or the end of VRAM, or reads a top bytes only chunk
+      for (u32 i = 0; i < n; i++) {
+        const u32 off = row_tab[i];
+        u32 a = base + (tab_id == 3 ? off >> 1 : off);
+        tex_range->add(a);
+        a &= kVramMask;
+        u32 v;
+        switch (psm) {
+          case GsTex0::PSM::PSMCT32:
+            v = vram.rd32(a & ~3u);
+            break;
+          case GsTex0::PSM::PSMCT24:
+            v = (vram.rd32(a & ~3u) & 0xffffff) | (0x80u << 24);
+            break;
+          case GsTex0::PSM::PSMT8H:
+            v = clut_tab[vram.rd32(a & ~3u) >> 24];
+            break;
+          case GsTex0::PSM::PSMT4HH:
+            v = clut_tab[vram.rd32(a & ~3u) >> 28];
+            break;
+          case GsTex0::PSM::PSMT4HL:
+            v = clut_tab[(vram.rd32(a & ~3u) >> 24) & 0xf];
+            break;
+          case GsTex0::PSM::PSMCT16:
+          case GsTex0::PSM::PSMCT16S:
+            v = ct16_to_rgba(vram.rd16(a & ~1u));
+            break;
+          case GsTex0::PSM::PSMT8:
+            v = clut_tab[vram.rd8(a)];
+            break;
+          default: {  // PSMT4
+            const u8 b = vram.rd8(a);
+            v = clut_tab[(off & 1) ? (b >> 4) : (b & 0xf)];
+          } break;
+        }
+        d[i] = v;
+      }
+    }
+  }
+  if (lo <= hi) {
+    tex_range->add(lo);
+    tex_range->add(hi);
+  }
+  for (int y = read_h; y < h; y++) {
+    memcpy(out->data() + (size_t)y * w, out->data() + (size_t)(read_h - 1) * w, (size_t)w * 4);
   }
   *w_out = w;
   *h_out = h;
@@ -1151,7 +1285,7 @@ bool CtrVram::decode(u64 tex0, std::vector<u32>* out, int* w, int* h) const {
   const_cast<CtrVram*>(this)->flush_pending();
   const_cast<CtrVram*>(this)->materialize_all();
   Range r;
-  return decode_impl(this, view(), tex0, out, w, h, &r,
+  return decode_impl(view(), tex0, out, w, h, &r,
                      [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); });
 }
 
@@ -1168,11 +1302,12 @@ bool CtrVram::decode_for_cpu(u64 tex0, std::vector<u32>* out, int* w, int* h) {
   const Relocation* reloc = find_relocation(t.tbp0(), (u32)t.psm());
   Range r;
   if (reloc) {
-    return decode_impl(this, view(), tex0, out, w, h, &r,
+    return decode_impl(view(), tex0, out, w, h, &r,
                        [reloc](u32, u32, u32 e) { return reloc->clut[e % reloc->clut.size()]; });
   }
-  return decode_impl(this, view(), tex0, out, w, h, &r,
-                     [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); });
+  return decode_impl(view(), tex0, out, w, h, &r,
+                     [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); },
+                     raw_rows(tex0));
 }
 
 CtrVram::Entry* CtrVram::find_cached(u64 key) {
@@ -1229,10 +1364,6 @@ void CtrVram::clear_override(u32 tbp) {
 }
 
 const CtrTexture* CtrVram::get_texture(u64 tex0) {
-  return get_texture_impl(tex0, true);
-}
-
-const CtrTexture* CtrVram::get_texture_impl(u64 tex0, bool lazy_all) {
   // (AI-assisted) Jak II's animated textures (set_override; none in Jak 1)
   if (!m_overrides.empty()) {
     auto ov = m_overrides.find((u32)(tex0 & 0x3fff));
@@ -1314,12 +1445,8 @@ const CtrTexture* CtrVram::get_texture_impl(u64 tex0, bool lazy_all) {
       m_failed.erase(failed);
     }
   }
-  if (lazy_all) {
-    materialize_all();
-  } else {
-    materialize(t.tbp0(), t.tbp0() + texture_block_span(t));
-    materialize(t.cbp(), t.cbp() + 4);
-  }
+  materialize(t.tbp0(), t.tbp0() + texture_block_span(t));
+  materialize(t.cbp(), t.cbp() + 4);
   std::vector<u32> data;
   int w = 0, h = 0;
   Range tex_range;
@@ -1328,12 +1455,13 @@ const CtrTexture* CtrVram::get_texture_impl(u64 tex0, bool lazy_all) {
                         t.psm() == GsTex0::PSM::PSMT4HL;
   // textures moved by texture-relocate use the CLUT they had when they were moved
   const Relocation* reloc = find_relocation(t.tbp0(), (u32)t.psm());
-  const double decode_t0 = reloc ? ctr_gpu_time_ms() : 0.0;
+  const double decode_t0 = ctr_gpu_time_ms();
   const bool decoded =
-      reloc ? decode_impl(this, view(), data_key, &data, &w, &h, &tex_range,
+      reloc ? decode_impl(view(), data_key, &data, &w, &h, &tex_range,
                           [reloc](u32, u32, u32 e) { return reloc->clut[e % reloc->clut.size()]; })
-            : decode_impl(this, view(), data_key, &data, &w, &h, &tex_range,
-                          [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); });
+            : decode_impl(view(), data_key, &data, &w, &h, &tex_range,
+                          [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); },
+                          raw_rows(data_key));
   if (!decoded) {
     lg::warn("[ctr vram] unsupported texture format {} (tex0 {:x})", (int)t.psm(), tex0);
     return nullptr;
@@ -1439,9 +1567,11 @@ const CtrTexture* CtrVram::get_texture_impl(u64 tex0, bool lazy_all) {
   // (AI-assisted) a texture relocated with a new CLUT: relocate() gives its chunks new ids
   e.sig = entry_sig(e);
   m_stats.decoded++;
-  if (reloc) {
-    lg::info("[ctr] font page tbp {} psm {}: {} x {} made in {:.0f} ms", t.tbp0(), (int)t.psm(),
-             gw, gh, ctr_gpu_time_ms() - decode_t0);
+  const double decode_ms = ctr_gpu_time_ms() - decode_t0;
+  if (reloc || decode_ms >= 8.0) {
+    lg::info("[ctr] {} tbp {} psm {}: {} x {} made in {:.0f} ms {}", reloc ? "font page" : "texture",
+             t.tbp0(), (int)t.psm(), gw, gh, decode_ms,
+             m_prewarming ? "ahead of its first draw" : "at its first draw");
   }
   if (cached) {
     keep_stale(key, *cached);  // the outdated version: the same data often comes back
@@ -1513,7 +1643,7 @@ bool CtrVram::prewarm_page(const u8* tpage, int mode, const u8* ee_mem, u32 s7_p
   upload_texture_page(tpage, mode, ee_mem, s7_ptr);
   do {
     const int before = m_stats.decoded;
-    get_texture_impl(m_page_keys[m_page_at++], false);
+    get_texture(m_page_keys[m_page_at++]);
     m_prewarm_decoded += m_stats.decoded - before;
   } while (m_page_at < m_page_keys.size() && ctr_gpu_time_ms() - t0 < budget_ms);
   m_prewarm_ms += ctr_gpu_time_ms() - t0;
@@ -1543,13 +1673,16 @@ void CtrVram::prewarm(double budget_ms) {
     }
 #endif
     const int before = m_stats.decoded;
-    get_texture_impl(m_prewarm[m_prewarm_at++], false);
+    m_prewarming = true;
+    get_texture(m_prewarm[m_prewarm_at++]);
+    m_prewarming = false;
     m_prewarm_decoded += m_stats.decoded - before;
   }
   m_prewarm_ms += ctr_gpu_time_ms() - t0;
   if (m_prewarm_at >= m_prewarm.size()) {
-    lg::info("[ctr] sprite and HUD textures decoded ahead of their first draw: {} of {} ({:.0f} ms)",
-             m_prewarm_decoded, m_prewarm.size(), m_prewarm_ms);
+    lg::info("[ctr] {} textures decoded ahead of their first draw: {} of {} ({:.0f} ms)",
+             m_jak2_remap ? "font" : "sprite and HUD", m_prewarm_decoded, m_prewarm.size(),
+             m_prewarm_ms);
     m_prewarm.clear();
     m_prewarm.shrink_to_fit();
     m_prewarm_at = 0;

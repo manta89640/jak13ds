@@ -18,6 +18,10 @@
  *
  * Colors as on the New 3DS (small model): A red, B yellow, X blue, Y green, white letters.
  * Textures keep the GS alpha range (0x80 = opaque).
+ *
+ * Jak II (set_jak2): the symbols' cells of font.24lo / font.12lo get the font's own capitals
+ * (B, Y, X, A; L, R, ZL, ZR for the shoulder names); the disc, highlight and shade stay (the
+ * mission icons use them). The pages stay gray; font-h.gc sets the symbols' font colors.
  */
 
 #include "common/common_types.h"
@@ -31,6 +35,8 @@ enum class Ps2Button : int { CROSS = 0, SQUARE = 1, TRIANGLE = 2, CIRCLE = 3, CO
 //! config.ini button_art (default on): off draws the PS2 symbols.
 void set_enabled(bool on);
 bool enabled();
+//! The game is Jak II (its kmachine).
+void set_jak2(bool jak2);
 
 //! The game thread: the texture at VRAM block tbp0 (format psm) shows this PS2 button.
 void register_texture(int ps2_button, u32 tbp0, u32 psm);

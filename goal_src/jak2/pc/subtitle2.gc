@@ -524,17 +524,35 @@
         (this-height 0.0) ;; the height of the current subtitle
         (lines-done 0)
         (subtitles-drawn? #f)
+        (last-i 0) ;; the previous subtitle's place in the queue
+        (last-y 0.0) ;; the font's y when the previous subtitle was reached
         )
 
   (dotimes (i PC_SUBTITLE_QUEUE_MAX_LINES)
     (when (and (-> line-queue elts i line) (subtitle-format self (-> line-queue elts i line)))
 
-      (set! this-height (print-game-text *temp-string* (-> self font) #t 44 (bucket-id debug-no-zbuf2)))
-
-      ;; push subtitle up since we are not the first one
-      (when (nonzero? lines-done)
-        (-! cur-y (/ last-height 2))
-        (-! cur-y (/ this-height 2))
+      ;; og:preserve-this a height only places the subtitle after it: measured when there is one
+      (cond
+        ((zero? lines-done)
+         (set! this-height -1.0)
+         (set! last-y (-> self font origin y))
+         )
+        (else
+          (when (< last-height 0.0)
+            ;; the first subtitle's height, with the font's y it had
+            (let ((saved-y (-> self font origin y)))
+              (set! (-> self font origin y) last-y)
+              (subtitle-format self (-> line-queue elts last-i line))
+              (set! last-height (print-game-text *temp-string* (-> self font) #t 44 (bucket-id debug-no-zbuf2)))
+              (set! (-> self font origin y) saved-y)
+              )
+            (subtitle-format self (-> line-queue elts i line))
+            )
+          (set! this-height (print-game-text *temp-string* (-> self font) #t 44 (bucket-id debug-no-zbuf2)))
+          ;; push subtitle up since we are not the first one
+          (-! cur-y (/ last-height 2))
+          (-! cur-y (/ this-height 2))
+          )
         )
 
       ;; set the current y, it shall not be lower than the previous line!
@@ -560,6 +578,7 @@
 
       ;; save this for later usage
       (set! last-height this-height)
+      (set! last-i i)
       (1+! lines-done)
       )
     )
