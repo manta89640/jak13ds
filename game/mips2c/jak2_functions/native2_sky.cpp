@@ -9,8 +9,13 @@
  */
 
 #include <algorithm>
+#include <cstdlib>
+#include <vector>
 
 #include "native2.h"
+
+#include "common/log/log.h"
+
 #include "game/mips2c/native_goalc_ops.h"
 
 namespace Mips2C::jak2::native2 {
@@ -125,6 +130,8 @@ u32 clip_pass(u32 in, u32 out, u32 n, u32 comp) {
  * its first word, then per vertex the texture coordinates * Q, the color as integers and the
  * screen position (vftoi4). Returns #t, or #f when a pass leaves nothing.
  */
+u64 emit_large_polygon(u32 dma, u32 n, u32 t4, u64 st);
+
 u64 draw_large_polygon(u32 dma, u32 n, u32 t4, u32 t5, u64 st) {
   n = clip_pass<false>(t4, t5, n, 0);
   if (n == 0) {
@@ -142,7 +149,11 @@ u64 draw_large_polygon(u32 dma, u32 n, u32 t4, u32 t5, u64 st) {
   if (n == 0) {
     return st;
   }
+  return emit_large_polygon(dma, n, t4, st);
+}
 
+//! draw-large-polygon's end: the n clipped vertices at t4 to the dma-buffer
+u64 emit_large_polygon(u32 dma, u32 n, u32 t4, u64 st) {
   const float* vf13 = vf(13);
   const float* vf23 = vf(23);
   const float* vf24 = vf(24);
@@ -253,6 +264,166 @@ u64 render_sky_poly(const NativeArgs& args) {
 
 u64 render_sky_quad_impl(const NativeArgs& args) {
   return render_sky_poly<4>(args);
+}
+
+constexpr u32 kQuadBytes = 4 * 48;
+constexpr u32 kClosedQuadBytes = 5 * 48;
+
+/*!
+ * render-sky-quad for one quad of render-sky-quads: the same transform and the same stores to t4,
+ * then the four clip planes are tested on the vertices as the passes would. A pass that keeps all
+ * of them writes its input to the other buffer unchanged, so the leading such passes are one copy
+ * of t4 to t5 (the later ones would write the bytes that are there), and the first pass that
+ * keeps none ends the quad. The other passes run as in draw-large-polygon. The same bytes in both
+ * buffers and in the dma-buffer as render-sky-quad leaves.
+ */
+u64 render_sky_quad_fast(u32 in, u32 dma, u32 t4, u32 t5, u64 st) {
+  const float* vf28 = vf(28);
+  const float* vf29 = vf(29);
+  const float* vf30 = vf(30);
+  const float* vf31 = vf(31);
+  SkyVert first;
+  u32 outside[4] = {0, 0, 0, 0};
+  for (u32 k = 0; k < 4; k++) {
+    SkyVert v;
+    load_vert(v, in + 48 * k);
+    float acc[4];
+    for (int i = 0; i < 4; i++) {
+      acc[i] = vf31[i] * v.p[0];
+    }
+    for (int i = 0; i < 4; i++) {
+      acc[i] += vf30[i] * v.p[1];
+    }
+    for (int i = 0; i < 4; i++) {
+      acc[i] += vf29[i] * v.p[2];
+    }
+    float r[4];
+    r[0] = acc[0] + vf28[0] * v.p[3];
+    r[1] = acc[1] + vf28[1] * v.p[3];
+    r[2] = kZero;  // vmove.z vf, vf0
+    r[3] = acc[3] + vf28[3] * v.p[3];
+    memcpy(v.p, r, 16);
+    store_vert(t4 + 48 * k, v);
+    if (k == 0) {
+      first = v;
+    }
+    float d;
+    outside[0] += clip_test<false>(v, 0, d) ? 1 : 0;
+    outside[1] += clip_test<false>(v, 1, d) ? 1 : 0;
+    outside[2] += clip_test<true>(v, 0, d) ? 1 : 0;
+    outside[3] += clip_test<true>(v, 1, d) ? 1 : 0;
+  }
+  store_vert(t4 + 48 * 4, first);
+
+  u32 pass = 0;
+  while (pass < 4 && outside[pass] == 0) {
+    pass++;
+  }
+  if (pass > 0) {
+    MIPS2C_NATIVE_LOG_STORE(t5, kClosedQuadBytes);
+    memcpy(MIPS2C_ASSUME_ALIGNED(g_ee_main_mem + t5, 16),
+           MIPS2C_ASSUME_ALIGNED(g_ee_main_mem + t4, 16), kClosedQuadBytes);
+  }
+  if (pass < 4 && outside[pass] == 4) {
+    return st;
+  }
+  u32 n = 4;
+  for (; pass < 4; pass++) {
+    const u32 src = (pass & 1) ? t5 : t4;
+    const u32 dst = (pass & 1) ? t4 : t5;
+    n = pass < 2 ? clip_pass<false>(src, dst, n, pass & 1) : clip_pass<true>(src, dst, n, pass & 1);
+    if (n == 0) {
+      return st;
+    }
+  }
+  return emit_large_polygon(dma, n, t4, st);
+}
+
+// host check (OPENGOAL_MIPS2C_VERIFY=1): every quad of render-sky-quads against render-sky-quad
+int g_quads_verify = -1;
+u64 g_quads_verify_quads = 0, g_quads_verify_mismatches = 0;
+
+bool quads_verify_on() {
+  if (g_quads_verify < 0) {
+    const char* v = getenv("OPENGOAL_MIPS2C_VERIFY");
+    g_quads_verify = (v && v[0] && v[0] != '0') ? 1 : 0;
+    if (g_quads_verify) {
+      atexit([] {
+        lg::info("render-sky-quads verify: {} quads, {} mismatches", g_quads_verify_quads,
+                 g_quads_verify_mismatches);
+      });
+    }
+  }
+  return g_quads_verify == 1;
+}
+
+//! render-sky-quad (the reference) and the fast version on the same state, compared: the
+//! dma-buffer's base and data, both clip buffers, the result
+u64 render_sky_quad_verify(const NativeArgs& quad_args, u32 in, u32 dma, u32 t4, u32 t5) {
+  constexpr u32 kBuf = 12 * 48;   // a clipped quad has at most 8 vertices and the closing one
+  constexpr u32 kOut = 16 + 9 * 48;
+  const u32 base0 = gload<u32>(dma + 4);
+  std::vector<u8> before(kBuf * 2 + kOut), ref(kBuf * 2 + kOut);
+  auto save = [&](std::vector<u8>& to) {
+    memcpy(to.data(), g_ee_main_mem + t4, kBuf);
+    memcpy(to.data() + kBuf, g_ee_main_mem + t5, kBuf);
+    memcpy(to.data() + 2 * kBuf, g_ee_main_mem + base0, kOut);
+  };
+  save(before);
+  const u64 r_ref = render_sky_quad_impl(quad_args);
+  const u32 base_ref = gload<u32>(dma + 4);
+  save(ref);
+  memcpy(g_ee_main_mem + t4, before.data(), kBuf);
+  memcpy(g_ee_main_mem + t5, before.data() + kBuf, kBuf);
+  memcpy(g_ee_main_mem + base0, before.data() + 2 * kBuf, kOut);
+  gstore<u32>(dma + 4, base0);
+  const u64 r = render_sky_quad_fast(in, dma, t4, t5, quad_args.st);
+  g_quads_verify_quads++;
+  if (r != r_ref || gload<u32>(dma + 4) != base_ref ||
+      memcmp(g_ee_main_mem + t4, ref.data(), kBuf) ||
+      memcmp(g_ee_main_mem + t5, ref.data() + kBuf, kBuf) ||
+      memcmp(g_ee_main_mem + base0, ref.data() + 2 * kBuf, kOut)) {
+    if (g_quads_verify_mismatches++ < 8) {
+      lg::error("render-sky-quads verify MISMATCH: quad at #x{:x} (result {:x}, reference {:x})",
+                in, r, r_ref);
+    }
+  }
+  return r;
+}
+
+/*!
+ * (render-sky-quads verts count dma-buffer): render-sky-quad for count quads (4 sky-vertex each)
+ * from verts, as the loops of draw-clouds and draw-haze call it. With the natives turned off, the
+ * calls through render-sky-quad's symbol.
+ */
+u64 render_sky_quads_impl(const NativeArgs& args) {
+  static const bool off = native_turned_off("render-sky-quad") ||
+                          native_turned_off("render-sky-quads");
+  const u32 verts = (u32)args.a[0];
+  const u32 count = (u32)args.a[1];
+  const u32 dma = (u32)args.a[2];
+  if (off) {
+    static const u32 quad_sym = sym_value_addr("render-sky-quad");
+    for (u32 q = 0; q < count; q++) {
+      const u64 a[8] = {verts + kQuadBytes * q, args.a[2], 0, 0, 0, 0, 0, 0};
+      native_call_goal(gload<u32>(quad_sym), a, args);
+    }
+    return 0;
+  }
+  u32 t4, t5;
+  sky_buffers(t4, t5);
+  if (quads_verify_on()) {
+    for (u32 q = 0; q < count; q++) {
+      const u64 a[8] = {verts + kQuadBytes * q, args.a[2], 0, 0, 0, 0, 0, 0};
+      render_sky_quad_verify(NativeArgs{a, args.pp, args.st, args.stack}, verts + kQuadBytes * q,
+                             dma, t4, t5);
+    }
+    return 0;
+  }
+  for (u32 q = 0; q < count; q++) {
+    render_sky_quad_fast(verts + kQuadBytes * q, dma, t4, t5, args.st);
+  }
+  return 0;
 }
 
 u64 render_sky_tri_impl(const NativeArgs& args) {
@@ -480,6 +651,8 @@ u64 method_33_sky_work_impl(const NativeArgs& args) {
 // (AI-assisted) no GOAL calls, no scratch space
 const NativeImpl render_sky_quad = MIPS2C_NATIVE_IMPL(render_sky_quad_impl, 0, 0);
 const NativeImpl render_sky_tri = MIPS2C_NATIVE_IMPL(render_sky_tri_impl, 0, 0);
+// a loop of render-sky-quad in one call, no mips2c version
+const NativeImpl render_sky_quads = MIPS2C_NATIVE_IMPL(render_sky_quads_impl, NATIVE_CALLS_GOAL, 0);
 // (AI-assisted) call GOAL functions (vector-normalize!; the texture lookup and adgif setup)
 const NativeImpl method_32_sky_work = MIPS2C_NATIVE_IMPL(method_32_sky_work_impl, NATIVE_CALLS_GOAL, 0);
 const NativeImpl method_33_sky_work = MIPS2C_NATIVE_IMPL(method_33_sky_work_impl, NATIVE_CALLS_GOAL, 0);

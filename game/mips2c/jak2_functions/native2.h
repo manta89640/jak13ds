@@ -26,6 +26,7 @@ u32 sym_value_addr(const char* name);
 // native2_sky.cpp
 extern const NativeImpl render_sky_quad;
 extern const NativeImpl render_sky_tri;
+extern const NativeImpl render_sky_quads;
 extern const NativeImpl method_32_sky_work;
 extern const NativeImpl method_33_sky_work;
 
