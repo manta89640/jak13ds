@@ -12051,7 +12051,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           bool keep_far = (st & 4) != 0 && !g_screen_black;
           if (!ok) {
             v = 2;
-            if (late) {
+            if (late && !j2_hidden) {
               late_groups++;
               for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
                 if (lev.unit_ok[gu[j]] == 3) {
@@ -12198,7 +12198,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
               }
             }
 #endif
-            if (late) {
+            // a level its string hides whole asks for no near chunks: none of its groups is late
+            if (late && !j2_hidden) {
               late_groups++;
               for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
                 if (lev.unit_ok[gu[j]] == 3) {
@@ -12386,7 +12387,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
               lev.stream_units[gu[j]].late_seen = frame32p;
             }
           }
-          if (late) {
+          if (late && !j2_hidden) {
             late_groups++;
             for (u32 j = 0; j < cnt; j++) {
               if (lev.unit_ok[gu[j]] == 3) {
@@ -12515,6 +12516,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   float run_po[4], run_pk[4][3];
   run_in.po = run_po;
   run_in.pk = run_pk;
+  if (j2_hidden && lev.chunk_all_vis.size() != lev.chunks.size()) {
+    lev.chunk_all_vis.resize(lev.chunks.size());
+    for (size_t ci = 0; ci < lev.chunks.size(); ci++) {
+      lev.chunk_all_vis[ci] = chunk_hideable(lev, ci);
+    }
+  }
+  const u8* const all_vis = j2_hidden ? lev.chunk_all_vis.data() : nullptr;
+  // the zero string hides the chunk whole (emit_chunk's test): not in view, whatever the camera
+  auto string_hides = [&](size_t ci, const c3l::Chunk& ch) {
+    return all_vis && all_vis[ci] && ch.kind != c3l::CHUNK_KIND_VISTA && ch.lod_tier < 3;
+  };
   auto emit_chunk = [&](size_t ci, bool vista_chunk) {
     m_ph_emits++;
     const auto& ch = lev.chunks[ci];
@@ -12564,6 +12576,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       const bool lod_chunk = tf_chunk || (tie_lod && lev.chunk_lod[ci] == 1);
       // (AI-assisted, j2vis) c3l v20: runs of prototypes the game hides
       const bool proto_chunk = proto_hide && lev.chunk_proto_hidden[ci];
+      if (all_vis && vis_test && all_vis[ci]) {
+        // the level's string is zero and each run has an id: the run loop would show none
+        m_vis_chunks += !proto_chunk;
+        return;
+      }
       if (vis_test || straddles || vista_tier || lod_chunk || proto_chunk) {
         // (AI-assisted) per run: the visibility bit, then the view test; m_run_shown for the draws
         u32 shown = 0, view_hidden = 0, view_tris = 0, lod_hid = 0;
@@ -12999,7 +13016,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // ctr_pop: a chunk in view the config would draw, not drawn: a hole unless a vista copy stands in
   auto note_hole = [&](size_t ci, const c3l::Chunk& ch, bool miss) {
     const bool vista = ch.kind == c3l::CHUNK_KIND_VISTA;
-    if (!sphere_in_view(cam, ch.bsphere) || fog_at(ch.bsphere, vista) >= 0.9f) {
+    if (string_hides(ci, ch) || !sphere_in_view(cam, ch.bsphere) ||
+        fog_at(ch.bsphere, vista) >= 0.9f) {
       return;
     }
     if (!miss && !vista && lev.vista_copy[ci] && m_vista_src[ci]) {
@@ -13156,7 +13174,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         hold = 0;
       } else if (meshes[ci] < 0 ? lev.dormant_freed(ci) && !lev.dormant : hold != 0) {
         // (while dormant the string hides it anyway: no hold)
-        const bool seen = sphere_in_view(cam, ch.bsphere);
+        const bool seen = !string_hides(ci, ch) && sphere_in_view(cam, ch.bsphere);
         if (meshes[ci] < 0) {
           hold = seen ? (hold ? hold : frame32) : 0;
           m_levels->stream_check().dorm_missing += seen;
@@ -13172,7 +13190,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     if (meshes[ci] < 0 && dist_ok && lod_ok && !(lev.has_vista && ch.lod_tier == 3) &&
         (!(ch.lod_tier != 0 ? far_tfrag : far_level) || far_chunk(lev, ch)) &&
-        sphere_in_view(cam, ch.bsphere)) {
+        !string_hides(ci, ch) && sphere_in_view(cam, ch.bsphere)) {
       g_holes.chunk_frames[std::min<u32>(ch.kind, 3)]++;
       g_holes.this_frame++;
     }

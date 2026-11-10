@@ -120,6 +120,11 @@ bool alpha_weighted_blend(u64 alpha_data) {
   return b == CTR_BLEND_ALPHA || b == CTR_BLEND_ADD || b == CTR_BLEND_SUB;
 }
 
+// the transfers the snapshot copies
+bool snap_kind(DmaTag::Kind kind) {
+  return kind == DmaTag::Kind::REF || kind == DmaTag::Kind::REFS;
+}
+
 // sin and cos of an angle in radians, to ~1e-5: sprite rotations don't need libm's (slow) ones
 void fast_sincos(float a, float* s, float* c) {
   constexpr float kInvTwoPi = 0.159154943f, kTwoPi = 6.28318531f, kPi = 3.14159265f,
@@ -178,7 +183,7 @@ void CtrSpriteRenderer::snapshot(DmaFollower& dma, CtrRenderState& rs) {
   while (dma.current_tag_offset() != rs.next_bucket) {
     const DmaTag::Kind kind = dma.current_tag().kind;
     const DmaTransfer t = dma.read_and_advance();
-    if ((kind != DmaTag::Kind::REF && kind != DmaTag::Kind::REFS) || !t.data || !t.size_bytes) {
+    if (!snap_kind(kind) || !t.data || !t.size_bytes) {
       continue;  // CNT / NEXT data lives in the DMA buffer, which the game double buffers
     }
     const size_t q = (t.size_bytes + 15) / 16;
@@ -562,10 +567,13 @@ void CtrSpriteRenderer::draw_glows(DmaFollower& dma, CtrRenderState& rs) {
   m_have_last_ad = false;
   for (auto control = next_control(); control.size_bytes == 16 && more();
        control = next_control()) {
+    // (the snapshot holds REF transfers only: the others are in the frame's DMA buffer)
+    const bool vec_ref = snap_kind(dma.current_tag().kind);
     auto vec_xfer = dma.read_and_advance();
     if (!more()) {
       break;
     }
+    const bool shader_ref = snap_kind(dma.current_tag().kind);
     auto shader_xfer = dma.read_and_advance();
     if (more()) {
       dma.read_and_advance();  // the program call
@@ -574,10 +582,10 @@ void CtrSpriteRenderer::draw_glows(DmaFollower& dma, CtrRenderState& rs) {
       continue;
     }
     GlowData in;
-    memcpy(&in, snap_data(vec_xfer.data, 64), 64);
+    memcpy(&in, vec_ref ? snap_data(vec_xfer.data, 64) : vec_xfer.data, 64);
     AdGif ad;
     memset(&ad, 0, sizeof(ad));
-    memcpy(&ad, snap_data(shader_xfer.data, 80), 80);
+    memcpy(&ad, shader_ref ? snap_data(shader_xfer.data, 80) : shader_xfer.data, 80);
     // glow_math: camera frame, fade by depth, the z offset towards the camera, perspective
     math::Vector4f p = c.camera[3] + c.camera[0] * in.pos[0] + c.camera[1] * in.pos[1] +
                        c.camera[2] * in.pos[2];
