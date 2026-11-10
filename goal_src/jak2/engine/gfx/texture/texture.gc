@@ -1029,6 +1029,8 @@ additionally, some texture pages have a chunk system that allows more specific c
       ;; align, and truncate if we would go past the segment max
       (set! tpage-num-chunks (shr (min (the-as int (-> dest-seg size)) (the-as int (+ tpage-num-chunks 4095))) 12))
 
+      ;; og:preserve-this 3DS: the chunk ids only decide what upload-vram-data sends, which is nothing here
+      (#unless TARGET_3DS
       ;; this loop builds runs of consecutive chunks.
       (dotimes (s1-0 tpage-num-chunks)
         ;; where to put this chunk in vram
@@ -1078,6 +1080,7 @@ additionally, some texture pages have a chunk system that allows more specific c
           )
         (+! num-chunks chunks-pending)
         )
+      )
 
       ;; og:preserve-this
       ;; add a texflush.
@@ -1184,6 +1187,7 @@ additionally, some texture pages have a chunk system that allows more specific c
     (set! tpage-num-chunks (shr (min (the-as int (-> dest-seg size)) (the-as int (+ tpage-num-chunks 4095))) 12))
 
     ;; loop over chunks, seeing if any need to be uploaded.
+    (#unless TARGET_3DS
     (dotimes (chunk-idx tpage-num-chunks)
       (let ((mask-work (-> mask (/ chunk-idx 32))))
         (when (logtest? mask-work (ash 1 (logand chunk-idx 31)))
@@ -1191,6 +1195,7 @@ additionally, some texture pages have a chunk system that allows more specific c
           )
         )
       )
+    )
 
     ;; not used at all. we don't set merc masks on PC, so this should happen most of the time.
     ; (when (not any-uploads)
@@ -1202,11 +1207,13 @@ additionally, some texture pages have a chunk system that allows more specific c
     ;; upload everything in the tpage.
     ;; uploads are "free" on PC, so no harm, but we have to tell the game we're doing this
     ;; otherwise it might think that an old texture was left behind and skip a later upload
+    (#unless TARGET_3DS
     (dotimes (chunk-idx tpage-num-chunks)
       (let ((chunk-dest (+ vram-ptr chunk-idx)))
         (set! (-> pool ids chunk-dest) tpage-id)
         )
       )
+    )
 
     ;; tell pc port we upload everything.
     (dma-buffer-add-cnt-vif2 dma-buf 1 (new 'static 'vif-tag :cmd (vif-cmd pc-port)) (the-as vif-tag 3))
@@ -1270,6 +1277,7 @@ additionally, some texture pages have a chunk system that allows more specific c
       (set! tpage-num-chunks (shr (min (the-as int (-> dest-seg size)) (the-as int (+ tpage-num-chunks 4095))) 12))
 
       ;; loop over chunks, building runs of consecutive uploads.
+      (#unless TARGET_3DS
       (dotimes (chunk-idx tpage-num-chunks)
         (let ((chunk-dest (+ vram-ptr chunk-idx)))
           (let ((mask-work (-> mask (/ chunk-idx 32))))
@@ -1312,6 +1320,7 @@ additionally, some texture pages have a chunk system that allows more specific c
           )
         (+! total-chunks-uploaded chunks-pending)
         )
+      )
       (dma-buffer-add-gs-set dma-buf (texflush 1))
       )
     (shl total-chunks-uploaded 14)
@@ -1728,6 +1737,7 @@ additionally, some texture pages have a chunk system that allows more specific c
 
     ;; unclear what can set these yet, but levels can request that certain vram is dirty
     (let ((v1-77 (-> lev texture-dirty-masks cat)))
+      (#unless TARGET_3DS
       (dotimes (a0-58 128)
         (let ((a2-2 (-> v1-77 mask data (/ a0-58 32))))
           (when (logtest? a2-2 (ash 1 (logand a0-58 31)))
@@ -1736,6 +1746,7 @@ additionally, some texture pages have a chunk system that allows more specific c
             )
           )
         )
+      )
       (set! (-> v1-77 mask quad) (the-as uint128 0))
       )
     0
