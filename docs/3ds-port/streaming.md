@@ -484,8 +484,9 @@ bounds) has 10 km added: nothing of it is wanted, and it goes first.
 floor (`stream_reserve_kb`), the meshes of the parts jobs in flight, and either the claim of what
 waits for memory or 2 MB for the start of the next load. Claims: a level load in flight (the
 loader publishes what it still takes, `m_load_left`: its meshes, merc models and textures; 4 MB
-before it knows), the repair of an incomplete level, and the stream arena's first segment when it
-was given back. Then, in this order:
+before it knows), the repair of an incomplete level, the stream arena's first segment when it was
+given back, and the growth segment a near chunk needed now had no linear memory for (the arena's
+growth itself keeps its rule: while the heap keeps the floor + 256 KB). Then, in this order:
 
 1. A claim not covered: resident chunks beyond their reach are freed, the farthest first (without
    a claim only those more than 45 m beyond). What is still missing is `m_need_deficit`: only for
