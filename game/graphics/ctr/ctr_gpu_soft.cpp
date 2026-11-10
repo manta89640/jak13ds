@@ -1746,6 +1746,14 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state*,
 namespace {
 void clip_draw_triangle(const ctr_draw_state& st, const ctr_clip_vertex* const tri[3]);
 }
+void ctr_gpu_draw_clip_pz(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count) {
+  // back to the OpenGL-style z of ctr_gpu_draw_clip: z_gl = -2 z - w
+  std::vector<ctr_clip_vertex> gl(verts, verts + std::max(count, 0));
+  for (auto& v : gl) {
+    v.z = -2.f * v.z - v.w;
+  }
+  ctr_gpu_draw_clip(state, gl.data(), count);
+}
 void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count) {
   sky_hook(state);
   softstats::prog(4);

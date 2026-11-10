@@ -260,6 +260,14 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   bool m_jak2 = false;
   float m_inv_y = 1.f / 112.f;
   float m_big_half_gs = kBigHalfGs;
+  // Jak II stats line: by 3D slot (3D chunk * 48 + index), the frame (high 16 bits) and the color
+  // sum it was last drawn with, for the share of sprites the game gives a new brightness each frame
+  static constexpr int kRgbSlots = 1024;
+  std::unique_ptr<u32[]> m_rgb3d;
+  u32 m_frame_seq = 1;
+  int m_chunk3d = 0;
+  int m_rgb3d_frames = 0, m_rgb3d_seen = 0, m_rgb3d_swings = 0;
+  void note_rgb3d(int slot, int sum);
   int m_world_left = 0;  // world sprites left this frame (CtrSettings::max_sprites)
   bool m_alpha_discard = false;  // (AI-assisted) CtrSettings::sprite_alpha_discard, this frame
   struct Stats {
