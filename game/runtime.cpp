@@ -109,6 +109,10 @@ GameVersion g_game_version = GameVersion::Jak1;
 BackgroundWorker g_background_worker;
 int g_server_port = DECI2_PORT;
 
+#ifdef __3DS__
+u32 ctr_frame_vblanks();  // game/graphics/ctr/CtrRenderer.cpp
+#endif
+
 namespace {
 
 int g_argc = 0;
@@ -353,10 +357,6 @@ void ee_worker_runner(SystemThreadInterface& iface) {
     }
   }
 }
-
-#ifdef __3DS__
-u32 ctr_frame_vblanks();  // game/graphics/ctr/CtrRenderer.cpp
-#endif
 
 /*!
  * SystemThread function for running the IOP (separate I/O Processor)
