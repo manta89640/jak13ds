@@ -55,6 +55,7 @@ extern "C" int ctr_config_bool(const char* key, int def);              // platfo
 
 bool ctr_level_ready(const char* name);  // game/graphics/ctr/CtrRenderer.cpp
 u32 ctr_frame_vblanks();                  // game/graphics/ctr/CtrRenderer.cpp
+double ctr_frame_ms_left();               // game/graphics/ctr/CtrRenderer.cpp
 
 namespace jak2 {
 /*!
@@ -585,6 +586,34 @@ u64 pc_3ds_frame_vblanks() {
 #endif
 }
 
+// level.gc (TARGET_3DS): the load work of a per-frame load-continue (the linker's fixups, the
+// login) stops by a budget and goes on in the next call, as on the PS2. The frame's last call
+// takes the time the frame has left, less a margin for what the frame still does; the others a
+// PS2-sized step. Callers that wait for a level begin no budget (no limit).
+u64 pc_3ds_load_begin(u32 last) {
+  constexpr double kMarginMs = 4.0, kStepMs = 0.7, kMaxMs = 12.0;
+  double ms = kStepMs;
+  if (last != offset_of_s7()) {
+    ms = std::clamp(ctr_frame_ms_left() - kMarginMs, kStepMs, kMaxMs);
+  }
+#ifndef __3DS__
+  static const char* env = getenv("OPENGOAL_LOAD_BUDGET_MS");
+  if (env) {
+    ms = atof(env);
+  }
+#endif
+  return load_budget_begin(ms) ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
+}
+
+u64 pc_3ds_load_end() {
+  load_budget_end();
+  return 0;
+}
+
+u64 pc_3ds_load_time() {
+  return load_budget_left() ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
+}
+
 void InitMachine_PCPort() {
   // PC Port added functions
   init_common_pc_port_functions(
@@ -605,6 +634,9 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("pc-3ds-level-ready?", pc_3ds_level_ready);
   // (AI-assisted) pc-maybe-vsync's dog-ratio on the 3DS: the vblanks the last frame took
   make_function_symbol_from_c("pc-3ds-frame-vblanks", pc_3ds_frame_vblanks);
+  make_function_symbol_from_c("pc-3ds-load-begin", pc_3ds_load_begin);
+  make_function_symbol_from_c("pc-3ds-load-end", pc_3ds_load_end);
+  make_function_symbol_from_c("pc-3ds-load-time?", pc_3ds_load_time);
   make_function_symbol_from_c("pc-init-autosplitter-struct",
                               kmachine_extras::init_autosplit_struct);
 

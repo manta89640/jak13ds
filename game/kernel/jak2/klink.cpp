@@ -519,10 +519,10 @@ uint32_t link_control::jak2_work_v2() {
       }
       relocCounter--;
       if (relocCounter == 0) {
-        //        u32 clock_value = kernel.read_clock();
-        //        if(clock_value - startCycle > 150000) { // 0.5 milliseconds
-        //          return 0;
-        //        }
+        // the PS2 stopped here after 0.5 ms; this port when the frame's load budget is used up
+        if (!load_budget_left()) {
+          return 0;
+        }
         relocCounter = 0x400;
       }
     }
@@ -570,10 +570,9 @@ uint32_t link_control::jak2_work_v2() {
         if (*m_reloc_ptr == 0) {
           break;  // done
         }
-        //        u32 currentCycle = kernel.read_clock();
-        //        if(currentCycle - startCycle > 150000) {
-        //          return 0;
-        //        }
+        if (!load_budget_left()) {
+          return 0;
+        }
       }
       m_state = 3;
       m_segment_process = 0;

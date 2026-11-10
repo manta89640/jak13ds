@@ -863,7 +863,10 @@
 
     ; ;; LOAD LEVEL
     (if (-> *level* loading-level)
-        (load-continue (-> *level* loading-level))
+        (#if TARGET_3DS
+          (level-load-frame-step (-> *level* loading-level) #f)
+          (load-continue (-> *level* loading-level))
+          )
         )
 
     ; ;; Run blerc to modify foreground models
@@ -905,7 +908,10 @@
 
     ;; continue loading level
     (if (-> *level* loading-level)
-        (load-continue (-> *level* loading-level))
+        (#if TARGET_3DS
+          (level-load-frame-step (-> *level* loading-level) #f)
+          (load-continue (-> *level* loading-level))
+          )
         )
 
     ;; drawing - this runs foreground/background drawing.
@@ -913,9 +919,12 @@
       (*draw-hook*)
       )
 
-    ;; another level load
+    ;; another level load (3DS: the frame's work is done here: by the time the frame has left)
     (if (-> *level* loading-level)
-        (load-continue (-> *level* loading-level))
+        (#if TARGET_3DS
+          (level-load-frame-step (-> *level* loading-level) #t)
+          (load-continue (-> *level* loading-level))
+          )
         )
 
     ; (if *display-color-bars*
