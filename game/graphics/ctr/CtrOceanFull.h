@@ -14,7 +14,8 @@
  *    map texel at the interpolated lookup times the interpolated color, GS modulate), the mip
  *    levels 2x2 averages, blended between levels; the near ocean uses levels 0 and 1 (its TEX1).
  *    The PS2's mip alpha fade (the sky reflection fading out with the depth based mip level) is
- *    applied from depth in the draws. Made once per frame. Without the render texture the CPU makes the texels, every
+ *    applied from depth in the draws. Made once per frame (Jak II: every config.ini
+ *    ocean_texture_rate frames). Without the render texture the CPU makes the texels, every
  *    config.ini ocean_texture_rate frames (2 by default).
  *  - ocean-mid-and-far bucket (before the level, depth test off, depth written like the PC's
  *    flush_mid): the far ocean (GS packets, OceanMidAndFar::handle_ocean_far), then the mid ocean

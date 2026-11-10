@@ -28,8 +28,8 @@ constexpr float kOldTieLodPx = 4.f;
 constexpr float kOldLodDistance = 200.f;  // meters
 constexpr float kOldTieScale = 1.5f;
 constexpr float kSmallTieMeters = 100.f;  // the converter's limit of small ties (x the scale)
-// Jak 1's levers at their floor: shrub distances x this (not under ring 0), tie chunks drawn by
-// their vista copies from these distances (meters)
+// Jak 1's levers at their floor (Jak II's too): shrub distances x this (not under ring 0), tie
+// chunks drawn by their vista copies from these distances (meters)
 constexpr float kShrubFarK = 0.5f;
 constexpr float kTieFarMeters = 250.f;
 constexpr float kTieFar2Meters = 150.f;
@@ -101,8 +101,11 @@ struct Relief {
 
   // a range starts where the knob begins to cut (none -> the draw distance's equal). Jak 1: no
   // lod_distance (its coarse tfrag is the geomorph's far version) and no tie limit (a small tie
-  // beyond it has nothing in its place where a level has no vista tier), its own levers instead
-  void init(float px, float lod, float tie, float draw_distance, bool jak1 = false) {
+  // beyond it has nothing in its place where a level has no vista tier), its own levers instead.
+  // jak2: Jak 1's far levers after Jak II's own knobs (which don't move at its default config)
+  void init(float px, float lod, float tie, float draw_distance, bool jak1 = false,
+            bool jak2 = false) {
+    const bool far_levers = jak1 || jak2;
     base = {px, lod, tie};
     const float draw = draw_distance > 0 ? draw_distance : 2000.f;
     from[kTieLodPx] = px;
@@ -112,11 +115,11 @@ struct Relief {
     from[kTieDistance] = tie > 0 ? tie : draw / kSmallTieMeters;
     to[kTieDistance] = jak1 ? from[kTieDistance] : kOldTieScale;
     from[kShrubFar] = 1.f;
-    to[kShrubFar] = jak1 ? kShrubFarK : 1.f;
+    to[kShrubFar] = far_levers ? kShrubFarK : 1.f;
     from[kTieFar] = draw;
-    to[kTieFar] = jak1 ? std::min(draw, kTieFarMeters) : draw;
+    to[kTieFar] = far_levers ? std::min(draw, kTieFarMeters) : draw;
     from[kTieFar2] = to[kTieFar];
-    to[kTieFar2] = jak1 ? std::min(to[kTieFar], kTieFar2Meters) : to[kTieFar];
+    to[kTieFar2] = far_levers ? std::min(to[kTieFar], kTieFar2Meters) : to[kTieFar];
     n = 0;
     for (Knob k : kOrder) {
       const bool moves = k == kTieLodPx ? from[k] < to[k] : from[k] > to[k];

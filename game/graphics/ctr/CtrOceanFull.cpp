@@ -717,8 +717,10 @@ CtrOceanFull::CtrOceanFull()
   m_mid->set_jak2(m_jak2);
   m_near->set_jak2(m_jak2);
   make_wave_rt();
-  if (m_wave_rt >= 0) {
-    m_tex_rate = 1;  // (the PS2 draws it every frame)
+  if (m_wave_rt >= 0 && !m_jak2) {
+    // (the PS2 draws it every frame; Jak II keeps ocean_texture_rate: the render texture holds
+    // the last one between)
+    m_tex_rate = 1;
   }
   lg::info("[ctr] ocean full: wave texture by the {} every {} frame(s), near ocean alpha at least "
            "{:.2f}",
