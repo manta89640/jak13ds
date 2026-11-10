@@ -10,8 +10,9 @@ value shown here. `#` starts a comment.
 ```ini
 # Jak and Daxter (3DS) settings. Change a value after the "=", save, then restart the game.
 
-# normal = the usual settings | safe = older, well-tested settings (try it if the game hangs or
-# looks broken) | bench = measures the GPU at start (testing) | breakdown = GPU timing log (testing)
+# normal = the usual settings (far scenery a little simpler, for a steady 30 fps) | full = the
+# most detail (slower in busy places) | safe = older, well-tested settings (try it if the game hangs
+# or looks broken) | bench = measures the GPU at start (testing) | breakdown = GPU timing log (testing)
 preset = normal
 
 # game sound and music: on | off
@@ -38,7 +39,14 @@ ocean = full
 
 ## Presets
 
-- **normal**: everything that is finished and works on the New 3DS (the default).
+- **normal**: everything that is finished and works on the New 3DS (the default), with fixed
+  detail cuts for a steady 30 fps: shrub fade bands beyond 40 m at half their distance, tie objects
+  beyond 150 m drawn by their simpler vista copies (both games; `auto_detail = fixed`); Jak II
+  also half the city's civilians and civilian vehicles (`traffic_density = 0.5`), 70% of the
+  particles (`particle_density = 0.7`) and shadows at the PS2's distances (`shadows = full`).
+- **full**: the most detail, as the earlier builds drew at their best: `auto_detail = off`,
+  `traffic_density = 1`, `particle_density = 1`, `shadows = all` (every shadow at any distance).
+  Slower: Jak II's Haven City runs under 30 fps with it.
 - **safe**: the Oct 11 behaviour, every renderer and loading improvement made after it switched
   back off. Use it if a new build hangs or draws something wrong, and say so in the bug report.
   For the old particle limits too, also set `particles = reduced`.
