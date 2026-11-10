@@ -495,8 +495,7 @@ void CtrDirect::handle_scissor(u64 val) {
   if (!ctr_is_jak2()) {
     return;
   }
-  // frame pixels x0..x1, y0..y1 (inclusive) of Jak II's 512 x 416 frame; a vertex's frame pixel
-  // is (x + 1) * 256, (1 - y) * 208 (handle_xyz)
+  // inclusive frame pixels; a vertex's is (x + 1) * 256, (1 - y) * 208
   const u32 x0 = val & 0x7ff, x1 = (val >> 16) & 0x7ff;
   const u32 y0 = (val >> 32) & 0x7ff, y1 = (val >> 48) & 0x7ff;
   m_scissor = x0 > 0 || y0 > 0 || x1 < 511 || y1 < 415;
@@ -513,7 +512,7 @@ bool CtrDirect::scissor_tri(const BuildVert& a, const BuildVert& b, const BuildV
   if (in_scissor(a) && in_scissor(b) && in_scissor(c)) {
     return false;
   }
-  // Sutherland-Hodgman: the triangle cut by the four edges in turn (at most 7 vertices)
+  // Sutherland-Hodgman, at most 7 vertices
   BuildVert buf[2][8];
   buf[0][0] = a;
   buf[0][1] = b;
@@ -523,7 +522,6 @@ bool CtrDirect::scissor_tri(const BuildVert& a, const BuildVert& b, const BuildV
     const BuildVert* src = buf[cur];
     BuildVert* dst = buf[cur ^ 1];
     const float lim = edge == 0 ? m_sc_x0 : edge == 1 ? m_sc_x1 : edge == 2 ? m_sc_y0 : m_sc_y1;
-    // how far inside the edge a vertex is
     auto inside = [&](const BuildVert& v) {
       return edge == 0 ? v.x - lim : edge == 1 ? lim - v.x : edge == 2 ? v.y - lim : lim - v.y;
     };

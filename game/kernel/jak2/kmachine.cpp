@@ -735,8 +735,7 @@ void InitMachine_PCPort() {
     intern_from_c("*pc-3ds-ocean-full*")->value() =
         ocean_full ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
   }
-  // config.ini button_art (off by default, as Jak 1's): the font's PS2 pad symbols as the 3DS's
-  // buttons (game/graphics/ctr/CtrButtonArt.h); font-h.gc gives them the 3DS buttons' colors
+  // config.ini button_art, off by default as Jak 1's (game/graphics/ctr/CtrButtonArt.h)
   {
     bool button_art = false;
 #ifdef __3DS__

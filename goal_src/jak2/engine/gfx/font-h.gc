@@ -702,10 +702,7 @@
     )
   )
 
-;; og:preserve-this 3DS (config.ini button_art): the font's pad symbols are the 3DS buttons'
-;; letters (game/graphics/ctr/CtrButtonArt.h), in the New 3DS's colors with the game's own
-;; values: Y (pad-square) the triangle's green, X (pad-triangle) the cross's blue, B (pad-x)
-;; progress-old-yellow; A (pad-circle) stays red
+;; og:preserve-this 3DS button_art: pad-square is Y (green), pad-triangle X (blue), pad-x B (yellow)
 (#when TARGET_3DS
   (define-extern *pc-3ds-button-art* symbol)
   (when *pc-3ds-button-art*

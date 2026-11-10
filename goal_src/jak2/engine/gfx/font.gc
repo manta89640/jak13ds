@@ -146,8 +146,7 @@
 
 ;; ERROR: function was not converted to expressions. Cannot decompile.
 
-;; og:preserve-this every alpha of *font-work*'s color table and its shadow's is 128 (draw-string
-;; has restored them once: the table is loaded with two other values)
+;; og:preserve-this draw-string has left 128 in every alpha of *font-work*'s color table
 (define *font-alpha-at-rest* #f)
 
 (defun draw-string ((arg0 string) (arg1 dma-buffer) (arg2 font-context))
@@ -159,8 +158,7 @@
     (unless (logtest? (-> arg2 flags) (font-flags large pc-hack))
       (*! (-> arg2 scale) (get-debug-font-scale-factor))))
 
-  ;; og:preserve-this the color table's alpha is 128 between strings (it is restored below): a
-  ;; string of alpha 1.0 draws with the table as it is, without the 320 stores
+  ;; og:preserve-this a string of alpha 1.0 finds the table's alpha as it needs it
   (let* ((v1-1 (the int (* 128.0 (-> arg2 alpha))))
          (write-alpha (or (!= v1-1 128) (not *font-alpha-at-rest*)))
          )

@@ -47,7 +47,7 @@ constexpr u32 kChunks = kBlocks / kChunkBlocks;
 [[maybe_unused]] constexpr u32 kPrewarmLinearKeep = 6u << 20;
 // and from this many frames after the last boot page upload or relocation (each makes new chunk ids)
 constexpr int kPrewarmHoldFrames = 30;
-// Jak II's font.24lo after setup-font-texture (texture.gc: #x90000 words)
+// Jak II's font.24lo after setup-font-texture
 constexpr u32 kJak2LargeFont0 = 0x90000 / 64;
 
 // the blocks a 128 pixel wide PSMCT32 upload of `words` writes: whole chunks (the rows of a partial
@@ -175,7 +175,7 @@ CtrVram::CtrVram(bool sparse, bool prewarm) : m_sparse(sparse), m_prewarm_on(pre
       m_ct32_page_table[x + 64 * y] = psmct32_addr(x, y, 64);
     }
   }
-  // decode_impl's tables, from the same functions the per texel path uses
+  // decode_impl's tables: a texel's place in one page
   const struct {
     u32 w, h;
     u32 (*addr)(u32, u32, u32);
@@ -904,12 +904,10 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
     m_stats.relocates_skipped++;
     return;
   }
-  // Jak II: only the large font's first page (large-font-0-tmpl, setup-font-texture), the one
-  // every session draws; each large page is 512 KB of linear memory
+  // Jak II: only the large font's first page (512 KB each)
   if (m_prewarm_on || (m_jak2_remap && dest_block == kJak2LargeFont0 &&
                        dest_psm == (u32)GsTex0::PSM::PSMT4HL)) {
-    // the font, as font-set-tex0 gives it to the font templates (its CBP is not in the key);
-    // Jak II's th is log2(h - 1) + 1
+    // the font, as font-set-tex0 gives it to the font templates (its CBP is not in the key)
     auto lg2 = [](u32 x) { return (u64)(31 - __builtin_clz(std::max(x, 1u))) & 0xf; };
     const u64 th = m_jak2_remap ? lg2(std::max<u32>(info.h, 2) - 1) + 1 : lg2(info.h);
     const u64 tex0 = (u64)(dest_block & 0x3fff) | (u64)(info.width & 0x3f) << 14 |
@@ -1049,15 +1047,8 @@ u32 CtrVram::clut_color(u32 cbp, u32 cpsm, u32 entry) const {
 }
 
 namespace {
-/*!
- * clut(cbp, cpsm, index) -> RGBA8: a template (inlined once per CLUT entry), not a std::function.
- * A texel is at tbp + page * 8192 + its place in the page (View::page_tab, the address functions
- * of texture_conversion.h for one page), the page from x, y and the buffer width as those
- * functions count it. A row's texels of one page are read from the page's chunk directly when the
- * page lies in one chunk, else one by one through the view (also past the end of VRAM, where the
- * GS wraps around).
- * rows > 0: only that many rows are read (a raw image's), the last one repeated below them.
- */
+// clut(cbp, cpsm, index) -> RGBA8. A texel is at tbp + page * 8192 + View::page_tab's entry;
+// rows > 0: only that many rows are read, the last one repeated below them
 template <typename Clut>
 bool decode_impl(const CtrVram::View& vram,
                  u64 tex0,
@@ -1079,7 +1070,7 @@ bool decode_impl(const CtrVram::View& vram,
   u32 csa = (tex0 >> 56) & 0x1f;
   out->resize(w * h);
   const auto psm = t.psm();
-  // the storage layout: page size (texels, as shifts), pages per buffer row, the page table
+  // page size (texels, as shifts) and pages per buffer row, as the format's address function
   u32 pw_log2, ph_log2, ppr;
   int tab_id;
   switch (psm) {
@@ -1129,7 +1120,6 @@ bool decode_impl(const CtrVram::View& vram,
       }
     }
   }
-  // PSMCT32's layout: the index of 8H / 4HH / 4HL in the word, or the bits PSMCT32 / 24 keep
   const bool indexed = psm == GsTex0::PSM::PSMT8H || psm == GsTex0::PSM::PSMT4HH ||
                        psm == GsTex0::PSM::PSMT4HL;
   const u32 idx_shift = psm == GsTex0::PSM::PSMT4HH ? 28 : 24;
@@ -1140,7 +1130,7 @@ bool decode_impl(const CtrVram::View& vram,
   const u32 pw = 1u << pw_log2;
   const u32 ph_mask = (1u << ph_log2) - 1;
   const int read_h = rows > 0 && rows < h ? rows : h;
-  u32 lo = UINT32_MAX, hi = 0;  // the bytes read from whole pages (all inside VRAM)
+  u32 lo = UINT32_MAX, hi = 0;
   for (int y = 0; y < read_h; y++) {
     const u16* const row_tab = tab + ((u32)y & ph_mask) * pw;
     const u32 row_page = ((u32)y >> ph_log2) * ppr;
@@ -1152,7 +1142,6 @@ bool decode_impl(const CtrVram::View& vram,
       const bool in_chunk = base <= kVramBytes - 8192u && (base & 16383u) <= 8192u;
       const bool top = in_chunk && vram.is_top[chunk];
       if (in_chunk && tab_id == 0) {
-        // PSMCT32's layout: a top bytes only chunk holds byte 3 of each word
         const u8* const p = vram.chunks[chunk] + (top ? (base & 16383u) >> 2 : (base & 16383u));
         u32 omin = 8192, omax = 0;
         for (u32 i = 0; i < n; i++) {
@@ -1203,8 +1192,7 @@ bool decode_impl(const CtrVram::View& vram,
         hi = std::max(hi, base + omax);
         continue;
       }
-      // texel by texel: the page crosses a chunk boundary or the end of VRAM, or a format that
-      // isn't PSMCT32's layout reads a top bytes only chunk
+      // the page crosses a chunk boundary or the end of VRAM, or reads a top bytes only chunk
       for (u32 i = 0; i < n; i++) {
         const u32 off = row_tab[i];
         u32 a = base + (tab_id == 3 ? off >> 1 : off);
@@ -1457,7 +1445,6 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
       m_failed.erase(failed);
     }
   }
-  // the lazy chunks the decode reads (texture_block_span covers every page it can address)
   materialize(t.tbp0(), t.tbp0() + texture_block_span(t));
   materialize(t.cbp(), t.cbp() + 4);
   std::vector<u32> data;

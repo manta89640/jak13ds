@@ -269,8 +269,7 @@ bool patch_font(u32* rgba, int w, int h) {
   return true;
 }
 
-// Jak II: the cell of character c (font-data.gc: entry c - 6 of 10 per row, cells of 0.09375 x
-// 0.03125 of the page)
+// Jak II: font-data.gc's entry c - 6, 10 cells of 0.09375 x 0.03125 per row
 void cell_of_jak2(int c, int w, int h, int* x0, int* y0, int* x1, int* y1) {
   const int i = c - 6, col = i % 10, row = i / 10;
   *x0 = (int)std::floor(col * 0.09375f * w);
@@ -279,12 +278,8 @@ void cell_of_jak2(int c, int w, int h, int* x0, int* y0, int* x1, int* y1) {
   *y1 = std::min(h, (int)std::floor((row + 1) * 0.03125f * h));
 }
 
-/*!
- * Jak II: the font's capitals `letters` side by side into the cell of character dst, as tall as
- * what the cell held (its texels of alpha 0x40 and more) and centered on it; the rest of the cell
- * cleared. Each texel is the average of 4 x 4 samples of the letters' texels. False (nothing
- * changed): the cell or a letter's is empty.
- */
+// Jak II: the font's capitals into the cell of character dst, as tall as what it held and
+// centered on it. False (nothing changed): the cell or a letter's is empty
 bool stamp_letters(u32* rgba, int w, int h, const char* letters, int dst) {
   int dx0, dy0, dx1, dy1;
   cell_of_jak2(dst, w, h, &dx0, &dy0, &dx1, &dy1);
@@ -327,7 +322,6 @@ bool stamp_letters(u32* rgba, int w, int h, const char* letters, int dst) {
           const float fx = px + (sx + 0.5f) / kSs, fy = y + (sy + 0.5f) / kSs;
           for (int i = 0; i < n; i++) {
             const Letter& l = ls[i];
-            // the letter's texel under the sample (a texel around its ink: the soft edge)
             const int u = (int)std::floor(l.ink.x0 + (fx - l.x) / k);
             const int v = (int)std::floor(l.ink.y0 + (fy - box.y0) / k);
             if (u < l.cx0 || u >= l.cx1 || v < l.cy0 || v >= l.cy1 || u < (int)l.ink.x0 - 1 ||
@@ -359,8 +353,7 @@ bool stamp_letters(u32* rgba, int w, int h, const char* letters, int dst) {
   return true;
 }
 
-// Jak II: by position (platform/3ds/port/ctr_port.c map_buttons): cross B, square Y, triangle X,
-// circle A; L1 L, R1 R, L2 ZL, R2 ZR
+// Jak II, by position (platform/3ds/port/ctr_port.c map_buttons)
 bool patch_font_jak2(u32* rgba, int w, int h) {
   if (w < 64 || h < 64) {
     return false;
@@ -440,7 +433,7 @@ u32 generation() {
 namespace {
 // the font atlases with the PS2 button glyphs: ascii.12lo / ascii.24lo, which
 // setup-font-texture! (texture.gc) moves to #xe0000 / #xe6000 (words) as PSMT4HL
-// Jak II: font.24lo / font.12lo at #x90000 / #xc2000 (setup-font-texture)
+// Jak II: font.24lo / font.12lo
 bool is_font(const GsTex0& t) {
   if (t.psm() != GsTex0::PSM::PSMT4HL) {
     return false;

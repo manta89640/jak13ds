@@ -160,18 +160,15 @@ class CtrDirect {
   bool m_quad_adv[4] = {false, false, false, false};
   // a font glyph whose atlas the GPU has no texture for: left out (untextured it is a solid box)
   bool m_skip_prims = false;
-  // Jak II, SCISSOR_1 smaller than the frame (the menu's list boxes): the rectangle in the
-  // vertices' coordinates. Triangles and quads across its edge are cut to it, the cut vertices'
-  // texture coordinates and colors interpolated; the ones outside are left out
+  // Jak II, SCISSOR_1 smaller than the frame: the rectangle primitives are cut to
   bool m_scissor = false;
   float m_sc_x0 = -1.f, m_sc_x1 = 1.f, m_sc_y0 = -1.f, m_sc_y1 = 1.f;
   void handle_scissor(u64 val);
   bool in_scissor(const BuildVert& v) const {
     return v.x >= m_sc_x0 && v.x <= m_sc_x1 && v.y >= m_sc_y0 && v.y <= m_sc_y1;
   }
-  // true: the scissor took it (cut and pushed, or left out); false: to be drawn whole
+  // true: cut and pushed, or left out; false: to be drawn whole
   bool scissor_tri(const BuildVert& a, const BuildVert& b, const BuildVert& c);
-  // a quad as ctr_gpu_draw_quads takes it: triangles (p0 p1 p3) and (p3 p1 p2)
   bool scissor_quad(const BuildVert& p0, const BuildVert& p1, const BuildVert& p2,
                     const BuildVert& p3);
 

@@ -110,8 +110,6 @@ class CtrVram {
    * Returns nullptr if the format is not supported.
    */
   const CtrTexture* get_texture(u64 tex0);
-  /*! Textures still queued for prewarm() */
-  bool prewarm_pending() const { return m_prewarm_at < m_prewarm.size(); }
 
   /*!
    * Decode a texture to RGBA8 (row-major, top row first) without creating a GPU texture.
@@ -200,12 +198,11 @@ class CtrVram {
   std::vector<u64> m_page_keys;  // prewarm_page's
   size_t m_page_at = 0;
   double m_prewarm_ms = 0;
-  bool m_prewarming = false;  // prewarm() is decoding (the font page's log line)
+  bool m_prewarming = false;
   void write_rows(const u8* src, u32 dest_block, u32 words);
   void write_ct32(const u8* data, u32 dest_block, u32 width, u32 height);
   bool ct32_same(const u8* data, u32 dest_block, u32 width, u32 height) const;  // (AI-assisted)
-  // upload_ct32 images by their first block: a texture read there has the image's rows only (the
-  // rows below them are other data, which changes under it)
+  // upload_ct32's images: a texture over one reads the image's rows only
   struct RawImage {
     u32 dest_block, end_block, width, height;
   };
@@ -285,8 +282,7 @@ class CtrVram {
   struct View {
     const u8* const* chunks;
     const u8* is_top;
-    // a texel's place in its 8192 byte page, by x + page width * y: bytes for PSMCT32 (and
-    // 8H / 4HH / 4HL), PSMCT16 and PSMT8, half bytes for PSMT4
+    // a texel's place in its page by x + page width * y, for PSMCT32, 16, T8, T4 (half bytes)
     const u16* const* page_tab;
     u32 rd32(u32 a) const {
       const u32 c = a >> 14;

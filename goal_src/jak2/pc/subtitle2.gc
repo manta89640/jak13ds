@@ -531,8 +531,7 @@
   (dotimes (i PC_SUBTITLE_QUEUE_MAX_LINES)
     (when (and (-> line-queue elts i line) (subtitle-format self (-> line-queue elts i line)))
 
-      ;; og:preserve-this a height is only used to place the subtitle after it: it is measured (a
-      ;; second word wrap of the text) when there is one, not every frame. Below 0: not measured.
+      ;; og:preserve-this a height only places the subtitle after it: measured when there is one
       (cond
         ((zero? lines-done)
          (set! this-height -1.0)
@@ -540,7 +539,7 @@
          )
         (else
           (when (< last-height 0.0)
-            ;; the first subtitle's height, as it would have been measured when it was reached
+            ;; the first subtitle's height, with the font's y it had
             (let ((saved-y (-> self font origin y)))
               (set! (-> self font origin y) last-y)
               (subtitle-format self (-> line-queue elts last-i line))

@@ -19,13 +19,9 @@
  * Colors as on the New 3DS (small model): A red, B yellow, X blue, Y green, white letters.
  * Textures keep the GS alpha range (0x80 = opaque).
  *
- * Jak II (set_jak2): its text draws a button as the disc '<', the symbol, a highlight '>' and a
- * shade '[', and the mission icons use the disc, highlight and shade too, so those stay. In the
- * two western font pages (font.24lo, font.12lo) each symbol's cell gets the font's own capital of
- * the 3DS button at that place (cross B, square Y, triangle X, circle A), as tall as the symbol was
- * and centered where it was, and the shoulder buttons' name cells (L1 R1 L2 R2) get L, R, ZL, ZR
- * the same way. The pages stay gray (no more texture memory): the letters' colors are the game's
- * font colors for the symbols, which font-h.gc sets to the 3DS buttons' (TARGET_3DS).
+ * Jak II (set_jak2): the symbols' cells of font.24lo / font.12lo get the font's own capitals
+ * (B, Y, X, A; L, R, ZL, ZR for the shoulder names); the disc, highlight and shade stay (the
+ * mission icons use them). The pages stay gray; font-h.gc sets the symbols' font colors.
  */
 
 #include "common/common_types.h"
@@ -39,7 +35,7 @@ enum class Ps2Button : int { CROSS = 0, SQUARE = 1, TRIANGLE = 2, CIRCLE = 3, CO
 //! config.ini button_art (default on): off draws the PS2 symbols.
 void set_enabled(bool on);
 bool enabled();
-//! The game is Jak II: its fonts' addresses and layout (Jak II's kmachine).
+//! The game is Jak II (its kmachine).
 void set_jak2(bool jak2);
 
 //! The game thread: the texture at VRAM block tbp0 (format psm) shows this PS2 button.
