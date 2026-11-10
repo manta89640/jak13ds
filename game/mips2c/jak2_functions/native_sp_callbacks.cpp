@@ -451,6 +451,7 @@ FnSym s_track_root("sparticle-track-root");
 FnSym s_track_root_prim("sparticle-track-root-prim");
 FnSym s_relaunch_3d("sp-relaunch-particle-3d");
 FnSym s_kill("sp-kill-particle");
+FnSym s_orbiter("sp-orbiter");
 // run inline by the block update
 FnSym s_free("sp-free-particle");
 FnSym s_aux_list("add-to-sprite-aux-list");
@@ -517,6 +518,10 @@ void sp_run_particle_fn(u8 cls, u32 fn, const u64 a[8], const NativeArgs& caller
     return;
   }
   native_call_goal(fn, a, caller);
+}
+
+bool sp_orbiter_own_data() {
+  return s_orbiter.unchanged();
 }
 
 bool sp_relaunch_own_data(bool is_3d) {

@@ -56,6 +56,8 @@ void sp_set_block_range(u32 lo, u32 hi);
 u8 sp_particle_fn_class(u32 fn);
 void sp_run_particle_fn(u8 cls, u32 fn, const u64 a[8], const NativeArgs& caller);
 bool sp_relaunch_own_data(bool is_3d);
+//! sp-orbiter is GOAL's: beside its own particle it only reads its centre's sprite
+bool sp_orbiter_own_data();
 void sp_aux_list_add(u8 cls,
                      u64 system,
                      u32 info,

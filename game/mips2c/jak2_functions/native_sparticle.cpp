@@ -486,6 +486,7 @@ bool relaunch_no_orbiter(u32 launcher) {
 void scan_block(const ParticleMem& m,
                 bool is_3d,
                 u32 m_info,
+                u32 m_vec,
                 u32 count,
                 u32 clocks,
                 BlockScan& s) {
@@ -494,6 +495,7 @@ void scan_block(const ParticleMem& m,
   s.plain = !off && sp_in_place_ready();
   s.why = s.plain ? "" : "off";
   const bool relaunch_ok = s.plain && sp_relaunch_own_data(is_3d);
+  const bool orbiter_ok = s.plain && !is_3d && sp_orbiter_own_data();
   // the classes of the last two functions seen
   u32 fn_a = 0, fn_b = 0;
   u8 cls_a = SP_FN_NONE, cls_b = SP_FN_NONE;
@@ -528,13 +530,18 @@ void scan_block(const ParticleMem& m,
       s.why = "callback";
       continue;
     }
-    // sp-orbiter reads another particle's sprite
-    if (!is_3d && (m.u(info + 104) & 64)) {
-      s.plain = false;
-      s.why = "orbiter";
-      continue;
-    }
     const u32 launcher = m.u(info + 120);
+    // sp-orbiter reads its centre's sprite: the same bytes in place unless that sprite is this
+    // block's and already updated (or the particle's own)
+    if (!is_3d && (m.u(info + 104) & 64)) {
+      const u32 centre = m.u(info + 108);
+      if (!orbiter_ok || launcher != 0 ||
+          (centre + kVecSize > m_vec && centre < m_vec + kVecSize * (i + 1))) {
+        s.plain = false;
+        s.why = "orbiter";
+        continue;
+      }
+    }
     if (launcher == 0) {
       continue;
     }
@@ -682,7 +689,7 @@ void block_2d_in_place(const ParticleMem& m,
       m.set_f(vec + 40, cz);
       m.set_f(vec + 44, cw);
 
-      // not reached in a plain block (the scan rules it out); as the block function has it
+      // in a plain block: an orbiter whose centre the scan found untouched
       if (m.u(info + 104) & 64) {
         const u64 a[8] = {system, info, vec, index, 0, 0, 0, 0};
         native_call_goal(m.u(orbiter_sym), a, args);
@@ -920,7 +927,7 @@ BlockPath process_block(const NativeArgs& args,
   const u32 s_info = spad + kSpadBlock;
   const u32 s_vec = s_info + kInfoSize * count;
   BlockScan s;
-  scan_block(m, is_3d, m_info, count, spad, s);
+  scan_block(m, is_3d, m_info, m_vec, count, spad, s);
   g_block_stats.particles += s.used;
   if (s.used == 0) {
     return BLOCK_EMPTY;
