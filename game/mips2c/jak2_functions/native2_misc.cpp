@@ -499,6 +499,25 @@ u64 mem_copy_impl(const NativeArgs& args) {
 }
 
 const NativeImpl mem_copy = MIPS2C_NATIVE_IMPL(mem_copy_impl, 0, 0);
+
+/*!
+ * (pc-generic-merc-do-chain chain dma-buffer): generic-merc-do-chain. An empty chain (first = 0)
+ * only leaves its address in the generic work (the scratchpad's word 7456) and returns #f, as the
+ * mips2c function's first lines; any other chain is the call.
+ */
+u64 pc_generic_merc_do_chain_impl(const NativeArgs& args) {
+  static const u32 spad_sym = sym_value_addr("*fake-scratchpad-data*");
+  static const u32 chain_fn_sym = sym_value_addr("generic-merc-do-chain");
+  const u32 chain = (u32)args.a[0];
+  if (gload<u32>(chain) == 0) {
+    gstore<u32>(gload<u32>(spad_sym) + 7456, chain);
+    return args.st;
+  }
+  return native_call_goal(gload<u32>(chain_fn_sym), args.a, args);
+}
+
+const NativeImpl pc_generic_merc_do_chain =
+    MIPS2C_NATIVE_IMPL_GOAL(pc_generic_merc_do_chain_impl, NATIVE_CALLS_GOAL);
 }  // namespace Mips2C::jak2::native2
 
 namespace Mips2C::jak2::mem_copy {

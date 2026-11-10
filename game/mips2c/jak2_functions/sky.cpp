@@ -892,6 +892,8 @@ void link() {
   cache.math_camera = intern_from_c("*math-camera*").c();
   cache.draw_large_polygon = intern_from_c("draw-large-polygon").c();
   gLinkedFunctionTable.reg("render-sky-quad", execute, 1024, &native2::render_sky_quad);
+  gLinkedFunctionTable.reg("render-sky-quads", native2::render_sky_quads.as_exec, 64,
+                           &native2::render_sky_quads);
 }
 
 } // namespace render_sky_quad

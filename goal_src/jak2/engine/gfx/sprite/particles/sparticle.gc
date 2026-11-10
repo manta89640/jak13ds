@@ -301,8 +301,19 @@
 ;; ERROR: function was not converted to expressions. Cannot decompile.
 ;; unused memcpy function
 
+;; og:preserve-this 3DS: sp-process-block in C++ (game/mips2c/jak2_functions/native_sparticle.cpp):
+;; the same update on the scratchpad, without the copies of free particles and of the adgifs.
+;; #f when it is off (debugging: mips2c_native_off): the GOAL code runs.
+(#when TARGET_3DS
+  (def-mips2c pc-sp-process-block (function sparticle-system int int symbol symbol)))
+
 (defun sp-process-block ((arg0 sparticle-system) (arg1 int) (arg2 sprite-array-2d) (arg3 int))
   (local-vars (sv-16 int) (sv-32 int) (sv-48 int) (sv-64 int))
+  (#when TARGET_3DS
+    (if (pc-sp-process-block arg0 arg1 arg3 (paused?))
+        (return 0)
+        )
+    )
   (let ((s3-0 208)
         (s2-0 (* 144 arg3))
         (s5-0 (* 48 arg3))

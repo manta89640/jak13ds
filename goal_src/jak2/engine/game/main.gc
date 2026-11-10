@@ -863,26 +863,37 @@
 
     ; ;; LOAD LEVEL
     (if (-> *level* loading-level)
-        (load-continue (-> *level* loading-level))
+        (#if TARGET_3DS
+          (level-load-frame-step (-> *level* loading-level) #f)
+          (load-continue (-> *level* loading-level))
+          )
         )
 
+    ;; og:preserve-this the with-pc-profiler blocks of this function: the frame's phases for kperf
     ; ;; Run blerc to modify foreground models
+    (with-pc-profiler "dl-blerc"
     (with-profiler 'merc *profile-merc-color*
       (blerc-execute)
       (blerc-init)
       )
+    )
 
     ; ;; Run other merc effects that modify vertices
+    (with-pc-profiler "dl-texscroll-ripple-region"
     (texscroll-execute)
     (ripple-execute)
     (region-execute)
+    )
 
     ;; final call to update joints before drawing.
+    (with-pc-profiler "dl-joints"
     (with-profiler 'joints *profile-joints-color*
       (execute-math-engine)
       )
+    )
 
     ;; execute the debug hook before doing the big updates
+    (with-pc-profiler "dl-debug-cheats"
     (with-profiler 'debug *profile-debug-color*
       (let* ((s5-5 *debug-hook*)
              (t9-12 (car s5-5)))
@@ -894,28 +905,41 @@
         )
       (main-cheats)
       )
+    )
 
     ;; using the position of the in-game camera, update visiblity and matrices for rendering.
+    (with-pc-profiler "dl-camera"
     (with-profiler 'camera *profile-camera-color*
       (update-camera)
       )
+    )
 
     ;; map texture stuff
+    (with-pc-profiler "dl-bigmap"
     (update *bigmap*)
+    )
 
     ;; continue loading level
     (if (-> *level* loading-level)
-        (load-continue (-> *level* loading-level))
+        (#if TARGET_3DS
+          (level-load-frame-step (-> *level* loading-level) #f)
+          (load-continue (-> *level* loading-level))
+          )
         )
 
     ;; drawing - this runs foreground/background drawing.
+    (with-pc-profiler "dl-draw-hook"
     (with-profiler 'draw-hook *profile-draw-hook-color*
       (*draw-hook*)
       )
+    )
 
-    ;; another level load
+    ;; another level load (3DS: the frame's work is done here: by the time the frame has left)
     (if (-> *level* loading-level)
-        (load-continue (-> *level* loading-level))
+        (#if TARGET_3DS
+          (level-load-frame-step (-> *level* loading-level) #t)
+          (load-continue (-> *level* loading-level))
+          )
         )
 
     ; (if *display-color-bars*
@@ -923,6 +947,7 @@
     ;     )
 
     ;; draw and update menus
+    (with-pc-profiler "dl-menu-text"
     (with-profiler 'menu-hook *profile-menu-hook-color*
       ;; og:preserve-this Let the popup menu code handle inputs instead of the code written for the original debug menu
       (when (not *popup-menu-open*)
@@ -933,6 +958,7 @@
 
     ;; load text files as needed from the menu update
     (load-level-text-files -1)
+    )
 
     ;; post-processing filter drawing
     (if (-> *screen-filter* draw?)
@@ -968,7 +994,9 @@
       )
 
     ;; generate DMA data for doing the main blit
+    (with-pc-profiler "dl-blit"
     (blit-displays)
+    )
 
     ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
     ;; END of normal frame
@@ -1000,7 +1028,9 @@
       )
 
     ;; debug drawing
+    (with-pc-profiler "dl-end-display"
     (end-display arg0)
+    )
     ;; og:preserve-this
     ;; Added to push text below the imgui bar if it's currently open
     (when (pc-is-imgui-visible?)
@@ -1035,11 +1065,13 @@
       )
 
     ;; update particles (we're racing the DMA transfer again, do this asap)
+    (with-pc-profiler "dl-particles"
     (let ((gp-1 (-> pp clock)))
       (set! (-> pp clock) (-> *display* part-clock))
       (process-particles)
       (set! (-> pp clock) gp-1)
       )
+    )
 
     ;; set up VU0's VIF for collision code run by actors
     ; (dma-send
@@ -1049,16 +1081,22 @@
     ;   )
 
     ;; send sound commands to IOP
+    (with-pc-profiler "dl-sound"
     (swap-sound-buffers (ear-trans 0) (ear-trans 1) (camera-pos) (camera-angle))
 
     ;; advance streaming animation
     (str-play-kick)
+    )
 
     ;; handle spawning/despawning as needed.
+    (with-pc-profiler "dl-level-update"
     (level-update *level*)
+    )
 
     ;; do some memory card operations, check auto-save
+    (with-pc-profiler "dl-mc-run"
     (mc-run)
+    )
     ;; for the same reasons as jak 1, we do not run this.
     ; (auto-save-check)
     (none)
@@ -1122,7 +1160,9 @@
         (suspend)
         )
       (#when PC_PORT
+        (with-pc-profiler "dl-pc-settings"
         (update *pc-settings*)
+        )
         (if (and *display-sha* *debug-segment* (not-screen-shot?))
             (draw-build-revision)))
       )

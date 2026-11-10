@@ -558,6 +558,14 @@ into 7 sections, which might explain the weird sizes in the center.
   (none)
   )
 
+;; og:preserve-this 3DS: the load budget (game/kernel/jak2/kmachine.cpp). Inside begin / end the
+;; linker's fixups and the login stop when it is used up and go on in the next call, as on the PS2.
+(#when TARGET_3DS
+  (define-extern pc-3ds-load-begin (function symbol symbol))
+  (define-extern pc-3ds-load-end (function none))
+  (define-extern pc-3ds-load-time? (function symbol))
+  (define-extern level-load-frame-step (function level symbol none)))
+
 ;; borrowing system:
 ;; the "borrow" system allows a "borrower" level to use the heap of another level.
 ;; for an unknown reason, the borrow system doesn't use the double buffering of normal.
@@ -719,6 +727,32 @@ into 7 sections, which might explain the weird sizes in the center.
     )
   (label cfg-39)
   this
+  )
+
+(#when TARGET_3DS
+  (defun level-load-frame-step ((lev level) (last symbol))
+    "A load-continue the display loop makes every frame, with a load budget while lev loads.
+     last: the frame's last one, which takes the time the frame has left."
+    (cond
+      ((or (-> lev linking)
+           (= (-> lev status) 'loading)
+           (= (-> lev status) 'loading-bt)
+           (= (-> lev status) 'login)
+           (-> *texture-relocate-later* memcpy)
+           )
+       (let ((begun (pc-3ds-load-begin last)))
+         (load-continue lev)
+         (if begun
+             (pc-3ds-load-end)
+             )
+         )
+       )
+      (else
+        (load-continue lev)
+        )
+      )
+    (none)
+    )
   )
 
 (defmethod load-begin ((this level))
@@ -1117,17 +1151,27 @@ into 7 sections, which might explain the weird sizes in the center.
     (sv-16 int)
     (proto prototype-bucket-tie)
     (geom-idx int)
+    (units int)
     )
 
   ;; in the pc port, lets just do all the login all at once for now.
 
   (set! *level-index* (-> lev index))
   0
+  (set! units 0)
   (let ((drawable-trees (-> lev bsp drawable-trees)))
     ;; periodically, the code would jump back up here, see if it's been too long.
     ;; if so, it would return early.
     ;(.mfc0 start-time Count)
     (label cfg-1)
+    ;; og:preserve-this 3DS: the PS2's time limit below, by the load budget (at least one unit per call)
+    (#when TARGET_3DS
+      (when (and (nonzero? units) (not (pc-3ds-load-time?)))
+        (set! lev lev)
+        (goto cfg-113)
+        )
+      (+! units 1)
+      )
     ;(.mfc0 current-time Count)
     ;(let ((v1-6 (- current-time start-time)))
     ;  (when (< #x186a0 v1-6)
@@ -1207,7 +1251,9 @@ into 7 sections, which might explain the weird sizes in the center.
              (cond
                ((< login-state-pos (-> (the-as drawable-inline-array-tfrag current-array) length))
                 (dotimes (s2-2 200)
-                  (when (< login-state-pos (-> (the-as drawable-inline-array-tfrag current-array) length))
+                  (when (and (< login-state-pos (-> (the-as drawable-inline-array-tfrag current-array) length))
+                             (#if TARGET_3DS (or (nonzero? (logand s2-2 15)) (pc-3ds-load-time?)) #t)
+                             )
                     (login (-> (the-as drawable-inline-array-tfrag current-array) data (the-as uint login-state-pos)))
                     (set! login-state-pos (the-as int (+ (the-as uint login-state-pos) 1)))
                     )
@@ -2707,7 +2753,10 @@ into 7 sections, which might explain the weird sizes in the center.
   (update *art-control* #t)
   (clear-rec *art-control*)
   (dotimes (s5-0 LEVEL_MAX)
-    (load-continue (-> this level s5-0))
+    (#if TARGET_3DS
+      (level-load-frame-step (-> this level s5-0) #f)
+      (load-continue (-> this level s5-0))
+      )
     )
   (dotimes (s5-1 (-> this length))
     (let ((s4-0 (-> this level s5-1)))

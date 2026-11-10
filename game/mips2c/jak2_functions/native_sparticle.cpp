@@ -16,6 +16,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+
+#include "common/log/log.h"
 
 #include "game/mips2c/jak2_functions/native_functions.h"
 
@@ -442,6 +445,127 @@ u64 sp_process_block_3d_impl(const NativeArgs& args) {
   return index;
 }
 
+// sparticle-system (a basic): is-3d 24, cpuinfo-table 36, vecdata-table 40, adgifdata-table 44
+constexpr u32 kSysIs3d = 24, kSysCpuinfo = 36, kSysVecdata = 40, kSysAdgif = 44;
+constexpr u32 kInfoSize = 144, kVecSize = 48, kAdgifSize = 80, kInfoValid = 128;
+constexpr u32 kSpadBlock = 208;
+// sp-process-particle-system's block: what fits in the scratchpad's 16 kB after the clock table
+constexpr u32 kMaxBlock = (0x4000 - kSpadBlock) / (kInfoSize + kVecSize + kAdgifSize);
+
+inline void copy_bytes(u32 dst, u32 src, u32 size) {
+  MIPS2C_NATIVE_LOG_STORE(dst, size);
+  memcpy(NATIVE_ALIGNED4(g_ee_main_mem + dst), NATIVE_ALIGNED4(g_ee_main_mem + src), size);
+}
+
+// host check (OPENGOAL_MIPS2C_VERIFY=1) of what pc-sp-process-block leaves out
+int g_block_verify = -1;
+u64 g_block_verify_blocks = 0, g_block_verify_free = 0, g_block_verify_differ = 0;
+
+bool block_verify_on() {
+  if (g_block_verify < 0) {
+    const char* v = getenv("OPENGOAL_MIPS2C_VERIFY");
+    g_block_verify = (v && v[0] && v[0] != '0') ? 1 : 0;
+    if (g_block_verify) {
+      atexit([] {
+        lg::info("sp-process-block verify: {} blocks, {} free particles compared, {} differ",
+                 g_block_verify_blocks, g_block_verify_free, g_block_verify_differ);
+      });
+    }
+  }
+  return g_block_verify == 1;
+}
+
+/*!
+ * (pc-sp-process-block system index count paused?) -> #t: sp-process-block (sparticle.gc) for the
+ * count particles from index: they are updated in copies on the scratchpad (the cpuinfos at 208,
+ * the sprites after them) and copied back. Left out: the copies of free particles, both ways (the
+ * copy gets its in-use byte cleared: the update skips it, callbacks are only given their own
+ * particle, and nothing launches into the tables meanwhile: *sp-launcher-lock*), and the adgifs'
+ * copy (no function is given its address). #f: the GOAL code runs.
+ * Verify mode runs sp-process-block's own steps (the block functions through their symbols, so
+ * they are compared with mips2c as before) and checks that the copy back of every free particle
+ * would write the bytes that are there.
+ */
+u64 pc_sp_process_block_impl(const NativeArgs& args) {
+  static const u32 spad_sym = sym_val_addr("*fake-scratchpad-data*");
+  static const bool off = native_turned_off("sp-process-block-2d") ||
+                          native_turned_off("sp-process-block-3d") ||
+                          native_turned_off("pc-sp-process-block");
+  const u32 sys = (u32)args.a[0];
+  const u32 index = (u32)args.a[1];
+  const u32 count = (u32)args.a[2];
+  if (off || count == 0 || count > kMaxBlock) {
+    return args.st;
+  }
+  const bool is_3d = gload<u32>(sys + kSysIs3d) != (u32)args.st;
+  const u32 m_info = gload<u32>(sys + kSysCpuinfo) + kInfoSize * index;
+  const u32 m_vec = gload<u32>(sys + kSysVecdata) + kVecSize * index;
+  const u32 s_info = gload<u32>(spad_sym) + kSpadBlock;
+  const u32 s_vec = s_info + kInfoSize * count;
+  const u64 a[8] = {args.a[0], s_info, s_vec, args.a[1], args.a[2], args.a[3], 0, 0};
+  u8 valid[kMaxBlock];
+  for (u32 i = 0; i < count; i++) {
+    valid[i] = g_ee_main_mem[m_info + kInfoSize * i + kInfoValid];
+  }
+
+  if (block_verify_on()) {
+    static const u32 fn_2d = sym_val_addr("sp-process-block-2d");
+    static const u32 fn_3d = sym_val_addr("sp-process-block-3d");
+    copy_bytes(s_info, m_info, kInfoSize * count);
+    copy_bytes(s_vec, m_vec, kVecSize * count);
+    copy_bytes(s_vec + kVecSize * count, gload<u32>(sys + kSysAdgif) + kAdgifSize * index,
+               kAdgifSize * count);
+    native_call_goal(gload<u32>(is_3d ? fn_3d : fn_2d), a, args);
+    g_block_verify_blocks++;
+    for (u32 i = 0; i < count; i++) {
+      if (valid[i]) {
+        continue;
+      }
+      g_block_verify_free++;
+      if (memcmp(g_ee_main_mem + s_info + kInfoSize * i, g_ee_main_mem + m_info + kInfoSize * i,
+                 kInfoSize) ||
+          memcmp(g_ee_main_mem + s_vec + kVecSize * i, g_ee_main_mem + m_vec + kVecSize * i,
+                 kVecSize)) {
+        if (g_block_verify_differ++ < 8) {
+          lg::error("sp-process-block verify MISMATCH: free particle {} of a {} block changed",
+                    index + i, is_3d ? "3d" : "2d");
+        }
+      }
+    }
+    copy_bytes(m_info, s_info, kInfoSize * count);
+    copy_bytes(m_vec, s_vec, kVecSize * count);
+    return goal_true(args.st);
+  }
+
+  u32 used = 0;
+  for (u32 i = 0; i < count; i++) {
+    if (valid[i]) {
+      copy_bytes(s_info + kInfoSize * i, m_info + kInfoSize * i, kInfoSize);
+      copy_bytes(s_vec + kVecSize * i, m_vec + kVecSize * i, kVecSize);
+      used++;
+    } else {
+      MIPS2C_NATIVE_LOG_STORE(s_info + kInfoSize * i + kInfoValid, 1);
+      g_ee_main_mem[s_info + kInfoSize * i + kInfoValid] = 0;
+    }
+  }
+  if (used == 0) {
+    return goal_true(args.st);
+  }
+  const NativeArgs inner{a, args.pp, args.st, args.stack};
+  if (is_3d) {
+    sp_process_block_3d_impl(inner);
+  } else {
+    sp_process_block_2d_impl(inner);
+  }
+  for (u32 i = 0; i < count; i++) {
+    if (valid[i]) {
+      copy_bytes(m_info + kInfoSize * i, s_info + kInfoSize * i, kInfoSize);
+      copy_bytes(m_vec + kVecSize * i, s_vec + kVecSize * i, kVecSize);
+    }
+  }
+  return goal_true(args.st);
+}
+
 }  // namespace
 
 const NativeImpl sp_process_block_2d =
@@ -449,5 +573,8 @@ const NativeImpl sp_process_block_2d =
 // scratch: the quaternion passed to quaternion*!
 const NativeImpl sp_process_block_3d =
     MIPS2C_NATIVE_IMPL(sp_process_block_3d_impl, NATIVE_CALLS_GOAL, 16);
+// scratch: sp-process-block-3d's
+const NativeImpl pc_sp_process_block =
+    MIPS2C_NATIVE_IMPL(pc_sp_process_block_impl, NATIVE_CALLS_GOAL, 16);
 
 }  // namespace Mips2C::jak2::native

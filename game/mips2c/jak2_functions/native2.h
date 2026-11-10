@@ -26,6 +26,7 @@ u32 sym_value_addr(const char* name);
 // native2_sky.cpp
 extern const NativeImpl render_sky_quad;
 extern const NativeImpl render_sky_tri;
+extern const NativeImpl render_sky_quads;
 extern const NativeImpl method_32_sky_work;
 extern const NativeImpl method_33_sky_work;
 
@@ -73,5 +74,7 @@ extern const NativeImpl pc_adjust_cloud_lighting;
 extern const NativeImpl pc_adjust_haze_lighting;
 //! (mem-copy! dst src size), gcommon.gc (registered by mem_copy::link for the types-h module)
 extern const NativeImpl mem_copy;
+//! generic-merc-do-chain without the call for an empty chain (registered with it)
+extern const NativeImpl pc_generic_merc_do_chain;
 
 }  // namespace Mips2C::jak2::native2

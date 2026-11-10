@@ -1524,17 +1524,25 @@
    Generates bone matrices for VU1 renderers and does leftover stuff that depends on bones."
   (let ((gp-0 (-> *display* frames (-> *display* on-screen) global-buf)))
     ;; do the bones
+    (with-pc-profiler "dh-bones"
     (bones-init gp-0)
     (bones-mtx-calc-execute)
+    )
     ;; generic-merc/shadow have VU0/CPU parts that need bones, run them here.
+    (with-pc-profiler "dh-generic"
     (generic-merc-execute-all gp-0)
+    )
     ;; og:preserve-this (AI-assisted) 3DS: the shadow volumes only when the renderer draws them
     ;; (config.ini shadows = full with a stencil buffer: *pc-3ds-shadow-volumes?*, kmachine.cpp)
+    (with-pc-profiler "dh-shadow"
     (#if TARGET_3DS
       (if *pc-3ds-shadow-volumes?* (shadow-execute-all gp-0))
       (shadow-execute-all gp-0))
     )
+    )
+  (with-pc-profiler "dh-lightning"
   (lightning-draw-all)
+  )
   (none)
   )
 
@@ -1598,12 +1606,15 @@
     ;   (if (not (paused?))
     ;       (update-wind *wind-work* *wind-scales*)
     ;       )
+      (with-pc-profiler "dh-time-of-day"
       (update-time-of-day *time-of-day-context*)
+      )
       (set! (-> pp clock) gp-2)
       )
 
 
     ;; draw the sky
+    (with-pc-profiler "dh-sky"
     (with-profiler 'sky *profile-sky-color*
       (if (-> *sky-work* draw-vortex)
           (draw-vortex)
@@ -1611,6 +1622,7 @@
           )
       (flush-cache 0)
       )
+    )
 
     ;; draw the ocean
     (let ((gp-5 (-> pp clock)))
@@ -1618,17 +1630,21 @@
           (set! (-> pp clock) (-> *display* bg-clock))
           (set! (-> pp clock) (-> *display* real-clock))
           )
+      (with-pc-profiler "dh-ocean"
       (with-profiler 'ocean *profile-ocean-color*
         (draw! *ocean*)
         (when *ocean-map*
             (update-map *ocean*)
             )
         )
+      )
       (set! (-> pp clock) gp-5)
       )
 
     ;; run the foreground system
+    (with-pc-profiler "dh-foreground"
     (foreground-engine-execute *foreground-draw-engine* (-> *display* frames (-> *display* on-screen)))
+    )
     (let ((gp-6 (-> pp clock)))
       (if (= (-> *time-of-day-context* mode) (time-of-day-palette-id unk3))
           (set! (-> pp clock) (-> *display* bg-clock))
@@ -1643,12 +1659,16 @@
     ;   )
 
     ;; run the sprite/particle system.
+    (with-pc-profiler "dh-part-engine"
     (if (not (paused?))
         (execute-part-engine)
         )
+    )
+    (with-pc-profiler "dh-sprite"
     (if (logtest? (vu1-renderer-mask sprite) (-> *display* vu1-enable-user))
         (sprite-draw *display*)
         )
+    )
 
     ;; debug draw collision stuff before processing it.
     (when *debug-segment*
@@ -1657,20 +1677,27 @@
       )
 
     ;; after debug drawing, send events to actors
+    (with-pc-profiler "dh-touch-events"
     (send-events-for-touching-shapes *touching-list*)
     (free-nodes *touching-list*)
     (prepare *collide-rider-pool*)
     (send-all! *event-queue*)
+    )
 
     ;; spawn/update actors
+    (with-pc-profiler "dh-actors-update"
     (with-profiler 'update-actors *profile-update-actors-color*
       (actors-update *level*)
       )
+    )
 
+    (with-pc-profiler "dh-nav"
     (with-profiler 'nav *profile-nav-color*
       (update-nav-meshes-method *level*)
       )
+    )
 
+    (with-pc-profiler "dh-background"
     (with-profiler 'background *profile-background-color*
       ;; Run the background renderers!
 
@@ -1694,6 +1721,7 @@
                          (the-as uint 0)
                          )
       )
+    )
 
     (end-perf-stat-collection)
 
@@ -2125,7 +2153,9 @@
           )
 
         ;; prepare engine for the next frame
+        (with-pc-profiler "dl-frame-start"
         (display-frame-start arg0 frame-to-render next-dog)
+        )
         )
       )
     )
@@ -2143,12 +2173,14 @@
       ;(-> s4-0 global-buf)
 
       ;; post-draw buffer setup
+      (with-pc-profiler "ff-init-buffers"
       (tfrag-vu1-init-buffers)
       (tie-vu1-init-buffers)
       (merc-vu1-init-buffers)
       ;; og:preserve-this
       ; (emerc-vu1-init-buffers)
       (generic-vu1-init-buffers)
+      )
 
       ;; sprite texture remaps
       (when (-> *texture-pool* update-sprites-flag)
@@ -2158,6 +2190,7 @@
         )
 
       ;; texture uploads while GS is not doing anything.
+      (with-pc-profiler "ff-textures"
       (with-profiler 'texture *profile-texture-color*
         (let ((s3-1 (-> pp clock)))
           (if (= (-> *time-of-day-context* mode) (time-of-day-palette-id unk3))
@@ -2168,6 +2201,7 @@
           (set! (-> pp clock) s3-1)
           )
         )
+      )
 
       ;; more texture mapping.
       (if (-> *texture-pool* update-flag)
@@ -2176,7 +2210,9 @@
 
       ;; unclear why eyes are here... maybe they rely on textures that were just remapped.
       ; (-> *display* frames (-> *display* on-screen) global-buf)
+      (with-pc-profiler "ff-eyes"
       (update-eyes)
+      )
 
 
       ;; end each normal bucket with the standard GS state reset
@@ -2304,7 +2340,11 @@
   )
 
 (defun swap-display ((arg0 display))
+  (with-pc-profiler "dl-frame-finish"
   (display-frame-finish arg0)
+  )
+  (with-pc-profiler "dl-display-sync"
   (display-sync arg0)
+  )
   (none)
   )
