@@ -432,10 +432,8 @@ void Player::Tick(s16Output* stream, int samples) {
     spu += (u64)n * 48000;
     i += n;
   }
-  return;
 #else
   std::scoped_lock lock(mTickLock);
-#endif
   static int htick = 200;
   static int stick = 48000;
   for (int i = 0; i < samples; i++) {
@@ -467,6 +465,7 @@ void Player::Tick(s16Output* stream, int samples) {
     htick++;
     *stream++ = mSynth.Tick();
   }
+#endif
 }
 
 u32 Player::PlaySound(BankHandle bank_id,

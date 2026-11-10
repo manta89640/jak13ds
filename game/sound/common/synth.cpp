@@ -17,13 +17,6 @@ s16Output Synth::Tick() {
 
   mVoices.remove_if([](std::shared_ptr<Voice>& v) { return v->Dead(); });
   for (auto& v : mVoices) {
-#ifdef __3DS__
-    // (AI-assisted) The 8 permanent SPU voices (sdshim) are in the list forever; only the VAG
-    // stream uses one. A stopped voice decodes and mixes zeros: skip it.
-    if (v->Stopped()) {
-      continue;
-    }
-#endif
     const s16Output s = v->Run();
     out += s;
     if (reverb && v->ReverbSend()) {
