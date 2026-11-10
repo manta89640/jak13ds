@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdlib>
 
+#include "common/goal_constants.h"
 #include "common/log/log.h"
 
 #include "game/kernel/common/kperf.h"
@@ -471,7 +472,15 @@ struct BlockScan {
 
 //! the specs a relaunch by this launcher applies leave the orbiter flag (64) off
 bool relaunch_no_orbiter(u32 launcher) {
+  // the scan also asks for a particle the update frees before its relaunch: stay in memory
+  const u32 limit = (u32)EE_MAIN_MEM_SIZE - 96 * 16;
+  if (launcher >= limit) {
+    return false;
+  }
   u32 spec = gload<u32>(launcher + 8);
+  if (spec >= limit) {
+    return false;
+  }
   for (int n = 0; n < 96; n++, spec += 16) {
     const u32 field = gload<u16>(spec);
     if (field < 47) {
