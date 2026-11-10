@@ -105,6 +105,23 @@ struct CtrMercModelData {
   u32 file_vertex = 0, vertex_count = 0, index_first = 0, index_end = 0;
 };
 
+// The PS2's shine distance of Jak 1's envmapped ties (draw-inline-array-instance-tie): an instance
+// is drawn with fade = trunc(clamp((reach - |camera - c|) * rfade, 0, 128)) / 128 of its shine,
+// fade 0 as a plain tie. The instances by tie node (a run's vis id), from the game's tie trees
+// (ctr_tie_shine).
+struct CtrShineTable {
+  struct Inst {
+    float c[3];
+    float reach;  // envmap-fade-far + the sphere's radius
+    float rfade;
+    u32 vis;
+  };
+  std::vector<Inst> insts;      // by vis
+  u16 vis0 = 0;                 // node vis0 + k: insts [node_first[k], node_first[k + 1])
+  std::vector<u32> node_first;
+  static constexpr int kFull = 128;
+};
+
 struct CtrLevelData {
   std::string name;
   std::vector<CtrMercModelData> merc_models;
@@ -594,6 +611,12 @@ struct CtrLevelData {
   static constexpr s32 kNormalsInMesh = -2;
   std::vector<c3l::EnvTieDraw> env_draws;
   std::vector<s16> draw_env;
+  // the level's shine table as of shine_gen, and per chunk the squared distances of the camera
+  // from its sphere's center up to which every run of its envmapped draws has its full shine,
+  // and from which none has any (empty: no table, every run keeps its shine)
+  std::shared_ptr<const CtrShineTable> shine;
+  u32 shine_gen = 0;
+  std::vector<float> chunk_shine_full, chunk_shine_none;
   // c3l::kDrawCullCond draws (c3l::ExtCullCond): each one's planes in cond_planes, its boxes in
   // cond_boxes (box_first..): u16 steps of cond_box_step from cond_box_origin, rounded outward
   struct CondDraw {
@@ -1399,6 +1422,10 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   std::vector<EnvCall> m_env_calls, m_env_late;
   float m_env_color[3] = {128.f, 128.f, 128.f};
   u64 m_env_draws = 0, m_env_tris = 0, m_env_frames = 0;
+  // the shine fade of the level being drawn's tie nodes (CtrShineTable::node_first; 0xff: not
+  // asked for yet), and the triangles of envmapped draws beyond their shine (statistics)
+  std::vector<u8> m_shine_fade;
+  u64 m_env_plain_tris = 0;
   void env_color_scan(const CtrLevelData& lev, const CtrRenderState& rs);
   // Jak 1's wind (Tie3::WindWork, the tie bucket's first PC_PORT transfer after the level's data)
   struct WindWork {

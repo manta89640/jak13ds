@@ -557,8 +557,13 @@
                      (#when PC_PORT
                        ;; if a TIE uses environment mapping, disable the fade out so it always renderers with
                        ;; the generic renderer. In the port, we just make envmapped things always envmap.
-                       (when (!= (-> sv-16 envmap-fade-far) 0.0)
-                         (*! (-> sv-16 envmap-fade-far) 10000.)))
+                       (#if TARGET_3DS
+                         ;; the 3DS renderer keeps the PS2's fade: it reads the tree once
+                         (when (zero? current-login-pos)
+                           (define-extern pc-3ds-tie-shine (function string drawable-tree-instance-tie none))
+                           (pc-3ds-tie-shine (symbol->string (-> loaded-level name)) (the-as drawable-tree-instance-tie s1-1)))
+                         (when (!= (-> sv-16 envmap-fade-far) 0.0)
+                           (*! (-> sv-16 envmap-fade-far) 10000.))))
                      (while (< sv-32 4)
                        (let ((a0-28 (-> sv-16 geometry sv-32)))
                          ;;(load-dbg " login geom: ~A~%" a0-28)
