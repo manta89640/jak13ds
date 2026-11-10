@@ -1599,12 +1599,12 @@ constexpr float kHoldInView = 1.5f;
 // the table) and fade out from kShrubNearK of that (~x) on, as the PS2's (emit_chunk).
 #ifdef __3DS__
 constexpr float kShrubFarK = 1.3f;
-constexpr float kShrubNearK = 0.55f;
+constexpr float kShrubNearK = 0.75f;
 #else
 // host tests: env CTR_SHRUB_FAR_K / CTR_SHRUB_NEAR_K (1 and 1: the Oct 24 titlemove behaviour)
 static const float kShrubFarK = getenv("CTR_SHRUB_FAR_K") ? atof(getenv("CTR_SHRUB_FAR_K")) : 1.3f;
 static const float kShrubNearK =
-    getenv("CTR_SHRUB_NEAR_K") ? atof(getenv("CTR_SHRUB_NEAR_K")) : 0.55f;
+    getenv("CTR_SHRUB_NEAR_K") ? atof(getenv("CTR_SHRUB_NEAR_K")) : 0.75f;
 #endif
 // a shrub run's fade (CtrTfragRenderer::m_run_fade): blend FIX's 0x80 = drawn as it is
 constexpr u8 kRunOpaque = 0x80;
