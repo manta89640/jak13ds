@@ -30,6 +30,8 @@ extern const NativeImpl pc_new_bones_tmtx_calc;
 // native_sparticle.cpp
 extern const NativeImpl sp_process_block_2d;
 extern const NativeImpl sp_process_block_3d;
+// sp-process-block (GOAL) with its copies to the scratchpad and back, no mips2c version
+extern const NativeImpl pc_sp_process_block;
 // native_sparticle_launcher.cpp
 extern const NativeImpl particle_adgif;
 extern const NativeImpl sp_launch_particles_var;

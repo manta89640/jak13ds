@@ -707,6 +707,8 @@ void link() {
   cache.sp_free_particle = intern_from_c("sp-free-particle").c();
   cache.sp_relaunch_particle_3d = intern_from_c("sp-relaunch-particle-3d").c();
   gLinkedFunctionTable.reg("sp-process-block-3d", execute, 512, &native::sp_process_block_3d);
+  gLinkedFunctionTable.reg("pc-sp-process-block", native::pc_sp_process_block.as_exec, 64,
+                           &native::pc_sp_process_block);
 }
 
 } // namespace sp_process_block_3d
