@@ -601,13 +601,18 @@
          (set! (-> this gnd-height) (-> this root gspot-pos y))
          )
         (else
+          ;; og:preserve-this kperf: a walking citizen's post in two parts
+          (with-pc-profiler "cz-move"
           (nav-enemy-method-142 this (-> this nav))
           (nav-enemy-method-143 this (-> this nav))
+          )
           )
         )
       )
     )
+  (with-pc-profiler "cz-common"
   (common-post this)
+  )
   (update-transforms (-> this root))
   0
   (none)

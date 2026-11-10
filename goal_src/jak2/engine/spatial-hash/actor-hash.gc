@@ -76,7 +76,11 @@
                       (let ((a0-7 (-> s3-0 sphere-array s2-0))
                             (sv-16 (-> s3-0 object-array s2-0))
                             )
-                        (mem-copy! (the-as pointer a0-7) (the-as pointer s1-0) 16)
+                        ;; og:preserve-this the 16 bytes of the sphere without a call
+                        (#if TARGET_3DS
+                          (set! (-> a0-7 quad) (-> s1-0 world-sphere quad))
+                          (mem-copy! (the-as pointer a0-7) (the-as pointer s1-0) 16)
+                          )
                         (set! (-> sv-16 object) s0-0)
                         )
                       (dotimes (v1-12 3)
@@ -152,7 +156,10 @@
                        (let ((a0-40 (-> s1-1 sphere-array s0-1))
                              (sv-64 (-> s1-1 object-array s0-1))
                              )
-                         (mem-copy! (the-as pointer a0-40) (the-as pointer sv-32) 16)
+                         (#if TARGET_3DS
+                           (set! (-> a0-40 quad) (-> sv-32 world-sphere quad))
+                           (mem-copy! (the-as pointer a0-40) (the-as pointer sv-32) 16)
+                           )
                          (set! (-> sv-64 object) sv-48)
                          )
                        (dotimes (v1-53 3)

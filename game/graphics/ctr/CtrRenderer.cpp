@@ -1861,10 +1861,14 @@ void ctr_exit() {
 static u32 g_frame_vblanks = 1;
 static double g_last_vsync_ms = 0;
 static u32 g_last_vsync_vblank = 0;
+static double g_frame_work_ms = 0;  // from the last vsync's return to this one's start
 
 u32 ctr_vsync() {
   if (MasterExit == RuntimeExitStatus::RUNNING) {
     const double t0 = ctr_gpu_time_ms();
+    if (g_last_vsync_ms != 0) {
+      g_frame_work_ms = t0 - g_last_vsync_ms;
+    }
     // config.ini fps_cap: 30 = two vblanks per frame at least, 60 = one
     ctr_gpu_wait_vblank(ctr_settings().fps_cap <= 30 ? 2 : 1);
     const double t1 = ctr_gpu_time_ms();
@@ -2217,6 +2221,10 @@ double ctr_frame_ms_left() {
 
 u32 ctr_frame_vblanks() {
   return g_frame_vblanks;
+}
+
+double ctr_frame_work_ms() {
+  return g_frame_work_ms;
 }
 
 // the 3DS renderer draws the frames (not the null or the OpenGL renderer)

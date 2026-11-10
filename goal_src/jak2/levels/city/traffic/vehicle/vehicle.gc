@@ -1143,6 +1143,8 @@
   0
   (set! (-> this camera-dist2) (vector-vector-distance-squared (-> this root trans) (camera-pos)))
   (set! (-> this player-dist2) (vector-vector-distance-squared (-> this root trans) (target-pos 0)))
+  ;; og:preserve-this kperf: a traffic vehicle's post by part
+  (with-pc-profiler "vh-control"
   (vehicle-controller-method-18
     (-> this controller)
     (-> this target-acceleration)
@@ -1150,6 +1152,7 @@
     this
     (/ 1.0 (seconds-per-frame))
     )
+  )
   (cond
     ((logtest? (-> this rbody state flags) (rigid-body-flag enable-physics))
      (if (not (vehicle-method-105 this))
@@ -1164,9 +1167,11 @@
     )
   (cond
     ((logtest? (-> this rbody state flags) (rigid-body-flag enable-physics))
+     (with-pc-profiler "vh-physics"
      (vehicle-method-93 this)
      (vehicle-method-106 this)
      (vehicle-method-121 this)
+     )
      )
     (else
       (let ((f1-3 (* 0.000024414063
@@ -1195,7 +1200,9 @@
       (.sync.p)
       (label cfg-12)
       0
+      (with-pc-profiler "vh-rails"
       (vehicle-method-104 this)
+      )
       (when (< (-> this player-dist2) (square 245760.0))
         (let ((f0-10 (vector-length (-> this root transv))))
           (seek! (-> this engine-power-factor) (/ f0-10 (meters 15)) (* 6.0 (seconds-per-frame)))
@@ -1238,7 +1245,9 @@
       (.sync.p)
       (label cfg-21)
       0
+      (with-pc-profiler "vh-draw-post"
       (vehicle-method-120 this)
+      )
       (update-transforms (-> this root))
       (set! (-> this node-list data 0 bone transform trans quad) (-> this root trans quad))
       (vehicle-method-119 this)

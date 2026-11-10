@@ -74,6 +74,7 @@ Open g_open[kMaxOpen];
 int g_open_count = 0;
 u64 g_section_events = 0;
 u64 g_unbalanced = 0;
+u64 g_left_open = 0;  // sections a thread left without their end (go, deactivate)
 
 std::atomic<u64> g_thread_ticks[(int)Thread::COUNT];
 std::atomic<u32> g_thread_wakeups[(int)Thread::COUNT];
@@ -411,8 +412,9 @@ void report_sections(double frames) {
   // (nothing timed: sampled timing was off)
   if (!top.empty()) {
     lg::info("perf sections (ms/frame (calls/frame)): {}", sec);
-    lg::info("perf sections: {:.0f} timed sections per frame, {} unbalanced ends",
-             g_section_events / frames, g_unbalanced);
+    lg::info("perf sections: {:.0f} timed sections per frame, {} unbalanced ends, {} left open at "
+             "a frame's end",
+             g_section_events / frames, g_unbalanced, g_left_open);
   }
   for (auto& [k, v] : g_sections) {
     v.ticks = 0;
@@ -453,6 +455,12 @@ void log_instr(double frames) {
 #endif
 
 void frame_done() {
+  // between frames nothing is timed: what is still open was left by a thread that never came back
+  if (g_open_count > 0) {
+    g_left_open += g_open_count;
+    g_open_count = 0;
+    g_wd_section.store(nullptr, std::memory_order_relaxed);
+  }
   g_wd_frames.fetch_add(1, std::memory_order_relaxed);
   g_wd_rpc_polls.store(0, std::memory_order_relaxed);
   g_wd_level_polls.store(0, std::memory_order_relaxed);
@@ -535,13 +543,17 @@ void frame_done() {
       u32 iop_w = g_thread_wakeups[(int)Thread::IOP].exchange(0);
       u64 snd_t = g_thread_ticks[(int)Thread::SOUND].exchange(0);
       u32 snd_w = g_thread_wakeups[(int)Thread::SOUND].exchange(0);
+      const u64 switch_t = g_counters[(int)Counter::SWITCH_TICKS];
       lg::info(
           "perf threads (ms/frame): iop {:.2f} ({:.0f} dispatches/s), sound {:.2f} ({:.0f}/s, {} "
-          "handlers); kernel: {:.0f} thread suspends/frame, {:.1f} KB of stack saved/frame",
+          "handlers); kernel: {:.0f} thread suspends/frame, {:.1f} KB of stack saved/frame{}",
           ticks_to_ms(iop_t) / frames, iop_w / secs, ticks_to_ms(snd_t) / frames, snd_w / secs,
           g_gauges[(int)Gauge::SOUND_HANDLERS].load(),
           g_counters[(int)Counter::SUSPEND] / frames,
-          g_counters[(int)Counter::SUSPEND_BYTES] / frames / 1024.0);
+          g_counters[(int)Counter::SUSPEND_BYTES] / frames / 1024.0,
+          switch_t ? fmt::format(", {:.2f} ms in thread-resume and thread-suspend",
+                                 ticks_to_ms(switch_t) / frames)
+                   : std::string());
       for (auto& c : g_counters) {
         c = 0;
       }

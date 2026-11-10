@@ -914,6 +914,13 @@
       )
     )
 
+    ;; og:preserve-this 3DS: the joint math that waited for the camera (process-drawable.gc)
+    (#when TARGET_3DS
+      (with-pc-profiler "dl-joints-late"
+      (execute-math-engine-late)
+      )
+      )
+
     ;; map texture stuff
     (with-pc-profiler "dl-bigmap"
     (update *bigmap*)

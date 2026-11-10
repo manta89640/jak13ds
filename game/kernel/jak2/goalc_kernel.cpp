@@ -319,6 +319,7 @@ namespace jak2 {
  */
 u64 goalc_suspend_impl_jak2(goalc_ctx* caller_ctx) {
   using namespace jak2;
+  const u64 t0 = kperf::g_sections_enabled ? kperf::ticks() : 0;
   u32 thread = (u32)goalc_pp;
   u32 sp = goal_addr_of((void*)goalc_ctx_sp(caller_ctx));
   u32 proc = word(thread + THREAD_PROCESS);
@@ -354,6 +355,9 @@ u64 goalc_suspend_impl_jak2(goalc_ctx* caller_ctx) {
   word(proc + PROCESS_STATUS) = g_syms.suspended;
 
   goalc_pp = 0;
+  if (t0) {
+    kperf::count(kperf::Counter::SWITCH_TICKS, kperf::ticks() - t0);
+  }
   return_to_kernel(0);
 }
 
@@ -363,6 +367,7 @@ u64 goalc_suspend_impl_jak2(goalc_ctx* caller_ctx) {
  * kernel (suspend, return-from-thread, deactivate...).
  */
 u64 goalc_k_thread_resume(u64 thread_arg) {
+  const u64 t0 = kperf::g_sections_enabled ? kperf::ticks() : 0;
   KernelFrame kf;
   kf.prev = g_kernel_frame;
   g_kernel_frame = &kf;
@@ -398,6 +403,9 @@ u64 goalc_k_thread_resume(u64 thread_arg) {
       goalc_pp = proc;
       // the slot memory stays valid until the next suspend, which can't happen before the restore
       free_slot(slot);
+      if (t0) {
+        kperf::count(kperf::Counter::SWITCH_TICKS, kperf::ticks() - t0);
+      }
       goalc_ctx_restore(&slot->ctx, 1);
     } else {
       // A thread that was set up with set-to-run: pc is a GOAL function (set-to-run-bootstrap),
