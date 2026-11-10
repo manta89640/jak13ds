@@ -2238,6 +2238,11 @@
     )
   )
 
+;; og:preserve-this 3DS: the last frame's work as a PS2 frame's run-time (kmachine.cpp)
+(#when TARGET_3DS
+  (define-extern pc-3ds-frame-run-time (function int))
+  )
+
 (defmethod actors-update ((this level-group))
   (local-vars
     (sv-16 vector)
@@ -2248,14 +2253,26 @@
     (sv-80 string)
     (sv-96 float)
     )
+  ;; og:preserve-this 3DS: the heaps' compaction steps and the births a frame go by the frame's
+  ;; real load, as on the PS2 (the PC port's run-time is 0: 8 steps and 25 births always), twice
+  ;; the PS2's per frame: a frame is two vblanks. Hosts report no load and keep the port's counts.
+  (with-pc-profiler "au-compact"
   (when *compact-actors*
     (if (and (= *compact-actors* 'debug) (= (-> *nk-dead-pool* alive-list prev) (-> *nk-dead-pool* first-gap)))
         (churn *nk-dead-pool* 1)
         )
     (let ((s5-0
-            (the int
-                 (lerp-scale 8.0 1.0 (the float (-> *display* frames (-> *display* last-screen) run-time)) 2000.0 8000.0)
-                 )
+            (#if TARGET_3DS
+              (let ((frame-ticks (pc-3ds-frame-run-time)))
+                (if (> frame-ticks 0)
+                    (* 2 (the int (lerp-scale 8.0 1.0 (the float frame-ticks) 2000.0 8000.0)))
+                    8
+                    )
+                )
+              (the int
+                   (lerp-scale 8.0 1.0 (the float (-> *display* frames (-> *display* last-screen) run-time)) 2000.0 8000.0)
+                   )
+              )
             )
           )
       (if (nonzero? *debug-dead-pool*)
@@ -2265,13 +2282,28 @@
       (compact *city-dead-pool* s5-0)
       )
     )
+  )
+  (with-pc-profiler "au-hash"
   (update-actor-hash)
+  )
   (when (not (paused?))
     (let ((s5-1 (-> *display* frames (-> *display* last-screen) run-time)))
       (let ((f0-5 (fmax 327680.0 (fmin (+ 327680.0 (* 204.8 (the float (- 7000 s5-1)))) (-> *ACTOR-bank* birth-dist)))))
         (seek! (-> *ACTOR-bank* pause-dist) f0-5 (* 81920.0 (seconds-per-frame)))
         )
-      (seekl! (-> *ACTOR-bank* birth-max) (the int (lerp-scale 25.0 2.0 (the float s5-1) 2000.0 7000.0)) 10)
+      (seekl!
+        (-> *ACTOR-bank* birth-max)
+        (#if TARGET_3DS
+          (let ((frame-ticks (pc-3ds-frame-run-time)))
+            (if (> frame-ticks 0)
+                (* 2 (the int (lerp-scale 25.0 2.0 (the float frame-ticks) 2000.0 7000.0)))
+                25
+                )
+            )
+          (the int (lerp-scale 25.0 2.0 (the float s5-1) 2000.0 7000.0))
+          )
+        10
+        )
       )
     (if (movie?)
         (set! (-> *ACTOR-bank* birth-max) 1000)

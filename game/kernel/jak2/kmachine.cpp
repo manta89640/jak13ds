@@ -58,6 +58,7 @@ bool ctr_level_ready(const char* name);  // game/graphics/ctr/CtrRenderer.cpp
 bool ctr_arrival_ready();                // game/graphics/ctr/CtrRenderer.cpp
 u32 ctr_frame_vblanks();                  // game/graphics/ctr/CtrRenderer.cpp
 double ctr_frame_ms_left();               // game/graphics/ctr/CtrRenderer.cpp
+double ctr_frame_work_ms();               // game/graphics/ctr/CtrRenderer.cpp
 
 namespace jak2 {
 /*!
@@ -588,6 +589,19 @@ u64 pc_3ds_frame_vblanks() {
 #endif
 }
 
+// actors-update (TARGET_3DS): the last frame's work as a PS2 frame's run-time, timer 1 ticks
+// (9765 a vblank) per vblank of the frame's two. 0 on hosts (the PC port's counts, pad scripts as
+// they were) unless CTR_FRAME_RUN_TIME sets one.
+u64 pc_3ds_frame_run_time() {
+#ifndef __3DS__
+  static const int fixed = getenv("CTR_FRAME_RUN_TIME") ? atoi(getenv("CTR_FRAME_RUN_TIME")) : 0;
+  return (u64)std::clamp(fixed, 0, 30000);
+#else
+  constexpr double kTicksPerMs = 9765.0 * 59.8261 / 1000.0;
+  return (u64)std::clamp(ctr_frame_work_ms() * kTicksPerMs / 2.0, 0.0, 30000.0);
+#endif
+}
+
 // level.gc (TARGET_3DS): the load work of a per-frame load-continue (the linker's fixups, the
 // login) stops by a budget and goes on in the next call, as on the PS2. The frame's last call
 // takes the time the frame has left, less a margin for what the frame still does; the others a
@@ -640,6 +654,7 @@ void InitMachine_PCPort() {
   });
   // (AI-assisted) pc-maybe-vsync's dog-ratio on the 3DS: the vblanks the last frame took
   make_function_symbol_from_c("pc-3ds-frame-vblanks", pc_3ds_frame_vblanks);
+  make_function_symbol_from_c("pc-3ds-frame-run-time", pc_3ds_frame_run_time);
   make_function_symbol_from_c("pc-3ds-load-begin", pc_3ds_load_begin);
   make_function_symbol_from_c("pc-3ds-load-end", pc_3ds_load_end);
   make_function_symbol_from_c("pc-3ds-load-time?", pc_3ds_load_time);
