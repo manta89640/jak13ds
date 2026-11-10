@@ -176,4 +176,114 @@ void run_vram_tests() {
             "the other texture must read the page written last");
     }
   }
+
+  // every format at page aligned and unaligned addresses and past the end of VRAM: the texels the
+  // address functions of texture_conversion.h give, one by one
+  for (bool sparse : {false, true}) {
+    CtrVram vram(sparse);
+    std::vector<u32> img(512 * 2048);
+    u32 seed = 12345;
+    for (auto& v : img) {
+      seed = seed * 1664525u + 1013904223u;
+      v = seed;
+    }
+    vram.upload_ct32((const u8*)img.data(), 0, 512, 2048);
+    std::vector<u8> flat(4 * 1024 * 1024);
+    for (u32 y = 0; y < 2048; y++) {
+      for (u32 x = 0; x < 512; x++) {
+        memcpy(flat.data() + psmct32_addr(x, y, 512), &img[x + 512 * y], 4);
+      }
+    }
+    auto rd32 = [&](u32 a) {
+      u32 v;
+      memcpy(&v, flat.data() + (a & 0x3ffffc), 4);
+      return v;
+    };
+    auto clut_ref = [&](u32 cbp, u32 cpsm, u32 e) -> u32 {
+      const u32 chunk = e / 16, off = e % 16;
+      const u32 x = (chunk & 1) * 8 + off % 8, y = (chunk >> 1) * 2 + off / 8;
+      if (cpsm == 0) {
+        return rd32(psmct32_addr(x, y, 64) + cbp * 256);
+      }
+      u16 c;
+      memcpy(&c, flat.data() + ((psmct16_addr(x, y, 64) + cbp * 256) & 0x3ffffe), 2);
+      return ct16_to_rgba(c);
+    };
+    auto reference = [&](u64 tex0) {
+      const GsTex0 t(tex0);
+      const int w = 1 << std::min(t.tw(), 10u), h = 1 << std::min(t.th(), 10u);
+      const u32 tbp = t.tbp0(), width = std::max(1u, t.tbw()) * 64, csa = (tex0 >> 56) & 0x1f;
+      const u32 cbp = t.cbp(), cpsm = t.cpsm();
+      std::vector<u32> px(w * h);
+      for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+          u32 v = 0;
+          switch (t.psm()) {
+            case GsTex0::PSM::PSMCT32:
+              v = rd32(psmct32_addr(x, y, width) + tbp * 256);
+              break;
+            case GsTex0::PSM::PSMCT24:
+              v = (rd32(psmct32_addr(x, y, width) + tbp * 256) & 0xffffff) | 0x80000000u;
+              break;
+            case GsTex0::PSM::PSMCT16:
+            case GsTex0::PSM::PSMCT16S: {
+              u16 c;
+              memcpy(&c, flat.data() + ((psmct16_addr(x, y, width) + tbp * 256) & 0x3ffffe), 2);
+              v = ct16_to_rgba(c);
+            } break;
+            case GsTex0::PSM::PSMT8:
+              v = clut_ref(cbp, cpsm, flat[(psmt8_addr(x, y, width) + tbp * 256) & 0x3fffff]);
+              break;
+            case GsTex0::PSM::PSMT4: {
+              const u32 a = (psmt4_addr_half_byte(x, y, width) + tbp * 512) & 0x7fffff;
+              const u8 b = flat[a / 2];
+              v = clut_ref(cbp, cpsm, csa * 16 + ((a & 1) ? (b >> 4) : (b & 0xf)));
+            } break;
+            case GsTex0::PSM::PSMT8H:
+              v = clut_ref(cbp, cpsm, rd32(psmct32_addr(x, y, width) + tbp * 256) >> 24);
+              break;
+            case GsTex0::PSM::PSMT4HH:
+              v = clut_ref(cbp, cpsm, csa * 16 + (rd32(psmct32_addr(x, y, width) + tbp * 256) >> 28));
+              break;
+            default:
+              v = clut_ref(cbp, cpsm,
+                           csa * 16 + ((rd32(psmct32_addr(x, y, width) + tbp * 256) >> 24) & 0xf));
+              break;
+          }
+          px[x + y * w] = v;
+        }
+      }
+      return px;
+    };
+    const u32 sizes[4][2] = {{3, 3}, {5, 4}, {7, 6}, {8, 8}};
+    int k = 0;
+    for (u64 psm : {0x0, 0x1, 0x2, 0xa, 0x13, 0x14, 0x1b, 0x24, 0x2c}) {
+      for (u64 tbp : {0, 32, 5, 37, 16160, 16343}) {
+        for (u64 tbw : {1, 2, 4, 8}) {
+          for (const auto& sz : sizes) {
+            k++;
+            const u64 tex0 = tbp | tbw << 14 | psm << 20 | (u64)sz[0] << 26 | (u64)sz[1] << 30 |
+                             (u64)(1000 + 7 * (k % 5)) << 37 | (u64)(k % 3 == 0 ? 2 : 0) << 51 |
+                             (u64)(k % 4) << 56;
+            std::vector<u32> out;
+            int w, h;
+            check(vram.decode(tex0, &out, &w, &h) && out == reference(tex0),
+                  "a decoded texture must hold the texels the address functions give");
+          }
+        }
+      }
+    }
+    // a raw image's texture: the image's rows, the last one repeated below them
+    CtrVram raw(sparse);
+    raw.upload_ct32((const u8*)img.data(), 0, 512, 416);
+    std::vector<u32> out;
+    int w, h;
+    check(raw.decode_for_cpu(8ull << 14 | 9ull << 26 | 9ull << 30, &out, &w, &h) && w == 512 &&
+              h == 512,
+          "raw image texture");
+    for (int y = 0; y < 512; y++) {
+      check(!memcmp(&out[512 * y], &img[512 * std::min(y, 415)], 512 * 4),
+            "a raw image's texture must hold its rows, the last one below them");
+    }
+  }
 }
