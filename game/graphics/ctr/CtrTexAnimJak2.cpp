@@ -232,15 +232,32 @@ void CtrTexAnimJak2::clouds(const u8* data, int bytes, CtrVram* vram) {
   // (AI-assisted, j2gpu) The sum is an 8-bit value first, so the lookup (a sinf per texel: most of
   // the update's 3 ms in Azahar) is made once per value: the same texels
   const int half = dim;
-  u32 ramp[256];
-  for (int i = 0; i < 256; i++) {
-    const float v = (float)i * (1.f / 255.f);
-    ramp[i] = 0x808080u | ((u32)std::lround(cloud_lookup(v, in.cloud_min, in.cloud_max) * 127.5f) << 24);
+  // (the table again only when the game's ramp limits move)
+  if (!m_ramp_valid || in.cloud_min != m_ramp_min || in.cloud_max != m_ramp_max) {
+    for (int i = 0; i < 256; i++) {
+      const float v = (float)i * (1.f / 255.f);
+      m_ramp[i] = 0x808080u |
+                  ((u32)std::lround(cloud_lookup(v, in.cloud_min, in.cloud_max) * 127.5f) << 24);
+    }
+    m_ramp_min = in.cloud_min;
+    m_ramp_max = in.cloud_max;
+    m_ramp_valid = true;
   }
   for (int p = 0; p < dim * dim; p++) {
-    const float q = std::round(std::min(acc[p], 1.f) * 255.f);
+    const float v = std::min(acc[p], 1.f) * 255.f;
+    if (v >= 0.f) {
+      // std::round of a value in [0, 255] without the library call: v + 0.5 rounded up to a
+      // whole number it didn't reach is taken back
+      int q = (int)(v + 0.5f);
+      if (v < (float)q - 0.5f) {
+        q--;
+      }
+      m_out[p] = m_ramp[q];
+      continue;
+    }
+    const float q = std::round(v);
     if (q >= 0.f && q <= 255.f) {
-      m_out[p] = ramp[(int)q];
+      m_out[p] = m_ramp[(int)q];
     } else {
       // (a negative sum: a layer's time past its end; or not a number) as before
       m_out[p] = 0x808080u |

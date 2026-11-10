@@ -84,6 +84,10 @@ class CtrTexAnimJak2 {
   Noise m_noise[kCloudLayers];
   std::vector<float> m_acc, m_acc2, m_tmp;
   std::vector<u32> m_out;
+  // the alpha ramp by 8-bit sum, for these limits of the game's
+  u32 m_ramp[256];
+  float m_ramp_min = 0, m_ramp_max = 0;
+  bool m_ramp_valid = false;
   int m_frames = 0;
  public:
   /*! the clouds' render thread time: ms in all runs, runs (taken and reset by the stats line) */
