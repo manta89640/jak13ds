@@ -296,6 +296,7 @@ struct CtrLevelData {
   // title intro's first frame); CtrLevels::note_late_in_view
   u64 shown_frame = 0;
   u32 vis_scan_bytes = UINT32_MAX;  // the string's bytes its ids are in (UINT32_MAX: not known yet)
+  std::vector<u8> chunk_all_vis;  // per chunk: a zero string hides all of its runs (draw_level)
   // per chunk: its residency (0 resident or never there, else kDist* / kTitle*), and the frame a
   // chunk without its mesh began to be kept hidden in view (0: not)
   std::vector<u8> chunk_dormant;

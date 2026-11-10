@@ -100,6 +100,33 @@ u32 next_palette_id() {
   return ++s_id ? s_id : ++s_id;
 }
 
+// A model instance's bones as palette rows and float24 words, each made at its first use by one of
+// the instance's palettes: the palettes of a model's draws share most of their bones
+struct BoneRows {
+  u32 stamp;  // the instance they were made for
+  u32 mirrors;
+  float rows[12];
+  u32 f24[9];
+};
+BoneRows g_bone_rows[256];
+u32 next_bone_rows_stamp() {
+  static u32 s_stamp;
+  if (!++s_stamp) {
+    for (auto& b : g_bone_rows) {
+      b.stamp = 0;
+    }
+    s_stamp = 1;
+  }
+  return s_stamp;
+}
+
+// all merc buckets, per stats window
+struct PaletteStats {
+  u64 frame = ~0ull, logged = ~0ull;
+  u32 frames = 0, models = 0, draws = 0, palettes = 0, entries = 0, bones = 0;
+};
+PaletteStats g_pal;
+
 bool tag_is_nothing_next(const DmaFollower& dma) {
   return dma.current_tag().kind == DmaTag::Kind::NEXT && dma.current_tag().qwc == 0 &&
          dma.current_tag_vif0() == 0 && dma.current_tag_vif1() == 0;
@@ -277,6 +304,21 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
                 return std::less<const void*>()(a.model, b.model);
               });
     m_cam_world = m_levels->camera(rs.frame_idx, m_cam_rot, m_cam_trans);
+    if (rs.log_now && g_pal.logged != rs.frame_idx) {
+      g_pal.logged = rs.frame_idx;
+      if (g_pal.frames && g_pal.models) {
+        const double n = g_pal.frames;
+        lg::info("[ctr] merc per frame: {:.1f} models, {:.1f} draws, {:.1f} palettes with {:.1f} "
+                 "bones in all, {:.1f} bones converted ({} frames)",
+                 g_pal.models / n, g_pal.draws / n, g_pal.palettes / n, g_pal.entries / n,
+                 g_pal.bones / n, g_pal.frames);
+      }
+      g_pal.frames = g_pal.models = g_pal.draws = g_pal.palettes = g_pal.entries = g_pal.bones = 0;
+    }
+    if (g_pal.frame != rs.frame_idx) {
+      g_pal.frame = rs.frame_idx;
+      g_pal.frames++;
+    }
   }
   // same structure as Merc2::handle_all_dma, but without asserts: skip what we don't know
   if (dma.current_tag_offset() == rs.next_bucket) {
@@ -600,8 +642,11 @@ void CtrMercRenderer::flush_queues() {
 void CtrMercRenderer::apply_blerc(const CtrLevelData& lev,
                                   const CtrMercModelData& model,
                                   const float* weights) {
+  if (model.scale <= 0.f) {
+    return;
+  }
   u8* verts = (u8*)ctr_gpu_mesh_vertices(model.mesh);
-  if (!verts || model.scale <= 0.f) {
+  if (!verts) {
     return;
   }
   const float inv_scale = 1.f / model.scale;
@@ -745,6 +790,45 @@ void CtrMercRenderer::gather_mod(const u8* ee_mem,
 
 void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos, float ys, float ns) {
   const double t0 = ctr_gpu_time_ms();
+  // the copy is followed to its end before the vertices' other buffer is taken (the loop below
+  // gives up where it can't be followed: the buffer would be left half written)
+  {
+    const size_t size = m_mod_bytes.size();
+    size_t at = pos;
+    for (const auto& e : model.mod) {
+      if (at + 4 > size) {
+        return;
+      }
+      u32 total;
+      memcpy(&total, m_mod_bytes.data() + at, 4);
+      at += 4;
+      if (total != e.vidx_end) {
+        if (total) {
+          m_mod_bad++;
+          return;
+        }
+        continue;
+      }
+      for (u32 done = 0; done < total;) {
+        if (at + 16 > size) {
+          m_mod_bad++;
+          return;
+        }
+        u32 nv;
+        memcpy(&nv, m_mod_bytes.data() + at, 4);
+        if (nv > total - done) {
+          m_mod_bad++;
+          return;
+        }
+        at += 16 + ((12 * (size_t)nv + 3) & ~(size_t)3);
+        done += nv;
+      }
+      if (at > size) {
+        m_mod_bad++;
+        return;
+      }
+    }
+  }
   u8* verts = (u8*)ctr_gpu_mesh_vertices(model.mesh);
   if (!verts) {
     return;
@@ -1364,13 +1448,31 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   uint32_t palette_f24[9 * CTR_MAX_PALETTE];
   bool palette_f24_made = false;
   u32 q_f24 = ~0u;
+  // not HUD models: their rows are changed after they are made
+  const bool bone_cache = !hud_model;
+  const u32 bone_stamp = bone_cache ? next_bone_rows_stamp() : 0;
+  g_pal.models++;
   auto direct_f24 = [&](int count) -> const uint32_t* {
     if (!rows_f24) {
       return nullptr;
     }
     if (!palette_f24_made) {
-      // (AI-assisted) ctr_gpu_pack_skin_rows_f24's words in fewer instructions (CtrMicro.h)
-      ctr_micro::pack_skin_rows_f24(palette_rows, std::min<int>(count, CTR_MAX_PALETTE), palette_f24);
+      const int n = std::min<int>(count, CTR_MAX_PALETTE);
+      if (bone_cache) {
+        // each bone's words, laid out as pack_skin_rows_f24 does
+        for (int p = 0; p < n; p++) {
+          const u32* w = g_bone_rows[rows_of->palette[p]].f24;
+          uint32_t* o = palette_f24 + 3 * p;
+          for (int row = 0; row < 3; row++, o += 3 * n, w += 3) {
+            o[0] = w[0];
+            o[1] = w[1];
+            o[2] = w[2];
+          }
+        }
+      } else {
+        // (AI-assisted) ctr_gpu_pack_skin_rows_f24's words in fewer instructions (CtrMicro.h)
+        ctr_micro::pack_skin_rows_f24(palette_rows, n, palette_f24);
+      }
       palette_f24_made = true;
     }
     return palette_f24;
@@ -1502,7 +1604,9 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     }
     if (!same_palette) {
       palette_mirrors = false;
+      g_pal.palettes++;
     }
+    g_pal.draws++;
     const float scale = model->scale;
     for (int p = 0; !same_palette && p < draw.palette_count && p < CTR_MAX_PALETTE; p++) {
       // (AI-assisted) a bone the game didn't send this frame: the table still has the matrix of
@@ -1517,6 +1621,23 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
           lg::info("[ctr] merc {}: a draw uses bone {}, which the game didn't send ({} sent)",
                    model->name, bi, i);
         }
+      }
+      g_pal.entries++;
+      if (bone_cache) {
+        BoneRows& br = g_bone_rows[bi];
+        if (br.stamp != bone_stamp) {
+          const float* t = pal_bones[bi]->tmat[0].data();
+          br.stamp = bone_stamp;
+          br.mirrors = cull_merc && ctr_micro::merc_bone_mirrors(t);
+          ctr_micro::merc_bone_rows(t, scale, br.rows);
+          if (rows_f24) {
+            ctr_micro::pack_skin_rows_f24(br.rows, 1, br.f24);
+          }
+          g_pal.bones++;
+        }
+        palette_mirrors = palette_mirrors || br.mirrors;
+        memcpy(&palette_rows[12 * p], br.rows, sizeof(br.rows));
+        continue;
       }
       // (AI-assisted) CtrMicro.h: the matrix read once into registers (the model's scale too), the
       // determinant's sign on its bits, and not worked out once a bone of the palette mirrors
