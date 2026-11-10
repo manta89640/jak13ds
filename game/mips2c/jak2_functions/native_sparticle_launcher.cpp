@@ -89,13 +89,23 @@ u64 particle_adgif_impl(const NativeArgs& args) {
     u32 slot = cache + 12;
     entry = cache + 172;
     bool found = false;
-    if (n != 0) {
+    // where a key was found last: a key is in the used part of the table at most once (it is only
+    // added when the search below misses), so a slot there that holds it is the search's result
+    static u8 where[256] = {};
+    const u32 hint = where[key & 255];
+    if (hint != 0 && (s64)hint <= n && gload<u16>(cache + 12 + 2 * (hint - 1)) == key) {
+      found = true;
+      entry = cache + 172 + 80 * (hint - 1);
+    } else if (n != 0) {
+      u32 at = 0;
       do {
         const u16 k = gload<u16>(slot);
         slot += 2;
         n--;
+        at++;
         if (k == key) {
           found = true;
+          where[key & 255] = (u8)at;
           break;
         }
         entry += 80;
