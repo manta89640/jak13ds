@@ -586,6 +586,33 @@ bool SynthTrial(Rng& rng, const Data& data, int voices, int limit) {
   return true;
 }
 
+// a permanent voice (the overlord's stream voices) is never muted: with room for one voice the
+// louder tone is
+bool PermanentCheck(const Data& data) {
+  snd::Synth synth;
+  auto stream = std::make_shared<snd::Voice>(snd::Voice::AllocationType::Permanent);
+  auto tone = std::make_shared<snd::Voice>();
+  for (auto& v : {stream, tone}) {
+    v->SetSample(const_cast<u16*>(data.words.data()));
+    v->SetPitch(0x1000);
+    v->SetAsdr1(0x000F);
+    v->SetAsdr2(0x1FC8);
+    v->SetVolume(v == tone ? 0x2000 : 0x100, v == tone ? 0x2000 : 0x100);
+    v->KeyOn();
+    synth.AddVoice(v);
+  }
+  synth.BeginBlock(1);
+  const bool ok = synth.RunningCount() == 2 && synth.MutedCount() == 1 && !stream->Muted() &&
+                  tone->Muted();
+  synth.EndBlock();
+  if (!ok) {
+    printf("MISMATCH (synth): permanent voice %s, tone %s, %d running, %d muted\n",
+           stream->Muted() ? "muted" : "heard", tone->Muted() ? "muted" : "heard",
+           synth.RunningCount(), synth.MutedCount());
+  }
+  return ok;
+}
+
 // 989snd's voice allocation as voice_alloc.h has it
 bool AllocatorChecks() {
   int bad = 0;
@@ -850,7 +877,8 @@ int main(int argc, char** argv) {
   // the synth's block with and without a voice limit (voices that never end: no loop flags)
   const Data plain = MakeSynthetic(rng, 4096, 0, "synthetic, no flags");
   const bool synth_ok = SynthTrial(rng, plain, 48, 48) && SynthTrial(rng, plain, 48, 30) &&
-                        SynthTrial(rng, plain, 12, 1) && SynthTrial(rng, plain, 20, 0);
+                        SynthTrial(rng, plain, 12, 1) && SynthTrial(rng, plain, 20, 0) &&
+                        PermanentCheck(plain);
   const bool alloc_ok = AllocatorChecks();
   const bool keyed_ok = KeyedOffChecks(plain);
   const bool budget_ok = BudgetChecks();
