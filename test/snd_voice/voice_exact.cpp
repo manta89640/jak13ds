@@ -577,9 +577,10 @@ bool SynthTrial(Rng& rng, const Data& data, int voices, int limit) {
       }
     }
   }
-  // the blocks without a limit before the first mute, and the limited ones
-  if (compared != 40) {
-    printf("MISMATCH (synth): %d blocks' output compared, 40 expected\n", compared);
+  // all of them when no voice was ever muted, else the blocks up to the end of the limit
+  const int expected = limit < voices ? 40 : kBlocks;
+  if (compared != expected) {
+    printf("MISMATCH (synth): %d blocks' output compared, %d expected\n", compared, expected);
     return false;
   }
   return true;
