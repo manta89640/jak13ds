@@ -8796,8 +8796,11 @@ void CtrLevels::stream_update(u64 frame) {
     }
   }
   const bool jak2 = g_game_version == GameVersion::Jak2;
+  // (Jak II: also the segment a near chunk needed now had no linear memory for)
   need_update(frame, free_now, parts_room, level_loading,
-              arena_wanted ? ctr_stream_kb() * 1024u + kGrowMargin : 0);
+              (arena_wanted ? ctr_stream_kb() * 1024u + kGrowMargin : 0) +
+                  (m_stream_claim_frame && frame <= m_stream_claim_frame + 8 ? m_stream_claim
+                                                                              : 0));
   title_update(frame);
   // made again once the heap has it over its floor (Jak II: need_update makes that room, and its
   // reads in flight keep theirs)
@@ -9182,6 +9185,7 @@ void CtrLevels::stream_update(u64 frame) {
   job.dir = lev.file_dir;
   u32 packed = 0;
   bool no_room = false;
+  u64 grow_short = 0;
   for (const auto& w : m_want) {
     if (w.lev != &lev) {
       continue;
@@ -9240,13 +9244,15 @@ void CtrLevels::stream_update(u64 frame) {
     if (!mem && evicted < su.bytes) {
       // (AI-assisted, streammem) the room of the parts jobs in flight too (parts_reserve)
       const u32 grow_reserve =
-          reserve + (level_loading ? kLoadRoom : std::max(kGrowHeadroom, parts_reserve)) +
-          (jak2 ? (u32)kNeedIdleRoom : 0u);
+          reserve + (level_loading ? kLoadRoom : std::max(kGrowHeadroom, parts_reserve));
       const u64 cap = arena.capacity();
       const u64 demand = need_now + std::max<u64>(kGrowMargin, need_now / 8);
       const u32 want = demand > cap ? (u32)std::min<u64>(demand - cap, 1u << 30) : 0;
       if (arena.grow(su.bytes, want, grow_reserve)) {
         mem = arena.alloc(su.bytes);
+      } else if (w.score < 0 && !level_loading) {
+        // (Jak II: the segment a unit needed now waits for is a claim on the chunks by need)
+        grow_short = std::max<u64>(want, CtrStreamArena::kSegment) + kGrowHeadroom;
       }
     }
     // Ring 0: every unit outside it gives way (no hysteresis, no residency), those not needed now
@@ -9391,6 +9397,10 @@ void CtrLevels::stream_update(u64 frame) {
         (job.stream_parts.size() >= kBatchUnits && limit == kBatchBytes)) {
       break;
     }
+  }
+  if (no_room && grow_short) {
+    m_stream_claim = grow_short;
+    m_stream_claim_frame = frame;
   }
   if (no_room) {
     // (statistics) the other units needed now that are not there wait for room too
