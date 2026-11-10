@@ -153,6 +153,13 @@ class CtrDirect {
   BuildVert m_build[3];
   int m_build_idx = 0;
   int m_strip_count = 0;
+  void push_vertex(const BuildVert& b);
+  // a tri strip whose packet holds exactly its 4 vertices (a font glyph): drawn as one quad
+  bool m_strip_quad = false;
+  BuildVert m_quad[4];
+  bool m_quad_adv[4] = {false, false, false, false};
+  // a font glyph whose atlas the GPU has no texture for: left out (untextured it is a solid box)
+  bool m_skip_prims = false;
 
   // batching
   bool m_state_dirty = true;

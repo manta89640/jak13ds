@@ -5305,8 +5305,11 @@ int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int flags) {
   }
   TexSlot* t = &g.textures[slot];
   C3D_Tex* tex = &t->tex;
+  /* room for the format's own size (linear_room_for_tex asks for 32 bits per texel) */
+  const size_t fmt_bytes = (size_t)n * (fmt == GPU_L8 ? 1u : 2u);
   ctr_linear_lock();
-  const bool ok = linear_room_for_tex(w, h, 0) && C3D_TexInit(tex, (u16)w, (u16)h, fmt);
+  const bool ok = (size_t)linearSpaceFree() >= fmt_bytes + LINEAR_RESERVE &&
+                  C3D_TexInit(tex, (u16)w, (u16)h, fmt);
   ctr_linear_unlock();
   if (!ok) {
     release_tex_slot(slot);

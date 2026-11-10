@@ -209,6 +209,8 @@ void CtrDirect::reset_state() {
   m_zbuf_mask = false;
   m_build_idx = 0;
   m_strip_count = 0;
+  m_strip_quad = false;
+  m_skip_prims = false;
   m_state_dirty = true;
   m_xyoff[0] = m_xyoff[1] = 0;
 }
@@ -267,6 +269,24 @@ void CtrDirect::render_gif(const u8* data, u32 size) {
     if (format == GifTag::Format::PACKED) {
       if (tag.pre()) {
         handle_prim(tag.prim());
+        if (m_prim.kind() == GsPrim::Kind::TRI_STRIP && tag.nloop() == 1 &&
+            offset + nreg * 16 <= size) {
+          // the whole strip is this tag's 4 vertices, with no register write between them that
+          // could change the draw state (the font's glyph packets): one quad (handle_xyz)
+          u32 xyz = 0;
+          bool plain = true;
+          for (u32 i = 0; i < nreg; i++) {
+            if (regs[i] == GifTag::RegisterDescriptor::XYZF2 ||
+                regs[i] == GifTag::RegisterDescriptor::XYZ2) {
+              xyz++;
+            } else if (xyz && (regs[i] == GifTag::RegisterDescriptor::AD ||
+                               regs[i] == GifTag::RegisterDescriptor::PRIM ||
+                               regs[i] == GifTag::RegisterDescriptor::TEX0_1)) {
+              plain = false;
+            }
+          }
+          m_strip_quad = plain && xyz == 4;
+        }
       }
       for (u32 loop = 0; loop < tag.nloop(); loop++) {
         for (u32 r = 0; r < nreg; r++) {
@@ -330,6 +350,7 @@ void CtrDirect::render_gif(const u8* data, u32 size) {
           offset += 16;
         }
       }
+      m_strip_quad = false;
     } else if (format == GifTag::Format::REGLIST) {
       for (u32 loop = 0; loop < tag.nloop(); loop++) {
         for (u32 r = 0; r < nreg; r++) {
@@ -472,6 +493,7 @@ void CtrDirect::handle_prim(u64 val) {
   }
   m_build_idx = 0;
   m_strip_count = 0;
+  m_strip_quad = false;
 }
 
 void CtrDirect::handle_rgbaq(u64 val) {
@@ -501,10 +523,16 @@ void CtrDirect::update_draw_state() {
   st.tex = -1;
   m_tex_w = m_tex_h = 1;
   m_uv_scale_s = m_uv_scale_t = 1.f / 16.f;
+  m_skip_prims = false;
   if (m_prim.tme()) {
     const CtrTexture* tex = m_vram->get_texture(m_tex0);
     if (m_keep) {
       m_kept_lookups.push_back({m_tex0, tex ? tex->handle : -1});
+    }
+    if (!tex || tex->handle < 0) {
+      const auto psm = GsTex0(m_tex0).psm();
+      m_skip_prims = psm == GsTex0::PSM::PSMT4HH || psm == GsTex0::PSM::PSMT4HL ||
+                     psm == GsTex0::PSM::PSMT8H;
     }
     if (tex && tex->handle >= 0) {
       GsTex0 t(m_tex0);
@@ -569,7 +597,10 @@ void CtrDirect::batch_mode(bool quads) {
 }
 
 void CtrDirect::push_vertex(int idx) {
-  const auto& b = m_build[idx];
+  push_vertex(m_build[idx]);
+}
+
+void CtrDirect::push_vertex(const BuildVert& b) {
   ctr_vertex v;
   v.x = b.x;
   v.y = b.y;
@@ -606,6 +637,11 @@ void CtrDirect::push_vertex(int idx) {
 void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
   if (m_state_dirty) {
     update_draw_state();
+  }
+  if (m_skip_prims) {
+    m_build_idx = 0;
+    m_strip_count = 0;
+    return;
   }
   auto& b = m_build[m_build_idx];
   // GS coordinates are 12.4 fixed point, centered at 2048. Jak 1 draws a 512 x 224 field.
@@ -663,6 +699,34 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
         m_build_idx = 0;
       }
       m_strip_count++;
+      if (m_strip_quad && m_strip_count <= 4) {
+        // triangles (0 1 2) and (1 2 3), as the strip gives them: the quad 0 1 3 2
+        m_quad[m_strip_count - 1] = b;
+        m_quad_adv[m_strip_count - 1] = advance;
+        if (m_strip_count < 4) {
+          break;
+        }
+        m_strip_quad = false;
+        if (m_quad_adv[2] && m_quad_adv[3]) {
+          batch_mode(true);
+          push_vertex(m_quad[0]);
+          push_vertex(m_quad[1]);
+          push_vertex(m_quad[3]);
+          push_vertex(m_quad[2]);
+          m_stats.triangles += 2;
+        } else {
+          for (int k = 2; k < 4; k++) {
+            if (m_quad_adv[k]) {
+              batch_mode(false);
+              push_vertex(m_quad[k - 2]);
+              push_vertex(m_quad[k - 1]);
+              push_vertex(m_quad[k]);
+              m_stats.triangles++;
+            }
+          }
+        }
+        break;
+      }
       if (m_strip_count >= 3 && advance) {
         batch_mode(false);
         for (int i = 0; i < 3; i++) {
