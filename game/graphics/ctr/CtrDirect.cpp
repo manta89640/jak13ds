@@ -200,7 +200,9 @@ CtrDirect::CtrDirect(CtrVram* vram) : m_vram(vram) {
 void CtrDirect::reset_state() {
   m_prim = GsPrim();
   m_tex0 = 0;
-  m_tex1 = 0;
+  // Jak II: bilinear until a TEX1 says otherwise, as the PS2's default registers and the PC (text
+  // sends no TEX1: it was nearest only when it was the first textured draw of its bucket)
+  m_tex1 = ctr_is_jak2() ? 0x60 : 0;
   m_clamp = 0b101;
   // same defaults as DirectRenderer (the GS state set by the default registers chain):
   // z test GEQUAL, blending (Cs - Cd) * As + Cd
