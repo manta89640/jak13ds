@@ -93,6 +93,44 @@ class CtrSky {
   void finish_blend();
 };
 
+/*!
+ * Jak II: the stars, the haze ring and the two cloud layers from the game's sky packets
+ * (CtrSkyJak2Packet.h) in place of its sprites and clipped polygons. The haze's and the clouds'
+ * vertices go to the GPU as the game has them (the clip program transforms and clips them); the
+ * stars are projected here from directions made once.
+ */
+class CtrSkyJak2 {
+ public:
+  /*! the PRIM of a packet's polygons (for CtrDirect::prim_state); false: not one of the packets */
+  static bool packet_prim(u16 kind, const u8* data, u32 size, u64* prim);
+  /*! a new sky bucket: the items of the frame before are gone */
+  void begin(bool log_now);
+  /*! a packet and its draw state, for draw (the data must stay until then). The item's index. */
+  int add(u16 kind, const u8* data, const ctr_draw_state& state);
+  /*! depth_tested: as the deferred sky (GEQUAL against the cleared depth, no depth writes) */
+  void draw(int item, bool depth_tested);
+
+ private:
+  struct Item {
+    u16 kind;
+    const u8* data;
+    ctr_draw_state st;
+  };
+  std::vector<Item> m_items;
+  // the stars' unit directions before star-mat, from the generator's seed
+  u32 m_seed[8][4];
+  bool m_dirs_valid = false;
+  float m_dirs[512][3];
+  std::vector<ctr_vertex> m_quads;
+  struct Stats {
+    int frames = 0, stars = 0, haze = 0, clouds = 0, no_room = 0;
+  } m_stats;
+  void make_dirs(const u32 seed[8][4]);
+  void draw_stars(const u8* data, const ctr_draw_state& st);
+  void draw_haze(const u8* data, const ctr_draw_state& st);
+  void draw_clouds(const u8* data, const ctr_draw_state& st);
+};
+
 class CtrTfragRenderer;
 
 /*! The tfrag-trans + sky blend buckets: the sky blend, then the level's trans tfrag: the camera

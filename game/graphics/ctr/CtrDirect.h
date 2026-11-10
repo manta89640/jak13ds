@@ -85,7 +85,17 @@ class CtrDirect {
    */
   void set_record(bool on);
   bool has_recorded() const { return !m_rec.empty(); }
-  void replay_recorded(bool depth_tested);
+  /*! at_mark(arg, id, depth_tested): called where record_mark(id) was, between the batches */
+  using MarkFn = void (*)(void* arg, int id, bool depth_tested);
+  void replay_recorded(bool depth_tested, MarkFn at_mark = nullptr, void* arg = nullptr);
+  /*! Record mode: a place between the kept batches (what the caller draws itself there). */
+  void record_mark(int id);
+  /*!
+   * The draw state of the GS registers as they are with this PRIM, for polygons the caller draws
+   * itself; what is queued with another state is drawn (or kept) first. False: the polygons are
+   * left out (a texture the GPU has none for, as the packets' own).
+   */
+  bool prim_state(u64 prim, ctr_draw_state* out);
 
   /*!
    * Keep mode: the batches flush() draws are also kept (and the textures the packets named), until
@@ -185,6 +195,7 @@ class CtrDirect {
     ctr_draw_state st;
     bool quads;
     u32 first, count;
+    int mark = -1;  // record_mark's id: no vertices
   };
   bool m_record = false;
   std::vector<RecBatch> m_rec;

@@ -16,6 +16,7 @@
 
 #include "common/log/log.h"
 
+#include "game/graphics/ctr/CtrSkyJak2Packet.h"
 #include "game/mips2c/native_goalc_ops.h"
 
 namespace Mips2C::jak2::native2 {
@@ -532,31 +533,38 @@ u64 method_32_sky_work_impl(const NativeArgs& args) {
  * (vf8, vf11, the color at 528 + 16 * (i & 15), vf2, corner 1, vf5, corner 2, z = 0).
  * sky_regs_vfs gets vf1-vf5, vf8, vf11, vf15, vf16 as the mips2c version leaves them.
  */
-u64 method_33_sky_work_impl(const NativeArgs& args) {
+//! (method 33 sky-work)'s start: the star texture's adgif shader to the dma-buffer (alpha 72).
+//! False when the texture isn't there (nothing written).
+bool stars_adgif(const NativeArgs& args, u32 s5, u32 gp) {
   static const u32 lookup_sym = sym_value_addr("lookup-texture-by-id-fast");
   static const u32 adgif_sym = sym_value_addr("adgif-shader<-texture-simple!");
-  const u32 s5 = (u32)args.a[0];
-  const u32 gp = (u32)args.a[1];
   gstore<u32>(s5 + 1868, gp);
   u64 call_args[8] = {0x47500500, args.a[1], args.a[2], args.a[3],
                       args.a[4],  args.a[5], args.a[6], args.a[7]};
   const u64 tex = native_call_goal(gload<u32>(lookup_sym), call_args, args);
   if (tex == args.st) {
-    return 0;
+    return false;
   }
-  {
-    const u32 base = gload<u32>(gload<u32>(s5 + 1868) + 4);
-    gcopy_q(base & ~15u, s5 & ~15u);
-    gcopy_q((base + 16) & ~15u, (s5 + 16) & ~15u);
-    const u32 s4 = base + 32;
-    call_args[0] = s4;
-    call_args[1] = tex;
-    call_args[3] = args.st;  // a3 = #f (delay slot of the texture check)
-    native_call_goal(gload<u32>(adgif_sym), call_args, args);
-    gstore<u64>(s4 + 64, 72);
-    const u32 buf = gload<u32>(s5 + 1868);
-    const u32 next = gload<u32>(buf + 4) + 112;
-    gstore<u32>(gload<u32>(s5 + 1868) + 4, next);
+  const u32 base = gload<u32>(gload<u32>(s5 + 1868) + 4);
+  gcopy_q(base & ~15u, s5 & ~15u);
+  gcopy_q((base + 16) & ~15u, (s5 + 16) & ~15u);
+  const u32 s4 = base + 32;
+  call_args[0] = s4;
+  call_args[1] = tex;
+  call_args[3] = args.st;  // a3 = #f (delay slot of the texture check)
+  native_call_goal(gload<u32>(adgif_sym), call_args, args);
+  gstore<u64>(s4 + 64, 72);
+  const u32 buf = gload<u32>(s5 + 1868);
+  const u32 next = gload<u32>(buf + 4) + 112;
+  gstore<u32>(gload<u32>(s5 + 1868) + 4, next);
+  return true;
+}
+
+u64 method_33_sky_work_impl(const NativeArgs& args) {
+  const u32 s5 = (u32)args.a[0];
+  const u32 gp = (u32)args.a[1];
+  if (!stars_adgif(args, s5, gp)) {
+    return 0;
   }
   u32 a3 = gload<u32>(gp + 4);
   float vf2[4], vf5[4], vf8[4], vf11[4];
@@ -646,6 +654,119 @@ u64 method_33_sky_work_impl(const NativeArgs& args) {
   return 0;
 }
 
+// The sky packets for the 3DS renderer (CtrSkyJak2Packet.h). Off (config.ini mips2c_native_off
+// naming pc-sky-3ds, host OPENGOAL_SKY_PACKETS=0): sky-tng.gc builds the GIF polygons as before.
+bool sky_packets_on() {
+  static int on = -1;
+  if (on < 0) {
+    on = native_turned_off("pc-sky-3ds") ? 0 : 1;
+#ifndef __3DS__
+    const char* e = getenv("OPENGOAL_SKY_PACKETS");
+    if (e && e[0] == '0') {
+      on = 0;
+    }
+#endif
+  }
+  return on == 1;
+}
+
+constexpr u32 kSkyHeadBytes = (u32)sizeof(ctr_sky_jak2::Head);
+
+//! a cnt tag (vif0: PC_PORT with the kind) for bytes of data at the dma-buffer's base, which
+//! moves past them; returns where the data goes
+u32 sky_packet_begin(u32 dma, u32 kind, u32 bytes) {
+  const u32 base = gload<u32>(dma + 4);
+  gstore<u64>(base, 0x10000000ull | (bytes / 16));
+  gstore<u32>(base + 8, 0x08000000u | kind);
+  gstore<u32>(base + 12, 0);
+  gstore<u32>(dma + 4, base + 16 + bytes);
+  return base + 16;
+}
+
+//! the packet's head from the sky code's VU0 registers (vf24: only the clouds set it)
+void sky_packet_head(u32 out, float sx, float sy, float sw, bool tex_off, const void* giftag) {
+  ctr_sky_jak2::Head h;
+  memcpy(h.rows[0], vf(31), 16);
+  memcpy(h.rows[1], vf(30), 16);
+  memcpy(h.rows[2], vf(29), 16);
+  memcpy(h.rows[3], vf(28), 16);
+  h.scale[0] = sx;
+  h.scale[1] = sy;
+  h.scale[2] = sw;
+  h.scale[3] = 0.f;
+  memcpy(h.hvdf, vf(25), 16);
+  if (tex_off) {
+    memcpy(h.tex_off, vf(24), 16);
+  } else {
+    memset(h.tex_off, 0, 16);
+  }
+  memcpy(h.giftag, giftag, 16);
+  gstore_bytes(out, &h, sizeof(h));
+}
+
+//! (pc-sky-3ds?): #t when the packet natives below are on
+u64 pc_sky_3ds_on_impl(const NativeArgs& args) {
+  return sky_packets_on() ? args.st + 4 : args.st;
+}
+
+/*!
+ * (pc-sky-3ds-stars sky-work dma-buffer), in place of stars-transform-asm and stars-dma: the star
+ * texture's adgif shader as stars-dma writes it, then the stars' inputs (after
+ * init-regs-for-sky-asm: the camera rows unscaled, vf14 the hmge scale).
+ */
+u64 pc_sky_3ds_stars_impl(const NativeArgs& args) {
+  const u32 s5 = (u32)args.a[0];
+  const u32 gp = (u32)args.a[1];
+  if (!stars_adgif(args, s5, gp)) {
+    return 0;
+  }
+  const u32 out = sky_packet_begin(gp, ctr_sky_jak2::kStars, (u32)sizeof(ctr_sky_jak2::Stars));
+  sky_packet_head(out, 1.f, 1.f, vf(14)[3], false, gptr(s5 + 48));
+  u32 o = out + kSkyHeadBytes;
+  gstore_bytes(o, gptr(s5 + 816), 128);
+  o += 128;
+  gstore_bytes(o, gptr(s5 + 1488), 48);
+  o += 48;
+  gstore_bytes(o, gptr(s5 + 528), 256);
+  o += 256;
+  gstore_bytes(o, gptr(s5 + 384), 32);
+  o += 32;
+  gstore_bytes(o, gptr(s5 + 784), 32);
+  return 0;
+}
+
+/*!
+ * (pc-sky-3ds-haze dma-buffer) / (pc-sky-3ds-clouds dma-buffer), in place of draw-haze's and
+ * draw-clouds's polygons (after init-regs-for-large-polygon-draw, set-sky-vf27 and, for the
+ * clouds, set-tex-offset: the camera rows times hmge, vf26 its inverse): the lit vertices.
+ * #f when off.
+ */
+u64 pc_sky_3ds_haze_impl(const NativeArgs& args) {
+  if (!sky_packets_on()) {
+    return args.st;
+  }
+  static const u32 verts_sym = sym_value_addr("*haze-vert-array*");
+  const u32 out =
+      sky_packet_begin((u32)args.a[0], ctr_sky_jak2::kHaze, (u32)sizeof(ctr_sky_jak2::Haze));
+  sky_packet_head(out, vf(26)[0], vf(26)[1], 1.f, false, vf(27));
+  gstore_bytes(out + kSkyHeadBytes, gptr(gload<u32>(verts_sym)),
+               (u32)(36 * sizeof(ctr_sky_jak2::HazeVertex)));
+  return args.st + 4;
+}
+
+u64 pc_sky_3ds_clouds_impl(const NativeArgs& args) {
+  if (!sky_packets_on()) {
+    return args.st;
+  }
+  static const u32 verts_sym = sym_value_addr("*cloud-vert-array*");
+  const u32 out =
+      sky_packet_begin((u32)args.a[0], ctr_sky_jak2::kClouds, (u32)sizeof(ctr_sky_jak2::Clouds));
+  sky_packet_head(out, vf(26)[0], vf(26)[1], 1.f, true, vf(27));
+  gstore_bytes(out + kSkyHeadBytes, gptr(gload<u32>(verts_sym)),
+               (u32)(100 * sizeof(ctr_sky_jak2::CloudVertex)));
+  return args.st + 4;
+}
+
 }  // namespace
 
 // (AI-assisted) no GOAL calls, no scratch space
@@ -656,5 +777,10 @@ const NativeImpl render_sky_quads = MIPS2C_NATIVE_IMPL(render_sky_quads_impl, NA
 // (AI-assisted) call GOAL functions (vector-normalize!; the texture lookup and adgif setup)
 const NativeImpl method_32_sky_work = MIPS2C_NATIVE_IMPL(method_32_sky_work_impl, NATIVE_CALLS_GOAL, 0);
 const NativeImpl method_33_sky_work = MIPS2C_NATIVE_IMPL(method_33_sky_work_impl, NATIVE_CALLS_GOAL, 0);
+// the sky packets for the 3DS renderer, no mips2c versions
+const NativeImpl pc_sky_3ds_on = MIPS2C_NATIVE_IMPL(pc_sky_3ds_on_impl, 0, 0);
+const NativeImpl pc_sky_3ds_stars = MIPS2C_NATIVE_IMPL(pc_sky_3ds_stars_impl, NATIVE_CALLS_GOAL, 0);
+const NativeImpl pc_sky_3ds_haze = MIPS2C_NATIVE_IMPL(pc_sky_3ds_haze_impl, 0, 0);
+const NativeImpl pc_sky_3ds_clouds = MIPS2C_NATIVE_IMPL(pc_sky_3ds_clouds_impl, 0, 0);
 
 }  // namespace Mips2C::jak2::native2

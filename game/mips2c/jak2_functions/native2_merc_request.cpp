@@ -64,28 +64,49 @@ constexpr u32 kFgEffect = 0x9cc;  // 8 bytes each: color-fade u32, merc-path, ig
 constexpr u32 kMcEffectCount = 52;  // u32
 constexpr u32 kMcEffect = 0x9c;     // 32 bytes each
 
-//! the matrix numbers of the effects that are drawn are all < 128 (the GOAL code's (break!))
-bool matrices_ok(u32 mc, s64 tex_idx, u32 fg) {
-  const u64 count = gload<u32>(mc + kMcEffectCount);
-  for (u64 e = 0; e < count; e++) {
-    const u32 bi = (u32)((e << 3) + kFgEffect + fg);
-    if (gload<u8>(bi + 4) != 0 || gload<u8>(bi + 6) != 0) {
+//! what the effects drawn with this texture index give: their bits and the matrix slot list
+struct Slots {
+  u8 list[128];  // the matrix numbers in the order they are first used, 0xff after them
+  u32 count;
+  u64 enable_mask, ignore_alpha_mask;
+};
+
+//! False: a matrix number >= 128 (the GOAL code's (break!)).
+bool collect_slots(u32 mc, s64 tex_idx, u32 fg, Slots* out) {
+  u8 transferred[128];
+  memset(transferred, 0, sizeof(transferred));
+  memset(out->list, 0xff, sizeof(out->list));
+  out->count = 0;
+  out->enable_mask = 0;
+  out->ignore_alpha_mask = 0;
+  const s64 effects = (s64)gload<u32>(mc + kMcEffectCount);
+  for (s64 e = 0; e < effects; e++) {
+    const u32 bi = (u32)(((u64)e << 3) + kFgEffect + fg);
+    const u32 eff = (u32)(((u64)e << 5) + kMcEffect + mc);
+    if (gload<u8>(bi + 4) != 0 || gload<u8>(bi + 6) != 0 ||
+        tex_idx != (s64)gload<u8>(eff + 26)) {
       continue;
     }
-    const u32 eff = (u32)((e << 5) + kMcEffect + mc);
-    if (tex_idx != (s64)gload<u8>(eff + 26)) {
-      continue;
+    const u64 bit = e > 0 ? (u64)1 << (e & 63) : (u64)((s64)1 >> ((0 - e) & 63));
+    out->enable_mask |= bit;
+    if (gload<u8>(bi + 5) != 0) {
+      out->ignore_alpha_mask |= bit;
     }
     u32 frag = gload<u32>(eff + 4);
-    const u64 frags = gload<u16>(eff + 18);
-    for (u64 f = 0; f < frags; f++) {
-      const u64 n = gload<u8>(frag + 3);
-      for (u64 m = 0; m < n; m++) {
-        if (gload<u8>((u32)((m << 1) + 4 + frag)) >= 128) {
+    const u32 frags = gload<u16>(eff + 18);
+    for (u32 f = 0; f < frags; f++) {
+      const u32 n = gload<u8>(frag + 3);
+      for (u32 m = 0; m < n; m++) {
+        const u32 mat = gload<u8>(frag + 4 + 2 * m);
+        if (mat >= 128) {
           return false;
         }
+        if (transferred[mat] == 0) {
+          transferred[mat] = 1;
+          out->list[out->count++] = (u8)mat;
+        }
       }
-      frag = (u32)(frag + 2 * n + 4);
+      frag = frag + 2 * n + 4;
     }
   }
   return true;
@@ -94,12 +115,13 @@ bool matrices_ok(u32 mc, s64 tex_idx, u32 fg) {
 u32 merc_draw_request(u32 dc,
                       u32 dma,
                       u32 matrix_buf,
-                      s64 tex_idx,
+                      const Slots& slots,
+                      u32 mc,
+                      u32 fg,
                       u32 update_verts,
                       u32 blercs,
                       u32 blerc_sym,
                       u32 false_sym) {
-  const u32 fg = gload<u32>(foreground_val());
   const u32 start = dma;
   gstore<u64>(start, 0x10000000ull);
   gstore<u32>(start + 8, 0);
@@ -107,107 +129,60 @@ u32 merc_draw_request(u32 dc,
   dma = start + 16;
   // NAME: charp<-string
   {
-    u32 src = gload<u32>(gload<u32>(dc + kDcMgeo) + 4) + 4;
-    u32 dst = dma;
-    while (gload<u8>(src) != 0) {
-      gstore<u8>(dst, gload<u8>(src));
-      dst++;
-      src++;
-    }
-    gstore<u8>(dst, 0);
+    const char* name = (const char*)gptr(gload<u32>(gload<u32>(dc + kDcMgeo) + 4) + 4);
+    gstore_bytes(dma, name, (u32)strlen(name) + 1);
   }
   dma += 16 * 8;
   u64 qwc = 8;
   // LIGHTS: quad-copy! of 7 quadwords
-  for (u32 q = 0; q < 7; q++) {
-    gstore_bytes(dma + 16 * q, gptr(fg + kFgLight + 16 * q), 16);
-  }
+  gstore_bytes(dma, gptr(fg + kFgLight), 16 * 7);
   dma += 16 * 7;
   qwc += 7;
-  const u32 slots = dma;
-  u64 enable_mask = 0;
-  u64 ignore_alpha_mask = 0;
-  s64 out_idx = 0;
+  // the matrix slot list, then a pointer per slot (4 bytes of its quadword)
+  gstore_bytes(dma, slots.list, 128);
   dma += 16 * 8;
   qwc += 8;
-  u8 transferred[128];
-  memset(transferred, 0, sizeof(transferred));
-  const u32 mc = gload<u32>((u32)(((u64)(s64)gload<s8>(dc + kDcCurLod) << 3) + kDcLodSet + dc));
-  for (s64 e = 0; e < (s64)gload<u32>(mc + kMcEffectCount); e++) {
-    const u32 bi = (u32)(((u64)e << 3) + kFgEffect + fg);
-    const u32 eff = (u32)(((u64)e << 5) + kMcEffect + mc);
-    if (gload<u8>(bi + 4) != 0 || gload<u8>(bi + 6) != 0 ||
-        tex_idx != (s64)gload<u8>(eff + 26)) {
-      continue;
-    }
-    const u64 bit = e > 0 ? (u64)1 << (e & 63) : (u64)((s64)1 >> ((0 - e) & 63));
-    enable_mask |= bit;
-    if (gload<u8>(bi + 5) != 0) {
-      ignore_alpha_mask |= bit;
-    }
-    u32 frag = gload<u32>(eff + 4);
-    for (s64 f = 0; f < (s64)gload<u16>(eff + 18); f++) {
-      for (s64 m = 0; m < (s64)gload<u8>(frag + 3); m++) {
-        const u64 mat = gload<u8>((u32)(((u64)m << 1) + 4 + frag));
-        if (transferred[mat] == 0) {
-          transferred[mat] = 1;
-          gstore<u8>((u32)(out_idx + slots), (u8)mat);
-          out_idx++;
-          gstore<u32>(dma, (u32)((u64)(s64)(s32)((u32)0x80 * (u32)mat) + matrix_buf));
-          dma += 16;
-          qwc += 1;
-        }
-      }
-      frag = (u32)(frag + (u64)(s64)(s32)((u32)2 * (u32)gload<u8>(frag + 3)));
-      frag += 4;
-    }
+  for (u32 k = 0; k < slots.count; k++) {
+    gstore<u32>(dma, (u32)((u64)(s64)(s32)((u32)0x80 * (u32)slots.list[k]) + matrix_buf));
+    dma += 16;
   }
-  while (out_idx < 128) {
-    gstore<u8>((u32)(out_idx + slots), 0xff);
-    out_idx++;
-  }
+  qwc += slots.count;
+  const u32 effects = gload<u32>(mc + kMcEffectCount);
   // flags
   const u32 flags = dma;
-  gstore<u8>(flags + 16, (u8)gload<u32>(mc + kMcEffectCount));
-  gstore<u8>(flags + 17, 0);
+  u8 bits = 0;
   if (update_verts != false_sym) {
-    if (update_verts == blerc_sym) {
-      gstore<u8>(flags + 17, (u8)(gload<u8>(flags + 17) | 4));
-    } else {
-      gstore<u8>(flags + 17, (u8)(gload<u8>(flags + 17) | 1));
-    }
+    bits |= update_verts == blerc_sym ? 4 : 1;
   }
   if (gload<u16>(dc + kDcStatus) & 0x2000) {
-    gstore<u8>(flags + 17, (u8)(gload<u8>(flags + 17) | 2));
+    bits |= 2;
   }
   if (gload<u8>(dc + kDcGlobalEffect) & 8) {
-    gstore<u8>(flags + 17, (u8)(gload<u8>(flags + 17) | 8));
+    bits |= 8;
   }
-  gstore<u64>(flags, enable_mask);
-  gstore<u64>(flags + 8, ignore_alpha_mask);
+  gstore<u64>(flags, slots.enable_mask);
+  gstore<u64>(flags + 8, slots.ignore_alpha_mask);
+  gstore<u8>(flags + 16, (u8)effects);
+  gstore<u8>(flags + 17, bits);
   dma += 16 * 2;
   qwc += 2;
   if (update_verts == blerc_sym) {
-    // mem-copy!: ascending byte copy
-    for (u32 i = 0; i < 40 * 4; i++) {
-      gstore<u8>(dma + i, gload<u8>(blercs + i));
-    }
+    gstore_bytes(dma, gptr(blercs), 40 * 4);
     dma += 40 * 4;
     qwc += 10;
   }
   // fades
-  for (s64 i = 0; i < (s64)gload<u32>(mc + kMcEffectCount); i++) {
-    gstore<u32>((u32)(((u64)i << 2) + dma), gload<u32>((u32)(((u64)i << 3) + kFgEffect + fg)));
+  for (u32 i = 0; i < effects; i++) {
+    gstore<u32>(dma + 4 * i, gload<u32>(fg + kFgEffect + 8 * i));
   }
-  u64 n = ((u64)gload<u32>(mc + kMcEffectCount) + 3) >> 2;
-  dma = (u32)((u64)(s64)(s32)((u32)16 * (u32)n) + dma);
+  const u32 n = (effects + 3) >> 2;
+  dma += 16 * n;
   qwc += n;
   // merc pointers
-  for (s64 i = 0; i < (s64)gload<u32>(mc + kMcEffectCount); i++) {
-    gstore<u32>((u32)(((u64)i << 2) + dma), (u32)(((u64)i << 5) + kMcEffect + mc));
+  for (u32 i = 0; i < effects; i++) {
+    gstore<u32>(dma + 4 * i, mc + kMcEffect + 32 * i);
   }
-  n = ((u64)gload<u32>(mc + kMcEffectCount) + 3) >> 2;
-  dma = (u32)((u64)(s64)(s32)((u32)16 * (u32)n) + dma);
+  dma += 16 * n;
   qwc += n;
   gstore<u64>(start, 0x10000000ull | ((qwc << 48) >> 48));
   return dma;
@@ -240,7 +215,8 @@ u64 pc_merc_draw_request_impl(const NativeArgs& args) {
   const u32 blercs = (u32)args.a[5];
   const u32 fg = gload<u32>(foreground_val());
   const u32 mc = gload<u32>((u32)(((u64)(s64)gload<s8>(dc + kDcCurLod) << 3) + kDcLodSet + dc));
-  if (!matrices_ok(mc, tex_idx, fg)) {
+  Slots slots;
+  if (!collect_slots(mc, tex_idx, fg, &slots)) {
     return 0;
   }
   static const u32 blerc_sym = ::jak2::intern_from_c("blerc").offset;
@@ -257,8 +233,8 @@ u64 pc_merc_draw_request_impl(const NativeArgs& args) {
     return native_verify_inline(
         "pc-merc-draw-request", {{dma, max_bytes}},
         [&]() -> u64 {
-          return merc_draw_request(dc, dma, matrix_buf, tex_idx, update_verts, blercs, blerc_sym,
-                                   false_sym);
+          return merc_draw_request(dc, dma, matrix_buf, slots, mc, fg, update_verts, blercs,
+                                   blerc_sym, false_sym);
         },
         [&]() -> u64 {
           nested = true;
@@ -269,7 +245,7 @@ u64 pc_merc_draw_request_impl(const NativeArgs& args) {
         });
   }
 #endif
-  return merc_draw_request(dc, dma, matrix_buf, tex_idx, update_verts, blercs, blerc_sym,
+  return merc_draw_request(dc, dma, matrix_buf, slots, mc, fg, update_verts, blercs, blerc_sym,
                            false_sym);
 }
 

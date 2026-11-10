@@ -7,6 +7,8 @@
 #include "CtrSky.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstddef>
 #include <cstring>
 
 #include "common/dma/dma.h"
@@ -16,6 +18,7 @@
 #include "game/graphics/ctr/CtrLevel.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/CtrSimd.h"
+#include "game/graphics/ctr/CtrSkyJak2Packet.h"
 #include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
@@ -466,6 +469,297 @@ bool CtrSky::roof_covers_screen(const u8* packet, const CtrRenderState& rs) cons
     }
   }
   return true;
+}
+
+namespace {
+
+// Jak II's 416 line frame (CtrDirect's GS y to clip y)
+constexpr float kJak2YScale = 1.f / 208.f;
+// GS z 65536: inside the clip volume (CtrSky::draw)
+constexpr float kDomeZ = 2.f * 65536.f / 16777215.f - 1.f;
+constexpr int kHazeVerts = 72, kHazeIndices = 36 * 6;
+constexpr int kCloudVerts = 200, kCloudIndices = 162 * 6;
+
+u8 dome_color(float f) {
+  return (u8)std::clamp(f, 0.f, 255.f);
+}
+
+// draw-large-polygon's projection of the head as the clip program's matrix (row major, clip =
+// M (x y z 1)); the dome's vertices have w = 0 (sky-data.gc), so rows[3] has no part
+void dome_matrix(const ctr_sky_jak2::Head& h, float m[16]) {
+  const float hx = h.hvdf[0] - 2048.f, hy = h.hvdf[1] - 2048.f;
+  for (int c = 0; c < 3; c++) {
+    const float w = h.rows[c][3] * h.scale[2];
+    m[c] = (h.rows[c][0] * h.scale[0] + hx * w) * (1.f / 256.f);
+    m[4 + c] = -(h.rows[c][1] * h.scale[1] + hy * w) * kJak2YScale;
+    m[8 + c] = kDomeZ * w;
+    m[12 + c] = w;
+  }
+  m[3] = m[7] = m[11] = m[15] = 0.f;
+}
+
+// render-sky-quad's fan 0 1 2 3 of each quad. Haze: quad i is the ring's vertex i (2 i), the one
+// above it (2 i + 1), above the next and the next. Clouds: per layer the 9 x 9 quads of its
+// 10 x 10 vertices, corners i, i + 1, i + 11, i + 10.
+struct DomeIndices {
+  u16 haze[kHazeIndices];
+  u16 clouds[kCloudIndices];
+  DomeIndices() {
+    u16* o = haze;
+    for (int i = 0; i < 36; i++) {
+      const int n = (i + 1) % 36;
+      const u16 q[4] = {(u16)(2 * i), (u16)(2 * i + 1), (u16)(2 * n + 1), (u16)(2 * n)};
+      for (int k : {0, 1, 2, 0, 2, 3}) {
+        *o++ = q[k];
+      }
+    }
+    o = clouds;
+    for (int layer = 0; layer < 2; layer++) {
+      for (int r = 0; r < 9; r++) {
+        for (int c = 0; c < 9; c++) {
+          const int i = 100 * layer + 10 * r + c;
+          const u16 q[4] = {(u16)i, (u16)(i + 1), (u16)(i + 11), (u16)(i + 10)};
+          for (int k : {0, 1, 2, 0, 2, 3}) {
+            *o++ = q[k];
+          }
+        }
+      }
+    }
+  }
+};
+
+const DomeIndices& dome_indices() {
+  static const DomeIndices indices;
+  return indices;
+}
+
+}  // namespace
+
+bool CtrSkyJak2::packet_prim(u16 kind, const u8* data, u32 size, u64* prim) {
+  size_t want = 0;
+  if (kind == ctr_sky_jak2::kStars) {
+    want = sizeof(ctr_sky_jak2::Stars);
+  } else if (kind == ctr_sky_jak2::kHaze) {
+    want = sizeof(ctr_sky_jak2::Haze);
+  } else if (kind == ctr_sky_jak2::kClouds) {
+    want = sizeof(ctr_sky_jak2::Clouds);
+  }
+  if (!want || size != want) {
+    return false;
+  }
+  *prim = GifTag(data + offsetof(ctr_sky_jak2::Head, giftag)).prim();
+  return true;
+}
+
+void CtrSkyJak2::begin(bool log_now) {
+  m_items.clear();
+  m_stats.frames++;
+  if (log_now) {
+    lg::info("[ctr] sky packets: {} frames, {} star quads, {} haze and {} cloud draws, {} without "
+             "vertex room",
+             m_stats.frames, m_stats.stars, m_stats.haze, m_stats.clouds, m_stats.no_room);
+    m_stats = Stats();
+  }
+}
+
+int CtrSkyJak2::add(u16 kind, const u8* data, const ctr_draw_state& state) {
+  m_items.push_back({kind, data, state});
+  return (int)m_items.size() - 1;
+}
+
+void CtrSkyJak2::draw(int item, bool depth_tested) {
+  if (item < 0 || item >= (int)m_items.size()) {
+    return;
+  }
+  const Item& it = m_items[item];
+  ctr_draw_state st = it.st;
+  if (depth_tested) {
+    st.ztest = CTR_TEST_GEQUAL;
+    st.zwrite = 0;
+  }
+  switch (it.kind) {
+    case ctr_sky_jak2::kStars:
+      draw_stars(it.data, st);
+      break;
+    case ctr_sky_jak2::kHaze:
+      draw_haze(it.data, st);
+      break;
+    case ctr_sky_jak2::kClouds:
+      draw_clouds(it.data, st);
+      break;
+    default:
+      break;
+  }
+}
+
+// stars-transform-asm's generator: 128 times the byte sum of three of the seed's 8 quadwords over
+// a fourth; its 16 bytes are 4 vectors (byte << 24 as a float / 32768)
+void CtrSkyJak2::make_dirs(const u32 seed[8][4]) {
+  memcpy(m_seed, seed, sizeof(m_seed));
+  u8 q[8][16];
+  memcpy(q, seed, sizeof(q));
+  u32 a1 = 0;
+  for (int it = 0; it < 128; it++) {
+    u8 s[16];
+    for (int b = 0; b < 16; b++) {
+      s[b] = (u8)(q[a1][b] + q[(a1 + 3) & 7][b] + q[(a1 + 5) & 7][b]);
+    }
+    memcpy(q[(a1 + 7) & 7], s, 16);
+    a1 = (a1 + 1) & 7;
+    static constexpr int kBase[4] = {4, 0, 12, 8};
+    for (int g = 0; g < 4; g++) {
+      float x[3];
+      for (int j = 0; j < 3; j++) {
+        x[j] = (float)(s32)((u32)s[kBase[g] + j] << 24) * (1.f / 32768.f);
+      }
+      const float len = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+      float* d = m_dirs[4 * it + g];
+      for (int j = 0; j < 3; j++) {
+        d[j] = len > 0.f ? x[j] / len : 0.f;
+      }
+    }
+  }
+  m_dirs_valid = true;
+}
+
+void CtrSkyJak2::draw_stars(const u8* data, const ctr_draw_state& st) {
+  ctr_sky_jak2::Stars p;
+  memcpy(&p, data, sizeof(p));
+  if (!m_dirs_valid || memcmp(m_seed, p.seed, sizeof(m_seed)) != 0) {
+    make_dirs(p.seed);
+  }
+  const ctr_sky_jak2::Head& h = p.head;
+  // stars-transform-asm and stars-dma in one step: the camera rows applied to star-mat's rows
+  // (lanes x, y, w), times vector-normalize!'s 50000
+  float a[3][3], up[3];
+  for (int j = 0; j < 3; j++) {
+    const float* r = p.mat[j];
+    static constexpr int kLane[3] = {0, 1, 3};
+    for (int l = 0; l < 3; l++) {
+      const int k = kLane[l];
+      a[j][l] = 50000.f * (h.rows[0][k] * r[0] + h.rows[1][k] * r[1] + h.rows[2][k] * r[2]);
+    }
+    up[j] = r[1];
+  }
+  u8 col[16][4];
+  for (int i = 0; i < 16; i++) {
+    for (int c = 0; c < 4; c++) {
+      col[i][c] = (u8)(p.colors[i][c] & 0xff);
+    }
+  }
+  const float q0 = p.st[0][2] != 0.f ? 1.f / p.st[0][2] : 1.f;
+  const float q1 = p.st[1][2] != 0.f ? 1.f / p.st[1][2] : 1.f;
+  const float s0 = p.st[0][0] * q0, t0 = p.st[0][1] * q0;
+  const float s1 = p.st[1][0] * q1, t1 = p.st[1][1] * q1;
+  m_quads.clear();
+  for (int k = 0; k < 512; k++) {
+    const float* d = m_dirs[k];
+    float px = a[0][0] * d[0] + a[1][0] * d[1] + a[2][0] * d[2];
+    float py = a[0][1] * d[0] + a[1][1] * d[1] + a[2][1] * d[2];
+    float pw = a[0][2] * d[0] + a[1][2] * d[1] + a[2][2] * d[2];
+    // mirrored to the upper half of the sky
+    if (std::signbit(up[0] * d[0] + up[1] * d[1] + up[2] * d[2])) {
+      px = -px;
+      py = -py;
+      pw = -pw;
+    }
+    const float w = (pw + h.rows[3][3]) * h.scale[2];
+    if (!(w > 0.f)) {
+      continue;  // behind the camera: its mirror image would be under the sky's base
+    }
+    const float inv = 1.f / w;
+    const float sx = (px + h.rows[3][0]) * h.scale[0] * inv + h.hvdf[0];
+    const float sy = (py + h.rows[3][1]) * h.scale[1] * inv + h.hvdf[1];
+    const float x0 = sx + p.corner[0][0], y0 = sy + p.corner[0][1];
+    const float x1 = sx + p.corner[1][0], y1 = sy + p.corner[1][1];
+    if (!(x0 > 0.f && y0 > 0.f && x1 < 4096.f && y1 < 4096.f)) {
+      continue;
+    }
+    // stars-dma's window test on the GS's 12.4 corners
+    const s32 ix0 = (s32)(x0 * 16.f), iy0 = (s32)(y0 * 16.f);
+    const s32 ix1 = (s32)(x1 * 16.f), iy1 = (s32)(y1 * 16.f);
+    if (!(ix0 < 36864 && iy0 < 36096 && 28672 < ix1 && 29440 < iy1)) {
+      continue;
+    }
+    // the sprite as CtrDirect makes it: corners 1, (2, 1), 2, (1, 2)
+    const float cx0 = ((float)ix0 * (1.f / 16.f) - 2048.f) * (1.f / 256.f);
+    const float cx1 = ((float)ix1 * (1.f / 16.f) - 2048.f) * (1.f / 256.f);
+    const float cy0 = (2048.f - (float)iy0 * (1.f / 16.f)) * kJak2YScale;
+    const float cy1 = (2048.f - (float)iy1 * (1.f / 16.f)) * kJak2YScale;
+    const u8* c = col[k & 15];
+    m_quads.push_back({cx0, cy0, 0.f, s0, t0, c[0], c[1], c[2], c[3]});
+    m_quads.push_back({cx1, cy0, 0.f, s1, t0, c[0], c[1], c[2], c[3]});
+    m_quads.push_back({cx1, cy1, 0.f, s1, t1, c[0], c[1], c[2], c[3]});
+    m_quads.push_back({cx0, cy1, 0.f, s0, t1, c[0], c[1], c[2], c[3]});
+  }
+  if (!m_quads.empty()) {
+    ctr_gpu_draw_quads(&st, m_quads.data(), (int)m_quads.size() / 4);
+    m_stats.stars += (int)m_quads.size() / 4;
+  }
+}
+
+void CtrSkyJak2::draw_haze(const u8* data, const ctr_draw_state& st) {
+  ctr_sky_jak2::Head h;
+  memcpy(&h, data, sizeof(h));
+  ctr_clip_vertex* v;
+  u16* idx;
+  if (!ctr_gpu_clip_reserve(kHazeVerts, kHazeIndices, &v, &idx)) {
+    m_stats.no_room++;
+    return;
+  }
+  // haze-vtx-to-sky: the ring's vertex with alpha 128 and the one above it (y = 3) with alpha 0
+  for (int i = 0; i < 36; i++) {
+    ctr_sky_jak2::HazeVertex hv;
+    memcpy(&hv, data + sizeof(h) + i * sizeof(hv), sizeof(hv));
+    const u8 r = dome_color(hv.col[0]), g = dome_color(hv.col[1]), b = dome_color(hv.col[2]);
+    v[2 * i] = {hv.pos[0], hv.pos[1], hv.pos[2], 1.f, 0.f, 0.f, r, g, b, 128};
+    v[2 * i + 1] = {hv.pos[0], 3.f, hv.pos[2], 1.f, 0.f, 0.f, r, g, b, 0};
+  }
+  memcpy(idx, dome_indices().haze, sizeof(dome_indices().haze));
+  float m[16];
+  dome_matrix(h, m);
+  const int first = 0, count = kHazeIndices;
+  ctr_gpu_clip_draw_ranges_mtx(m, 1, &st, &first, &count, 1, kHazeVerts, kHazeIndices);
+  m_stats.haze++;
+}
+
+void CtrSkyJak2::draw_clouds(const u8* data, const ctr_draw_state& st) {
+  ctr_sky_jak2::Head h;
+  memcpy(&h, data, sizeof(h));
+  ctr_clip_vertex* v;
+  u16* idx;
+  if (!ctr_gpu_clip_reserve(kCloudVerts, kCloudIndices, &v, &idx)) {
+    m_stats.no_room++;
+    return;
+  }
+  // cloud-vtx1-to-sky and cloud-vtx2-to-sky: each vertex once per layer; the texture coordinates
+  // as draw-large-polygon and the GS make them ((st + offset) Q / (q Q))
+  for (int i = 0; i < 100; i++) {
+    ctr_sky_jak2::CloudVertex cv;
+    memcpy(&cv, data + sizeof(h) + i * sizeof(cv), sizeof(cv));
+    const float* stq[2] = {cv.stq, cv.stq2};
+    const float* col[2] = {cv.col, cv.col2};
+    for (int layer = 0; layer < 2; layer++) {
+      const float q = stq[layer][2] + h.tex_off[2];
+      const float inv = q != 0.f ? 1.f / q : 1.f;
+      v[100 * layer + i] = {cv.pos[0],
+                            cv.pos[1],
+                            cv.pos[2],
+                            1.f,
+                            (stq[layer][0] + h.tex_off[0]) * inv,
+                            (stq[layer][1] + h.tex_off[1]) * inv,
+                            dome_color(col[layer][0]),
+                            dome_color(col[layer][1]),
+                            dome_color(col[layer][2]),
+                            dome_color(col[layer][3])};
+    }
+  }
+  memcpy(idx, dome_indices().clouds, sizeof(dome_indices().clouds));
+  float m[16];
+  dome_matrix(h, m);
+  const int first = 0, count = kCloudIndices;
+  ctr_gpu_clip_draw_ranges_mtx(m, 1, &st, &first, &count, 1, kCloudVerts, kCloudIndices);
+  m_stats.clouds++;
 }
 
 CtrSkyBlendRenderer::CtrSkyBlendRenderer(std::string name,
