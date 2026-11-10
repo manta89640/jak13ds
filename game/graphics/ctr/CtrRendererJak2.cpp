@@ -301,51 +301,91 @@ class CtrJak2DirectRenderer : public CtrBucketRenderer {
   std::unique_ptr<CtrDirect> m_direct;
 };
 
+// this frame ends with the menu's frozen frame drawn over it (ctr_jak2_menu_hold_draw)
+bool g_menu_hold = false;
+
 /*!
- * (AI-assisted, j2gaps) Jak II's bucket 3 (BlitDisplays on the PC). When a menu opens
- * (blit-displays, menu-mode) the game stops drawing the world and sends one copy request (pc-port
- * 0x10, tbp 0x3300) here; the sky bucket then draws that copy, tinted, behind the menu every frame
- * (sky-tng.gc). The 3DS kept nothing there: menus showed on black. The frame with the request
- * leaves the color buffer as the last frame left it (CtrRenderer::render_frame clears only the
- * depth then) and nothing is drawn before this bucket, so the copy is the game's last frame, as
- * the PC's copy of its frame buffer before the clear. The copy is given back once the menu stops
- * drawing it (~1 s). Not done: the zoom blur, color filter and slow-time copies (0x13-0x15: Jak II
- * doesn't send them) and the PC's copy-back in the 3 frames after opening / closing (0x11).
+ * Jak II's bucket 3 (BlitDisplays on the PC): the menu's frozen frame. The game's machine
+ * (blit-displays-work) as this bucket sees it, one line per frame:
+ *   play                       nothing
+ *   a menu opens               0x10 (copy to tbp 0x3300) + 0x11; the sky and nothing else is drawn
+ *   2 frames                   0x11; from here the sky bucket draws tbp 0x3300 tinted
+ *   menu                       nothing
+ *   the menu closed, 3 frames  0x11; the first draws the world with the menu's renderer masks
+ *   play                       nothing
+ * 0x11: the PS2 doesn't update the display in that frame. Here the copy is drawn over such a
+ * frame at its end (as the PC's copy back), so neither the sky-only frame at the start nor the
+ * half-drawn one at the end is seen.
+ * The copy: the frame with the request leaves the color buffer as the last frame left it
+ * (CtrRenderer::render_frame clears only the depth then) and nothing is drawn before this bucket,
+ * so it is the game's last frame. It can't be made again: it is kept in linear memory (VRAM may
+ * be gone after the HOME Menu or sleep) and no texture pool takes its memory; while a frame needs
+ * it (the request's frame, a 0x11 frame, or the sky drew it in the frame before) no other screen
+ * copy overwrites it. After 30 frames that didn't need it tbp 0x3300 is VRAM again and the
+ * texture is freed. Without memory for the copy the menu is drawn over black.
+ * Not done: the zoom blur, color filter and slow-time copies (0x13-0x15: Jak II doesn't send them).
  */
 class CtrJak2BlitRenderer : public CtrBucketRenderer {
  public:
   static constexpr u32 kCopyTbp = 0x3300;
   CtrJak2BlitRenderer(std::string name, int id) : CtrBucketRenderer(std::move(name), id) {}
   void render(DmaFollower& dma, CtrRenderState& rs) override {
-    bool copy = false;
+    bool copy = false, hold = false;
     while (dma.current_tag_offset() != rs.next_bucket) {
       auto data = dma.read_and_advance();
-      if (data.vifcode0().kind == VifCode::Kind::PC_PORT && data.vifcode0().immediate == 0x10 &&
-          data.vifcode1().immediate == kCopyTbp) {
+      if (data.vifcode0().kind != VifCode::Kind::PC_PORT) {
+        continue;
+      }
+      if (data.vifcode0().immediate == 0x10 && data.vifcode1().immediate == kCopyTbp) {
         copy = true;
+      } else if (data.vifcode0().immediate == 0x11) {
+        hold = true;
       }
     }
-    const bool drawn = ctr_direct_take_menu_screen_drawn();
+    const bool sky_drew = ctr_direct_take_menu_screen_drawn();
     if (copy) {
-      const int h = ctr_gpu_copy_screen_part(-1.f, 1.f);  // (in VRAM when there is room)
-      ctr_direct_set_menu_screen(h);
-      if (h >= 0) {
+      if (m_alias) {
+        rs.vram->clear_override(kCopyTbp);
+      }
+      int h = ctr_gpu_copy_screen_keep();
+      m_real = h >= 0;
+      if (m_real) {
         rs.vram->set_override_handle(kCopyTbp, h, 512, 512);
         lg::info("[ctr] menu: the last frame copied for the menu's background");
+      } else {
+        static const u32 black[64] = {};
+        rs.vram->set_override(kCopyTbp, 8, 8, black);
+        const CtrTexture* t = rs.vram->get_texture(kCopyTbp);
+        h = t ? t->handle : -1;
+        lg::warn("[ctr] menu: no memory for the copy of the last frame, the menu is drawn on black");
+      }
+      ctr_direct_set_menu_screen(h);
+      m_alias = true;
+      m_idle = 0;
+    } else if (m_alias && (hold || sky_drew)) {
+      if (m_idle && m_real) {
+        ctr_gpu_screen_copy_pin(2);
       }
       m_idle = 0;
-    } else if (ctr_direct_menu_screen() >= 0) {
-      m_idle = drawn ? 0 : m_idle + 1;
-      if (m_idle > 30) {
+    } else if (m_alias) {
+      if (!m_idle && m_real) {
+        ctr_gpu_screen_copy_pin(1);
+      }
+      if (++m_idle > 30) {
         rs.vram->clear_override(kCopyTbp);
         ctr_direct_set_menu_screen(-1);
         ctr_gpu_screen_copy_release();
+        m_alias = m_real = false;
+        m_idle = 0;
       }
     }
+    g_menu_hold = hold && m_alias && m_real;
   }
 
  private:
-  int m_idle = 0;  // frames the copy wasn't drawn in
+  bool m_alias = false;  // tbp 0x3300 stands for the copy (or the black stand-in)
+  bool m_real = false;   // it is the copy
+  int m_idle = 0;        // frames in a row that didn't need the copy
 };
 
 /*!
@@ -551,6 +591,35 @@ class CtrLightningJak2Renderer : public CtrBucketRenderer {
 };
 
 }  // namespace
+
+void ctr_jak2_menu_hold_draw() {
+  if (!g_menu_hold) {
+    return;
+  }
+  g_menu_hold = false;
+  const int h = ctr_direct_menu_screen();
+  if (h < 0) {
+    return;
+  }
+  ctr_draw_state st;
+  memset(&st, 0, sizeof(st));
+  st.tex = h;
+  st.clamp_s = st.clamp_t = 1;
+  st.blend = CTR_BLEND_OFF;
+  st.atest = CTR_TEST_ALWAYS;
+  st.ztest = CTR_TEST_ALWAYS;
+  ctr_vertex v[6];
+  const float xy[6][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, -1}, {1, 1}, {-1, 1}};
+  for (int i = 0; i < 6; i++) {
+    memset(&v[i], 0, sizeof(v[i]));
+    v[i].x = xy[i][0];
+    v[i].y = xy[i][1];
+    v[i].z = 1.f;
+    ctr_gpu_screen_uv(v[i].x, v[i].y, &v[i].s, &v[i].t);
+    v[i].r = v[i].g = v[i].b = v[i].a = 0x80;
+  }
+  ctr_gpu_draw(&st, v, 6);
+}
 
 bool ctr_jak2_frame_copies_screen(const void* ee_mem, u32 first_tag, u32 end_tag) {
   DmaFollower dma(ee_mem, first_tag);

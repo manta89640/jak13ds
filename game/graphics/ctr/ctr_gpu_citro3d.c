@@ -545,6 +545,7 @@ static struct {
   /* (AI-assisted, gpu-home) a texture pool wanted its VRAM (update_pool_residency): made in linear
    * memory from then on (for the session) */
   int screen_tex_no_vram;
+  int screen_tex_pinned; /* ctr_gpu_screen_copy_pin */
   char screenshot_path[256];
   int screenshot_state;  /* 0 none, 1 requested, 2 frame rendered: write at next frame begin */
 } g;
@@ -4593,7 +4594,8 @@ static void update_pool_residency(void) {
          * (its linear memory freed pays for the copy's, made there at the next distort sprite);
          * the copy's VRAM is free after the next frame begin's deletes (this pool's retry). */
         const u32 screen_bytes = 256u * 512u * (g_color16 ? 2u : 4u);
-        if (g.screen_tex >= 0 && g.screen_tex_vram && p->bytes >= screen_bytes) {
+        if (g.screen_tex >= 0 && g.screen_tex_vram && !g.screen_tex_pinned &&
+            p->bytes >= screen_bytes) {
           ctr_linear_unlock();
           ctr_gpu_screen_copy_release();
           ctr_linear_lock();
@@ -7792,6 +7794,9 @@ double ctr_gpu_take_screen_copy_ms(void) {
 }
 
 static int copy_screen(float x0, float x1, int part) {
+  if (g.screen_tex_pinned == 2) {
+    return -1;
+  }
   SKY_HOOK_ANY(); /* (AI-assisted) sky_last: the copy shows what's drawn so far */
   const u64 t0 = svcGetSystemTick();
   const int tex = copy_screen_body(x0, x1, part);
@@ -7881,9 +7886,16 @@ static int copy_screen_body(float x0, float x1, int part) {
     /* (AI-assisted) distort_copy = rows: in VRAM if there's room now (the copy and the distort
      * draws then stay in VRAM), leaving the reserve free (C3D_TexInitVRAM calls libctru's
      * vramAlloc, not safe_vram_alloc). */
-    bool in_vram = part && !g.screen_tex_no_vram && (u32)vramSpaceFree() >= bytes + VRAM_RESERVE &&
+    bool in_vram = part == 1 && !g.screen_tex_no_vram &&
+                   (u32)vramSpaceFree() >= bytes + VRAM_RESERVE &&
                    C3D_TexInitVRAM(&t->tex, 256, 512, fmt);
-    const bool ok = in_vram || (linear_room_for_tex(256, 512, 0) && C3D_TexInit(&t->tex, 256, 512, fmt));
+    bool ok = in_vram || (linear_room_for_tex(256, 512, 0) && C3D_TexInit(&t->tex, 256, 512, fmt));
+    if (!ok && part == 2) {
+      /* a kept copy: linear memory first, VRAM rather than none */
+      in_vram = (u32)vramSpaceFree() >= bytes + VRAM_RESERVE &&
+                C3D_TexInitVRAM(&t->tex, 256, 512, fmt);
+      ok = in_vram;
+    }
     ctr_linear_unlock();
     if (!ok) {
       release_tex_slot(slot);
@@ -7940,7 +7952,12 @@ static int copy_screen_body(float x0, float x1, int part) {
   return g.screen_tex;
 }
 
+void ctr_gpu_screen_copy_pin(int level) {
+  g.screen_tex_pinned = g.ready && g.screen_tex >= 0 ? level : 0;
+}
+
 void ctr_gpu_screen_copy_release(void) {
+  g.screen_tex_pinned = 0;
   if (g.ready && g.screen_tex >= 0) {
     g.screen_tex_vram = 0;
     ctr_gpu_tex_delete(g.screen_tex); /* (freed once the GPU is done with it) */
@@ -7949,6 +7966,16 @@ void ctr_gpu_screen_copy_release(void) {
     }
     g.screen_tex = -1;
   }
+}
+
+int ctr_gpu_copy_screen_keep(void) {
+  g.screen_tex_pinned = 0;
+  if (g.screen_tex >= 0 && g.screen_tex_vram) {
+    ctr_gpu_screen_copy_release();
+  }
+  const int tex = copy_screen(-1.0f, 1.0f, 2);
+  g.screen_tex_pinned = tex >= 0 ? 2 : 0;
+  return tex;
 }
 
 void ctr_gpu_screen_uv(float x, float y, float* s, float* t) {

@@ -880,6 +880,20 @@ vf31: cam 0 (premultiplied by hmge)
           (cond
             ((-> *blit-displays-work* menu-mode)
              (let ((f0-0 (-> *blit-displays-work* progress-interp)))
+               (#cond
+                 (TARGET_3DS
+                   ;; only the frozen frame: the two sprites of the other branch read the PS2 frame buffer at #x4c0
+                   (dma-buffer-add-gs-set s4-1
+                                          (zbuf-1 (new 'static 'gs-zbuf :zbp #x130 :psm (gs-psm ct24)))
+                                          (test-1 (new 'static 'gs-test :ate #x1 :atst (gs-atest always) :zte #x1 :ztst (gs-ztest always)))
+                                          (alpha-1 (new 'static 'gs-alpha))
+                                          (tex0-1 (new 'static 'gs-tex0 :tbp0 #x3300 :tbw #x8 :tw #x9 :th #x9 :tcc #x1))
+                                          (tex1-1 (new 'static 'gs-tex1 :mmag #x1 :mmin #x1))
+                                          (clamp-1 (new 'static 'gs-clamp :wms (gs-tex-wrap-mode clamp) :wmt (gs-tex-wrap-mode clamp)))
+                                          (texflush 0)
+                                          )
+                   )
+                 (#t
                (dma-buffer-add-gs-set s4-1
                                       (zbuf-1 (new 'static 'gs-zbuf :zbp #x130 :psm (gs-psm ct24)))
                                       (test-1 (new 'static 'gs-test :ate #x1 :atst (gs-atest always) :zte #x1 :ztst (gs-ztest always)))
@@ -935,6 +949,8 @@ vf31: cam 0 (premultiplied by hmge)
                    )
                  )
                (dma-buffer-add-gs-set s4-1 (alpha-1 (new 'static 'gs-alpha)))
+                   )
+                 )
                (let ((a0-57 (the int (+ 128.0 (* 32.0 f0-0))))
                      (a1-46 (the int (- 128.0 (* 16.0 f0-0))))
                      (a2-55 (the int (- 128.0 (* 96.0 f0-0))))
@@ -1002,7 +1018,11 @@ vf31: cam 0 (premultiplied by hmge)
              (seek!
                (-> *blit-displays-work* progress-interp)
                (-> *blit-displays-work* progress-interp-dest)
-               (-> *blit-displays-work* progress-interp-speed)
+               ;; the speed is per 60 Hz frame
+               (#if TARGET_3DS
+                    (* (-> *blit-displays-work* progress-interp-speed) (-> *display* real-clock time-adjust-ratio))
+                    (-> *blit-displays-work* progress-interp-speed)
+                    )
                )
              )
             (else

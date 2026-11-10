@@ -800,6 +800,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   }
   if (m_jak2) {
     dispatch_buckets_jak2(DmaFollower(ee_mem, chain_offset));
+    ctr_jak2_menu_hold_draw();
   } else {
     dispatch_buckets_jak1(DmaFollower(ee_mem, chain_offset));
   }
@@ -1129,6 +1130,7 @@ void CtrRenderer::tex_frame_done_jak2() {}
 bool ctr_jak2_frame_copies_screen(const void*, u32, u32) {
   return false;
 }
+void ctr_jak2_menu_hold_draw() {}
 #endif
 
 u32 CtrRenderer::bucket_tag(u32 chain_offset, int id) const {
