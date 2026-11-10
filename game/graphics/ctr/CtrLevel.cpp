@@ -336,7 +336,7 @@ std::string level_mem_text(const LevelMem& m) {
 
 // (AI-assisted, j2-mem) the stream arena's first segment (KB): config stream_kb, else Jak II's
 // own (its near chunks needed at once in Haven City: docs/3ds-port/streaming.md "Jak II")
-constexpr u32 kJak2StreamKb = 2560;
+constexpr u32 kJak2StreamKb = 1536;
 u32 ctr_stream_kb() {
   const auto& s = ctr_settings();
   return s.stream_kb_set || !ctr_is_jak2() ? (u32)s.stream_kb : kJak2StreamKb;
@@ -1559,7 +1559,9 @@ constexpr float kNeedFarMeters = 10000.f;  // added for a level in far mode: the
 constexpr float kDistLeadFrames = 60.f;    // 2 s at 30 fps (the camera's velocity is per frame)
 constexpr u64 kNeedEvery = 4;              // frames between passes (freed memory is back by then)
 constexpr u64 kNeedJobBytes = 256 * 1024, kNeedBlackJobBytes = 2u * 1024 * 1024;
-constexpr u64 kNeedIdleRoom = 2u * 1024 * 1024;     // kept free for the start of the next load
+// free linear memory the chunks by need leave: the heap's last resort and the frame's own needs
+constexpr u64 kNeedFloor = 2u * 1024 * 1024;
+constexpr u64 kNeedIdleRoom = 512 * 1024;           // kept free for the start of the next load
 constexpr u64 kNeedLoadDefault = 4u * 1024 * 1024;  // a load whose size isn't known yet
 constexpr u64 kNeedLoadMargin = 512 * 1024;
 constexpr u64 kNeedFillRoom = 8u * 1024 * 1024;     // with this much to spare: the rest too
@@ -1797,15 +1799,23 @@ void CtrLevels::need_update(u64 frame, u32 free_now, u64 parts_room, bool level_
   m_need_frame = frame;
   constexpr float kM = 4096.f;
   const auto& s = ctr_settings();
-  // what waits for linear memory: a level load, a repair, the stream arena (claim)
+  // what waits for linear memory: a level load, a repair, the stream arena's segment (claim).
+  // The chunks beyond their draw distance (read ahead) leave the arena's floor free, so they and
+  // the arena's growth don't take each other's memory in turn; a chunk within its draw distance
+  // would be a hole (a near chunk not there is only a coarser version): it may go down to
+  // kNeedFloor and comes before the arena's claim.
+  const u64 arena_claim = claim;
+  u64 first = m_stream_repair_room;
   if (level_loading) {
     const u64 left = m_load_left.load(std::memory_order_relaxed);
-    claim += left ? left + kNeedLoadMargin : kNeedLoadDefault;
+    first += left ? left + kNeedLoadMargin : kNeedLoadDefault;
   }
-  claim += m_stream_repair_room;
-  const u64 reserve = (u64)s.stream_reserve_kb * 1024u + claim + parts_room +
-                      (level_loading ? 0 : kNeedIdleRoom);
+  claim = first + arena_claim;
+  const u64 base = kNeedFloor + first + parts_room;
+  const u64 reserve = std::max<u64>((u64)s.stream_reserve_kb * 1024u, kNeedFloor) + first +
+                      parts_room + arena_claim + (level_loading ? 0 : kNeedIdleRoom);
   s64 room = (s64)free_now - (s64)reserve;
+  s64 room_in = (s64)free_now - (s64)base;
   need_scan(pos, np, s.auto_detail ? m_need_cap : 0.f, frame);
   auto& have = m_need_have;
   auto& want = m_need_want;
@@ -1866,6 +1876,7 @@ void CtrLevels::need_update(u64 frame, u32 free_now, u64 parts_room, bool level_
     w.lev->chunk_dormant[w.chunk] = CtrLevelData::kDistReading;
     b.bytes += w.bytes;
     room -= (s64)w.bytes;
+    room_in -= (s64)w.bytes;
   };
   auto submit = [&](Build& b, bool fill) {
     CtrLevelData& lev = *b.lev;
@@ -1899,7 +1910,7 @@ void CtrLevels::need_update(u64 frame, u32 free_now, u64 parts_room, bool level_
     }
     if (!b->chunks.empty() && b->bytes + w.bytes > job_max) {
       b->full = true;
-    } else if (room >= (s64)w.bytes) {
+    } else if ((w.e < 0 ? room_in : room) >= (s64)w.bytes) {
       add(*b, w);
     } else {
       m_need_unmet.push_back((u32)wi);
@@ -1914,10 +1925,11 @@ void CtrLevels::need_update(u64 frame, u32 free_now, u64 parts_room, bool level_
     unmet += w.bytes;
     const float beyond =
         w.e < 0 ? 0.f : std::max(w.e + kNeedSwapMeters * kM, kNeedKeepMeters * kM);
-    while (room + coming < unmet && evict(beyond)) {
+    const s64 avail = w.e < 0 ? room_in : room;
+    while (avail + coming < unmet && evict(beyond)) {
     }
     if (w.e < 0 &&
-        (room + coming < unmet || (hi > 0 && have[hi - 1].e < kNeedKeepMeters * kM))) {
+        (avail + coming < unmet || (hi > 0 && have[hi - 1].e < kNeedKeepMeters * kM))) {
       short_bytes += w.bytes;
     }
   }
@@ -10354,7 +10366,8 @@ void ctr_level_set_detail(float t, bool snap) {
 }
 
 void ctr_level_set_mem_cap(float cap) {
-  g_detail_mem_cap = cap >= 1.f ? 1.f : detail_at(detail_q(std::max(cap, 0.f)));
+  // (never under 0: the grid's point next to 0 is, which the controller took for relief)
+  g_detail_mem_cap = cap >= 1.f ? 1.f : std::max(0.f, detail_at(detail_q(std::max(cap, 0.f))));
 }
 
 float ctr_level_mem_cap() {
