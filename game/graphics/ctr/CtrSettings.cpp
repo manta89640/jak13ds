@@ -94,7 +94,8 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
     } else if (key == "tie_distance_scale") {
       s.tie_distance_scale = v == "none" ? 0.f : std::max(kMinScale, f);
     } else if (key == "auto_detail") {
-      s.auto_detail = parse_bool(v);
+      s.auto_detail = v == "fixed" || parse_bool(v);
+      s.auto_detail_fixed = v == "fixed";
     } else if (key == "shrub_scale") {
       s.shrub_scale = std::max(kMinScale, f);  // (AI-assisted)
     } else if (key == "shrub_scale_max") {
@@ -139,7 +140,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.distort_copy_rows = v != "full";  // (AI-assisted) rows | full
     } else if (key == "shadows") {
       // (AI-assisted) full | blob | off (on = full)
-      if (v == "full" || parse_bool(v)) {
+      if (v == "full" || v == "all" || parse_bool(v)) {
         s.shadows = CtrSettings::ShadowMode::Full;
       } else if (v == "blob") {
         s.shadows = CtrSettings::ShadowMode::Blob;
@@ -147,7 +148,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
         s.shadows = CtrSettings::ShadowMode::Off;
       } else {
         if (!s_quiet) {
-          lg::warn("[ctr] {}:{}: shadows = {}: expected full, blob or off", path.string(), n, v);
+          lg::warn("[ctr] {}:{}: shadows = {}: expected full, all, blob or off", path.string(), n, v);
         }
       }
     } else if (key == "shadow_casters") {
@@ -311,7 +312,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
                key == "mips2c_native_off" || key == "perf_sections" || key == "hitch_ms" ||
                key == "args" ||
                key == "listener" || key == "screenshots" || key == "pad_script" ||
-               key == "debug_log" || key == "particle_density" ||
+               key == "debug_log" || key == "particle_density" || key == "traffic_density" ||
                key == "shield_density" ||
                key == "io_checksum" || key == "anim_lod" || key == "io_cache" ||
                key == "log_async" || key == "c3l_read_buffer" || key == "text_scale" ||
@@ -425,7 +426,7 @@ CtrSettings load() {
   // (AI-assisted) the preset and the user keys' values
   const char* preset_name = file_get(&fl, "preset");
   if (preset_name && preset_name[0] && !ctr_cfg_preset_named(preset_name)) {
-    lg::warn("[ctr] config.ini: preset = {}: expected normal, safe, bench or breakdown; normal",
+    lg::warn("[ctr] config.ini: preset = {}: expected normal, full, safe, bench or breakdown; normal",
              preset_name);
   }
   for (const auto& k : fl.keys) {
@@ -496,16 +497,18 @@ std::string CtrSettings::summary() const {
   auto auto_detail_relief_text = [&]() {
     ctr_detail::Relief rl;
     rl.init(tie_lod_px, lod_distance, tie_distance_scale, draw_distance,
-            g_game_version == GameVersion::Jak1);
+            g_game_version == GameVersion::Jak1, g_game_version == GameVersion::Jak2);
     std::string r;
     for (ctr_detail::Knob k : ctr_detail::kOrder) {
       if (rl.stage[k] < 0) {
         continue;
       }
-      r += r.empty() ? "; over it toward " : ", ";
-      r += k == ctr_detail::kTieLodPx ? fmt::format("tie_lod_px {:.0f}", rl.to[k])
-           : k == ctr_detail::kLodDistance ? fmt::format("lod {:.0f}m", rl.to[k])
-                                            : fmt::format("ties x{:.1f}", rl.to[k]);
+      r += r.empty() ? (auto_detail_fixed ? "; fixed at " : "; over it toward ") : ", ";
+      r += k == ctr_detail::kTieLodPx       ? fmt::format("tie_lod_px {:.0f}", rl.to[k])
+           : k == ctr_detail::kLodDistance  ? fmt::format("lod {:.0f}m", rl.to[k])
+           : k == ctr_detail::kShrubFar     ? fmt::format("shrub bands x{:.1f}", rl.to[k])
+           : k == ctr_detail::kTieDistance  ? fmt::format("ties x{:.1f}", rl.to[k])
+                                            : fmt::format("tie vista copies from {:.0f}m", rl.to[k]);
     }
     return r;
   };
@@ -523,15 +526,17 @@ std::string CtrSettings::summary() const {
       "{}{}{}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale,
       // (AI-assisted) with auto_detail: the range the distances move in
-      auto_detail ? fmt::format("{:.0f}-{:.0f}m (auto, GPU under {:.0f} ms{})", shrub_distance,
-                                std::max(shrub_distance, shrub_distance_max), auto_detail_gpu_ms,
-                                auto_detail_relief_text())
-                  : fmt::format("{:.0f}m", shrub_distance),
-      auto_detail && shrub_scale_max > shrub_scale
+      auto_detail_fixed && auto_detail
+          ? fmt::format("{:.0f}m (auto_detail fixed{})", shrub_distance, auto_detail_relief_text())
+      : auto_detail ? fmt::format("{:.0f}-{:.0f}m (auto, GPU under {:.0f} ms{})", shrub_distance,
+                                  std::max(shrub_distance, shrub_distance_max), auto_detail_gpu_ms,
+                                  auto_detail_relief_text())
+                    : fmt::format("{:.0f}m", shrub_distance),
+      auto_detail && !auto_detail_fixed && shrub_scale_max > shrub_scale
           ? fmt::format("{:.2f}-{:.2f}", shrub_scale, shrub_scale_max)
           : fmt::format("{:.2f}", shrub_scale),
       !(tie_distance_scale > 0) ? std::string("none")
-      : auto_detail ? fmt::format("{:.1f}-{:.1f}", tie_distance_scale,
+      : auto_detail && !auto_detail_fixed ? fmt::format("{:.1f}-{:.1f}", tie_distance_scale,
                                   std::max(tie_distance_scale, tie_distance_scale_max))
                     : fmt::format("{:.1f}", tie_distance_scale),
       fog ? "on" : "off",

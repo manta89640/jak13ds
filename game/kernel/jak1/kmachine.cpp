@@ -779,7 +779,7 @@ void InitMachine_PCPort() {
         shadows = "blob";
       } else if (s == "off" || s == "0" || s == "no" || s == "false" || s == "none") {
         shadows = "off";
-      } else if (s != "full" && s != "on" && s != "1" && s != "yes" && s != "true") {
+      } else if (s != "full" && s != "all" && s != "on" && s != "1" && s != "yes" && s != "true") {
         lg::warn("config.ini shadows = {}: not full, blob or off, using full", s);
       }
     }

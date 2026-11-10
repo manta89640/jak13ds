@@ -45,6 +45,9 @@ struct CtrSettings {
   // when it hasn't, so the distances are as far as each place allows (Precursor Basin has room,
   // Rock Village hardly any). Needs frame_pacing = steady (the GPU time comes from its fence).
   bool auto_detail = true;
+  // auto_detail = fixed (default): the far ring always at the relief's floor (CtrAutoDetail.h),
+  // nothing moves with the load; on: the GPU-time controller; off: the config's distances
+  bool auto_detail_fixed = true;
   float shrub_distance_max = 120.f;
   float tie_distance_scale_max = 3.f;
   // (AI-assisted) .c3l v14 (c3l::kShrubPs2DistVersion): each shrub is drawn up to its prototype's

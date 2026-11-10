@@ -695,7 +695,7 @@
       (let ((f30-0 (vector-vector-xz-distance (camera-pos) (-> this root trans))))
         ;; og:preserve-this shadow cull toggle
         (#when PC_PORT
-            (if (not (-> *pc-settings* ps2-shadow?))
+            (if (#if TARGET_3DS *pc-3ds-shadow-all?* (not (-> *pc-settings* ps2-shadow?)))
                 (set! f30-0 0.0)))
         (cond
           ((< 245760.0 f30-0)

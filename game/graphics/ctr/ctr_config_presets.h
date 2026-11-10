@@ -48,6 +48,11 @@ static const ctr_cfg_kv ctr_cfg_preset_bench[] = {
     {"pica_bench", "on"}, {"gpu_profile", "ab"}, {"gpu_perflog", "on"},
     {"gpu_counters", "on"}, {"overlap", "off"},
 };
+/* full: the detail of the builds before the fixed cuts (slower: under 30 fps in busy places) */
+static const ctr_cfg_kv ctr_cfg_preset_full[] = {
+    {"auto_detail", "off"},    {"traffic_density", "1"},
+    {"particle_density", "1"}, {"shadows", "all"},
+};
 /* breakdown: normal plus the per-part GPU times every 4th frame (config-breakdown.ini) */
 static const ctr_cfg_kv ctr_cfg_preset_breakdown[] = {
     {"gpu_breakdown", "on"},
@@ -65,6 +70,7 @@ static const ctr_cfg_preset ctr_cfg_presets[] = {
     {"safe", ctr_cfg_preset_safe, CTR_CFG_N(ctr_cfg_preset_safe)},
     {"bench", ctr_cfg_preset_bench, CTR_CFG_N(ctr_cfg_preset_bench)},
     {"breakdown", ctr_cfg_preset_breakdown, CTR_CFG_N(ctr_cfg_preset_breakdown)},
+    {"full", ctr_cfg_preset_full, CTR_CFG_N(ctr_cfg_preset_full)},
 };
 
 /* A user key's line stands for these keys. user_value NULL: any value, passed on as it is. */
@@ -111,7 +117,12 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"io_cache", "on"},
     {"io_checksum", "off"},
     {"c3l_read_buffer", "256"},
+#if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
+    {"particle_density", "0.7"}, /* the game thread is Jak II's limit in the city */
+    {"traffic_density", "0.5"},  /* civilians and civilian vehicles (traffic-manager.gc) */
+#else
     {"particle_density", "1"}, /* (AI-assisted, j1ocean) every particle (was 0.7) */
+#endif
     {"shield_density", "1"}, /* Citadel robot cage, 0.125..1 (1: every panel) */
     {"anim_lod", "on"},
     {"merc_lod_scale", "1"},

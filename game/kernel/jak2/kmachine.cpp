@@ -602,6 +602,29 @@ u64 pc_3ds_frame_run_time() {
 #endif
 }
 
+// traffic-manager.gc (TARGET_3DS): config.ini traffic_density (0.1 .. 1) in percent, the share of
+// the city's civilians and civilian vehicles the traffic manager keeps. Hosts: 100 unless
+// CTR_TRAFFIC_PERCENT sets one.
+u64 pc_3ds_traffic_percent() {
+#ifndef __3DS__
+  static const int pct = getenv("CTR_TRAFFIC_PERCENT") ? atoi(getenv("CTR_TRAFFIC_PERCENT")) : 100;
+  return (u64)std::clamp(pct, 10, 100);
+#else
+  static const int pct = [] {
+    char v[32];
+    float d = 1.f;
+    if (ctr_config_get("traffic_density", v, sizeof(v))) {
+      d = (float)atof(v);
+    }
+    const int p = std::clamp((int)(d * 100.f + 0.5f), 10, 100);
+    lg::info("city traffic: civilians and their vehicles x{:.2f} (config.ini traffic_density)",
+             p / 100.0);
+    return p;
+  }();
+  return (u64)pct;
+#endif
+}
+
 // level.gc (TARGET_3DS): the load work of a per-frame load-continue (the linker's fixups, the
 // login) stops by a budget and goes on in the next call, as on the PS2. The frame's last call
 // takes the time the frame has left, less a margin for what the frame still does; the others a
@@ -655,6 +678,7 @@ void InitMachine_PCPort() {
   // (AI-assisted) pc-maybe-vsync's dog-ratio on the 3DS: the vblanks the last frame took
   make_function_symbol_from_c("pc-3ds-frame-vblanks", pc_3ds_frame_vblanks);
   make_function_symbol_from_c("pc-3ds-frame-run-time", pc_3ds_frame_run_time);
+  make_function_symbol_from_c("pc-3ds-traffic-percent", pc_3ds_traffic_percent);
   make_function_symbol_from_c("pc-3ds-load-begin", pc_3ds_load_begin);
   make_function_symbol_from_c("pc-3ds-load-end", pc_3ds_load_end);
   make_function_symbol_from_c("pc-3ds-load-time?", pc_3ds_load_time);
@@ -756,14 +780,18 @@ void InitMachine_PCPort() {
   // Jak II has no blob shadow, so blob is off), and only with the stencil buffer (not depth16 =
   // on). Otherwise the game doesn't make them either (drawable.gc, TARGET_3DS: no
   // shadow-execute-all). Other builds: always.
+  // shadows = all: every caster at any distance (the PC port's extended shadows); full: the
+  // PS2's distances (foreground.gc, citizen.gc, vehicle.gc, mountain-obs.gc)
   {
     bool volumes = true;
+    bool all = false;
 #ifdef __3DS__
     char v[32];
     if (ctr_config_get("shadows", v, sizeof(v))) {
       const std::string sh(v);
       volumes = !(sh == "blob" || sh == "off" || sh == "0" || sh == "no" || sh == "false" ||
                   sh == "none");
+      all = sh == "all";
     }
     if (volumes && ctr_config_bool("depth16", 0)) {
       volumes = false;
@@ -771,6 +799,8 @@ void InitMachine_PCPort() {
 #endif
     intern_from_c("*pc-3ds-shadow-volumes?*")->value() =
         volumes ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
+    intern_from_c("*pc-3ds-shadow-all?*")->value() =
+        all ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
   }
   // config.ini ocean = full: the PS2 ocean's DMA (draw-ocean) for CtrOceanFull instead of
   // ocean-3ds-packet's for CtrOceanRenderer (ocean.gc, TARGET_3DS)

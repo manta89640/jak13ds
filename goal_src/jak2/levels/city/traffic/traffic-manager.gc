@@ -449,6 +449,11 @@
   (none)
   )
 
+;; og:preserve-this 3DS: config.ini traffic_density in percent (kmachine.cpp)
+(#when TARGET_3DS
+  (define-extern pc-3ds-traffic-percent (function int))
+  )
+
 (defmethod init-params ((this traffic-manager))
   (let ((traffic-want-counts (new 'stack-no-clear 'array 'int8 21)))
     (set! (-> traffic-want-counts 11) 8)
@@ -470,6 +475,18 @@
     (set! (-> traffic-want-counts 8) 14)
     (set! (-> traffic-want-counts 9) 14)
     (set! (-> traffic-want-counts 10) 14)
+    ;; og:preserve-this 3DS: civilians (0-2) and civilian vehicles (11-16) at config.ini traffic_density
+    (#when TARGET_3DS
+      (let ((pct (pc-3ds-traffic-percent)))
+        (when (< pct 100)
+          (dotimes (i 17)
+            (when (or (< i 3) (>= i 11))
+              (set! (-> traffic-want-counts i) (max 2 (/ (+ (* (-> traffic-want-counts i) pct) 50) 100)))
+              )
+            )
+          )
+        )
+      )
     (set! (-> this fast-spawn) *traffic-fast-spawn*)
     (reset-and-init this)
     (let ((v1-20 (-> this traffic-engine)))
