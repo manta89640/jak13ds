@@ -73,6 +73,9 @@
 ;; definition for function generic-merc-do-chain
 ;; INFO: function output is handled by mips2c
 (def-mips2c generic-merc-do-chain (function mercneric-chain dma-buffer pointer))
+;; og:preserve-this 3DS: the same, without the mips2c call for an empty chain (native2_misc.cpp)
+(#when TARGET_3DS
+  (def-mips2c pc-generic-merc-do-chain (function mercneric-chain dma-buffer pointer)))
 
 
 (defun generic-merc-execute-all ((arg0 dma-buffer))
@@ -97,12 +100,18 @@
       ;; loop over grid of chains (levels x textures) and do the chain.
       (dotimes (s3-1 7)
         (dotimes (s2-1 7)
-          (generic-merc-do-chain (-> s4-0 level-buckets s3-1 data s2-1 mercneric) arg0)
+          (#if TARGET_3DS
+            (pc-generic-merc-do-chain (-> s4-0 level-buckets s3-1 data s2-1 mercneric) arg0)
+            (generic-merc-do-chain (-> s4-0 level-buckets s3-1 data s2-1 mercneric) arg0)
+            )
           )
         )
 
       ;; do separate warp chain
-      (generic-merc-do-chain (-> s4-0 warp-chain) arg0)
+      (#if TARGET_3DS
+        (pc-generic-merc-do-chain (-> s4-0 warp-chain) arg0)
+        (generic-merc-do-chain (-> s4-0 warp-chain) arg0)
+        )
 
       ;; finish profiling
       (read! (-> *perf-stats* data (perf-stat-bucket mercneric)))

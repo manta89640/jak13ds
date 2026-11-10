@@ -4,6 +4,7 @@
 
 #include "game/mips2c/mips2c_private.h"
 #include "game/kernel/jak2/kscheme.h"
+#include "game/mips2c/jak2_functions/native2.h"
 namespace Mips2C::jak2 {
 namespace generic_warp_dest {
 u64 execute(void* c);
@@ -3568,6 +3569,8 @@ void link() {
   cache.generic_merc_execute_asm = intern_from_c("generic-merc-execute-asm").c();
   cache.generic_work_init = intern_from_c("generic-work-init").c();
   gLinkedFunctionTable.reg("generic-merc-do-chain", execute, 128);
+  gLinkedFunctionTable.reg("pc-generic-merc-do-chain", native2::pc_generic_merc_do_chain.as_exec,
+                           64, &native2::pc_generic_merc_do_chain);
 }
 
 } // namespace generic_merc_do_chain
