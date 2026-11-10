@@ -55,6 +55,48 @@ std::map<int, std::string>& ctr_soft_mesh_desc();
 #endif
 
 namespace {
+constexpr size_t kBigHdr = 16;
+constexpr u32 kBigHeap = 0x48454150u, kBigLinear = 0x4c494e45u;
+}  // namespace
+
+void* ctr_big_alloc(size_t bytes) {
+  u8* p = nullptr;
+#ifdef __3DS__
+  constexpr size_t kBigMin = 16 * 1024, kBigHeapKeep = 3u << 20;
+  bool heap = bytes < kBigMin;
+  if (!heap) {
+    CtrHeapStats st;
+    ctr_heap_stats(&st);
+    heap = st.free >= bytes + kBigHeapKeep && st.largest >= bytes + kBigHdr;
+  }
+  if (!heap) {
+    p = (u8*)ctr_gpu_linear_block((unsigned int)(bytes + kBigHdr));
+    if (p) {
+      memcpy(p, &kBigLinear, 4);
+      return p + kBigHdr;
+    }
+  }
+#endif
+  p = (u8*)::operator new(bytes + kBigHdr);
+  memcpy(p, &kBigHeap, 4);
+  return p + kBigHdr;
+}
+
+void ctr_big_free(void* q) noexcept {
+  if (!q) {
+    return;
+  }
+  u8* p = (u8*)q - kBigHdr;
+  u32 tag;
+  memcpy(&tag, p, 4);
+  if (tag == kBigLinear) {
+    ctr_gpu_linear_block_free(p);
+    return;
+  }
+  ::operator delete(p);
+}
+
+namespace {
 // chunks a level draw wanted in view whose mesh is not there (logged)
 struct Holes {
   u64 frame = ~0ull;
@@ -233,8 +275,8 @@ u32 tfrag_missing(const CtrLevelData& lev) {
 
 // (AI-assisted, j2-mem) what a level holds: linear memory (its resident chunk meshes by kind and
 // tier, near chunks, merc meshes, the texture pool) and the heap (its tables), for the log
-template <typename T>
-u64 vec_bytes(const std::vector<T>& v) {
+template <typename T, typename A>
+u64 vec_bytes(const std::vector<T, A>& v) {
   return (u64)v.capacity() * sizeof(T);
 }
 struct LevelMem {
@@ -4803,10 +4845,19 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
 #endif
 
 // (AI-assisted) c3l v16 time of day: the file's table into lev->tod, the palettes no color uses
-// left out (Volcanic Crater: 4 of 8). Read in pieces (no second copy of the table). On the 3DS
-// only when the heap keeps kTodHeapReserve free after it (the level then keeps its baked palette:
-// the colors of an older file). After the chunks are final (vista tier picked).
+// left out (Volcanic Crater: 4 of 8). Read in pieces (no second copy of the table). Its large
+// arrays come from the heap or linear memory (ctr_big_alloc); the level keeps its baked palette
+// only when neither has room. After the chunks are final (vista tier picked).
+void load_tod_table(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev);
 void load_tod(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
+  try {
+    load_tod_table(f, hdr, lev);
+  } catch (const std::bad_alloc&) {
+    lev->tod.reset();
+    lg::error("[ctr] {}: no memory for the time of day colors: the baked palette", lev->name);
+  }
+}
+void load_tod_table(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   if (hdr.version < c3l::kTodVersion || !hdr.tod_offset || !hdr.tod_color_count ||
       hdr.tod_color_count + hdr.tod_mul_count >= 0xffff) {
     return;
@@ -4928,13 +4979,16 @@ void load_tod(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
                                      (u32)(lev->chunks.size() + lev->vis_runs.size()) * 8;
 #ifdef __3DS__
   {
-    constexpr u32 kTodHeapReserve = 3u << 20;
+    // colors, table, stamp and cver: ctr_big_alloc; the rest stays on the heap
+    constexpr u32 kTodHeapKeep = 512u << 10;
+    const u32 big = nc * t->palette_count * 3 + (nc + nm) * 8 + nc * 4;
+    const u32 heap_need = need > big ? need - big : 0;
     CtrHeapStats st;
     ctr_heap_stats(&st);
-    if (st.free < need + kTodHeapReserve || st.largest < need) {
-      lg::warn("[ctr] {}: no heap for the time of day colors ({} KB; {} KB free, largest block {} "
-               "KB): the baked palette",
-               lev->name, need / 1024, st.free / 1024, st.largest / 1024);
+    if (st.free < heap_need + kTodHeapKeep) {
+      lg::warn("[ctr] {}: no heap for the time of day colors ({} KB of {} KB on the heap; {} KB "
+               "free, largest block {} KB): the baked palette",
+               lev->name, heap_need / 1024, need / 1024, st.free / 1024, st.largest / 1024);
       return;
     }
   }

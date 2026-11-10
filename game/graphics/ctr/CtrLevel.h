@@ -122,6 +122,31 @@ struct CtrShineTable {
   static constexpr int kFull = 128;
 };
 
+// A level's large tables (the time of day colors): on the 3DS from the heap while it keeps its
+// reserve after them, else from linear memory (the levels' budget, which has room when the heap
+// has none); throws std::bad_alloc only when both are out
+void* ctr_big_alloc(size_t bytes);
+void ctr_big_free(void* p) noexcept;
+template <typename T>
+struct CtrBigAlloc {
+  using value_type = T;
+  CtrBigAlloc() noexcept = default;
+  template <typename U>
+  CtrBigAlloc(const CtrBigAlloc<U>&) noexcept {}
+  T* allocate(size_t n) { return static_cast<T*>(ctr_big_alloc(n * sizeof(T))); }
+  void deallocate(T* p, size_t) noexcept { ctr_big_free(p); }
+};
+template <typename T, typename U>
+bool operator==(const CtrBigAlloc<T>&, const CtrBigAlloc<U>&) noexcept {
+  return true;
+}
+template <typename T, typename U>
+bool operator!=(const CtrBigAlloc<T>&, const CtrBigAlloc<U>&) noexcept {
+  return false;
+}
+template <typename T>
+using CtrBigVec = std::vector<T, CtrBigAlloc<T>>;
+
 struct CtrLevelData {
   std::string name;
   std::vector<CtrMercModelData> merc_models;
@@ -360,16 +385,16 @@ struct CtrLevelData {
     u32 color_count = 0;
     u8 palettes[8] = {};  // the palettes any color uses (not black), in order
     u32 palette_count = 0;
-    std::vector<u8> colors;      // color_count x palette_count x rgb (GS units)
+    CtrBigVec<u8> colors;      // color_count x palette_count x rgb (GS units)
     std::vector<c3l::TodMul> muls;
     // per entry (color_count colors, then the TodMuls; Vertex::pad): the palettes (bit p) its
     // color isn't black in, its rgb (r | g << 8 | b << 16) and the version that rgb is of (current
     // when at least lut[mask]: the last move of its palettes)
     std::vector<u8> color_mask;
-    std::vector<u32> table, stamp;
+    CtrBigVec<u32> table, stamp;
     u32 fresh_ver = ~0u;  // every entry is current at this version (tod_refresh_all)
     // per color the version its rgba last changed at (a TodMul changes only with its color)
-    std::vector<u32> cver;
+    CtrBigVec<u32> cver;
     // per group its vertices by table entry (CtrLevel.cpp tod_make_list; 0: not made yet,
     // kNoList: none), made as the group is first written: a rewrite writes only the vertices of
     // the entries whose color changed since. Lists made before the shared room was last emptied
