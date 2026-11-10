@@ -661,6 +661,28 @@ into one ndsp channel. `sound = on` is the default (`config_template_jak2.ini`);
   instead of ~496). Exact (`test/snd_voice`). Not done: caching decoded loops (a loop's decode
   repeats only when its history at the loop start repeats, and Citadel's ambient loops are
   seconds long), per-voice DSP channels (different interpolation, not exact).
+- **Voice limits** (j2voice; nothing of it measured yet, see `reports/nov10/j2voice.md`):
+  - *The SPU2's 48 voices* (`game/sound/common/voice_alloc.h`, `VoiceManager::TakeVoice`; Jak II
+    3DS build only): a tone takes a free voice of its volume group's range, else the voice that
+    matters least (in release before held, then the lowest tone priority, then the oldest),
+    unless that one is held at a higher priority: then the tone doesn't play. Jak II: 4 stream
+    voices, 44 for the tones (`snd_ExternVoiceAlloc` in `InitSound_overlord`; inferred, the
+    decompiled overlord has no such calls). Jak 1's overlord sets its PS2 ranges
+    (`snd_SetGroupVoiceRange`), but its limit is off.
+  - *The voice budget* (`mix_budget.h`, `Player::MixerThread`; both games): the mixer measures
+    each buffer; above 85% of real time it cuts the number of voices it mixes audibly, and
+    `Synth::BeginBlock` mutes the quietest beyond it (`Voice::SetMuted`: address, envelope and
+    end as if playing, nothing decoded or mixed, about 1/6 of the cost). It never sleeps while
+    it is behind. Below 85% there is no limit and the mix is exact.
+  - *Queueing a buffer* is `svcFlushProcessDataCache` instead of the DSP module's IPC
+    (`ctr_audio_submit`; 7-8% of real time on hardware before; `kernel_flush = off` or the
+    Homebrew Launcher: the IPC).
+  - The log line every ~10 s: `3DS sound: N% of real time (...), queueing N%, S sounds, V
+    voices; voice limit: C cuts, lowest L, at most M muted; SPU voices: A taken over, B tones
+    without one so far; ... late buffers so far`, and at a cut (at most every 5 s) `3DS sound: a
+    buffer took N% of its time to mix ...: the K loudest voices stay audible for now`.
+  - `test/snd_voice` covers the muted voice, the synth's block with a limit, the allocator and
+    the budget.
 - **Overlord sound name lookup** (Jak 1, `LookupSoundIndex`): every looping ambient in range is
   played by name every frame, and each lookup scanned the common bank's ~460 names with a
   `memcmp` call each; it now compares the first 4 bytes as a word first (same first match).
