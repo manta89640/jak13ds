@@ -214,12 +214,11 @@ static inline int words_equal(const void* a, const void* b, unsigned n) {
 #define MAX_STAGING 1024
 #define MAX_TEXTURES 2048
 #define MAX_POOLS 256
-/* GPU command buffer: a frame's commands must all fit (splitting it doesn't make room). 2 MB of
- * linear memory; a busy frame (3000 level draws) takes ~1 MB. */
+/* GPU command buffer: 2 MB of linear memory; a busy frame (3000 level draws) takes ~1 MB. A frame
+ * that doesn't fit is flushed and waited for in the middle (cmd_room). */
 #if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
 /* (AI-assisted, j2-mem2) Jak II: 1.25 MB (the pipeline's halves 640 KB). Haven City frames
- * take ~190 KB of commands (Azahar, baseline C: 835-854 draws, 75k triangles); a frame that
- * doesn't fit switches the pipeline off (CtrRenderer::render_frame) and has all of it. */
+ * take ~190 KB of commands (Azahar, baseline C: 835-854 draws, 75k triangles). */
 #define CMDBUF_BYTES (1280 * 1024)
 #else
 #define CMDBUF_BYTES (2 * 1024 * 1024)
@@ -471,7 +470,8 @@ static struct {
    * the texture, its memory or its parameters change */
   const C3D_Tex* bound_tex;
   const void* bound_data;
-  u32* cmd_base; /* the command buffer at C3D_FrameBegin */
+  u32* cmd_base; /* the command buffer at C3D_FrameBegin (or at the last cmd_room flush) */
+  u32 cmd_flushed_words; /* the frame's command words before the last cmd_room flush */
   u32 bound_param, bound_lod;
   int frame_no;
   ctr_gpu_stats cur, last;
@@ -1939,8 +1939,8 @@ static void raw_frame_reset(void);
 static void clip_reserve_reset(void);
 static int s_pipeline = 0;
 /* (AI-assisted) 1 MB each: the busiest jungle frames on hardware use ~450 KB of commands; a frame
- * that still runs out of room switches the pipeline off (CtrRenderer::render_frame) instead of
- * losing its last draws every frame. 2 MB each cost the linear memory a level needs.
+ * that still runs out of room is flushed and waited for in the middle (cmd_room). 2 MB each cost
+ * the linear memory a level needs.
  * (AI-assisted) They are the two halves of citro3d's own command buffer (C3D_Init's
  * CMDBUF_BYTES), which citro3d only writes in frames without the pipeline: 2 MB of linear memory
  * less. Its C3D_FrameBegin in ctr_gpu_frame_end only points gpuCmdBuf there for a moment. */
@@ -3060,6 +3060,7 @@ static void pipeline_frame_begin(u32 clear) {
   }
   GPUCMD_SetBuffer(s_cmdbufs[s_k], PIPE_CMD_BYTES / 4, 0);
   g.cmd_base = gpuCmdBuf;
+  g.cmd_flushed_words = 0;
   g.vbuf = s_vbufs[s_k];
   g.frame_no++;
   bd_frame_begin(); /* (AI-assisted, gpu-rt) gpu_breakdown: the frame before is done first */
@@ -3146,6 +3147,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   const float wait_ms = (float)((double)(svcGetSystemTick() - wait0) / (SYSCLOCK_ARM11 / 1000.0));
   diag_rt("frame_begin: deletes, VRAM pool copies");
   g.cmd_base = gpuCmdBuf;
+  g.cmd_flushed_words = 0;
   g.frame_no++;
   process_pending_deletes(0);
   /* before any draw: copies to VRAM are queued ahead of this frame's draws */
@@ -3447,12 +3449,12 @@ void ctr_gpu_frame_end(void) {
   if (bd) {
     /* (AI-assisted, gpu-rt) gpu_breakdown: the rest of the frame's commands alone (the frame
      * end below then has no list left to hand over) */
-    g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base) * 4);
+    g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base + g.cmd_flushed_words) * 4);
     bd_part();
   }
   /* the command words of the whole frame (splits move gpuCmdBuf on; C3D_FrameBegin restarts it) */
   if (!bd) {
-    g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base) * 4);
+    g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base + g.cmd_flushed_words) * 4);
   }
   /* (AI-assisted) frame_overlap2: 0 the frame end waits for the GPU, 2 no wait (the list queued
    * behind the frame the GPU draws) */
@@ -5387,15 +5389,67 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
 static void apply_state(const ctr_draw_state* st, int mesh, int raw);
 static int s_ocean_fade_ok; /* (the PS2 ocean's reflection fade tables, ocean_fade_init) */
 
-/* The GPU command buffer is fixed size, and a frame's commands must all fit (libctru panics when
- * it overflows; splitting the frame doesn't make room: the buffer only restarts at the next
- * C3D_FrameBegin). A draw that might not fit is dropped (counted in the stats). */
-static int cmd_room(void) {
-  if (gpuCmdBufSize - gpuCmdBufOffset < CMD_RESERVE_WORDS + CMD_DRAW_WORDS) {
-    g.cur.dropped_draws++;
+/* The command buffer is fixed size (libctru panics when it overflows). When the next draw might
+ * not fit, what is built so far goes to the GPU, the render thread waits until the GPU has run
+ * everything queued, and the buffer starts over: one stall, the frame continues (no draw dropped,
+ * no mode switch). 0: no room (the HOME Menu took the GPU, or the GPU didn't finish in 2 s). */
+static int cmd_flush_wait(void) {
+  if (!g.in_frame) {
     return 0;
   }
+  const u64 t0 = svcGetSystemTick();
+  u32* base;
+  u32 size;
+  if (s_pipeline) {
+    if (s_bd.frame) {
+      bd_part();
+    } else {
+      pipeline_submit();
+    }
+    base = s_cmdbufs[s_k];
+    size = PIPE_CMD_BYTES / 4;
+  } else {
+    if (!gx_begin()) {
+      return 0;
+    }
+    flush_vbuf();
+    C3D_FrameSplit(GX_CMDLIST_FLUSH);
+    gxCmdQueueRun(&__C3D_Context.gxQueue);
+    gx_end();
+    base = __C3D_Context.cmdBuf;
+    size = (u32)__C3D_Context.cmdBufSize;
+  }
+  if (gx_lost() || !g.in_frame) {
+    return 0;
+  }
+  diag_rt("command buffer full: waiting for the GPU");
+  if (!gxCmdQueueWait(&__C3D_Context.gxQueue, GX_WAIT_MS(2000))) {
+    printf("[ctr] command buffer full and the GPU didn't finish in 2 s: draws dropped\n");
+    return 0;
+  }
+  diag_rt("draw build");
+  g.cmd_flushed_words += (u32)(gpuCmdBuf + gpuCmdBufOffset - g.cmd_base);
+  GPUCMD_SetBuffer(base, size, 0);
+  g.cmd_base = gpuCmdBuf;
+  g.cur.cmd_splits++;
+  g.cur.gpu_wait_ms += (float)((double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0));
   return 1;
+}
+
+/* room for words more command words (and the frame end's reserve): flushed and waited for when
+ * there isn't */
+static int cmd_room_for(u32 words) {
+  if (gpuCmdBufSize - gpuCmdBufOffset >= CMD_RESERVE_WORDS + words) {
+    return 1;
+  }
+  if (cmd_flush_wait() && gpuCmdBufSize - gpuCmdBufOffset >= CMD_RESERVE_WORDS + words) {
+    return 1;
+  }
+  g.cur.dropped_draws++;
+  return 0;
+}
+static int cmd_room(void) {
+  return cmd_room_for(CMD_DRAW_WORDS);
 }
 
 /* c3l v23: the alpha mask on texture unit 1 (instead of the fog ramp) or 2, bound
@@ -6601,9 +6655,10 @@ static void clip_draw_ranges(const float* matrix, int n_mtx, const ctr_draw_stat
     memmove(g.vbuf + ioff, g.vbuf + s_clipres.ioff, (size_t)index_count * 2);
   }
   g.vbuf_used = ioff + (((size_t)index_count * 2 + 15) & ~(size_t)15);
-  /* all of the draws or none: room for each one's commands (cmd_room's test, times draws) */
-  if (gpuCmdBufSize - gpuCmdBufOffset < CMD_RESERVE_WORDS + (u32)draws * CMD_DRAW_WORDS) {
-    g.cur.dropped_draws += draws;
+  /* all of the draws or none (a shadow volume's passes leave the stencil at 0 only together): room
+   * for each one's commands, the buffer flushed first when short */
+  if (!cmd_room_for((u32)draws * CMD_DRAW_WORDS)) {
+    g.cur.dropped_draws += draws - 1;
     return;
   }
   use_program(PROG_CLIP);
@@ -7117,9 +7172,7 @@ int ctr_gpu_rt_draw_grid(int tex, const ctr_draw_state* state, const ctr_vertex*
   const size_t bytes = (size_t)nv * sizeof(ctr_vertex);
   const size_t grid_bytes = (bytes + 15) & ~(size_t)15;
   const size_t quad_bytes = 6 * sizeof(ctr_vertex);
-  if (!vbuf_room(grid_bytes + quad_bytes) ||
-      gpuCmdBufSize - gpuCmdBufOffset < CMD_RESERVE_WORDS + (u32)levels * CMD_DRAW_WORDS) {
-    g.cur.dropped_draws++;
+  if (!vbuf_room(grid_bytes + quad_bytes) || !cmd_room_for((u32)levels * CMD_DRAW_WORDS)) {
     return 0;
   }
   uint8_t* dst = g.vbuf + g.vbuf_used;
@@ -8639,7 +8692,7 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
     return;
   }
   /* (AI-assisted) room for the bone rows too (3 x 24 vectors) */
-  if (!cmd_room() || gpuCmdBufSize - gpuCmdBufOffset < CMD_RESERVE_WORDS + CMD_DRAW_WORDS + 320) {
+  if (!cmd_room_for(CMD_DRAW_WORDS + 320)) {
     return;
   }
   /* c3l v23: a texture with an alpha mask (on unit 2) */
@@ -8780,7 +8833,7 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
     return;
   }
   /* (AI-assisted) room for the bone rows too (3 x 24 vectors), as ctr_gpu_draw_skinned */
-  if (!cmd_room() || gpuCmdBufSize - gpuCmdBufOffset < CMD_RESERVE_WORDS + CMD_DRAW_WORDS + 320) {
+  if (!cmd_room_for(CMD_DRAW_WORDS + 320)) {
     return;
   }
   use_program(PROG_SKIN_ENV);

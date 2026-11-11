@@ -818,8 +818,8 @@ typedef struct {
   unsigned int tex_bytes;
   float gpu_ms;     /* GPU time of the frame: command processing (C3D_GetProcessingTime) */
   float draw_ms;    /* and drawing (C3D_GetDrawingTime) */
-  int cmd_splits;   /* command buffer flushes in the middle of the frame */
-  int dropped_draws; /* draws skipped because the command buffer was full */
+  int cmd_splits;   /* command buffer full: flushed and waited for in the middle of the frame */
+  int dropped_draws; /* draws skipped: no command room (the HOME Menu, a GPU that didn't finish) */
   int tex_binds;     /* texture changes (each clears the GPU's texture cache) */
   unsigned int cmd_bytes; /* GPU commands of the frame */
   unsigned int linear_free; /* free linear memory (meshes, textures, vertex ring), bytes */

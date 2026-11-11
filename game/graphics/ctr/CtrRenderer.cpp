@@ -564,30 +564,6 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.cmd_kb_peak = std::max(m_timing.cmd_kb_peak, gs.cmd_bytes / 1024.0);
   m_timing.dedup_kb += gs.cmd_dedup_words * 4 / 1024.0;
   m_timing.dropped += gs.dropped_draws;
-  // (AI-assisted) a pipelined frame that ran out of command buffer lost its last draws: the
-  // normal mode has the whole buffer for one frame
-  if (gs.dropped_draws && ctr_settings().pipeline && !m_pipeline_off) {
-    ctr_gpu_set_pipeline(0);
-    m_pipeline_off = true;
-    m_pipeline_calm = 0;
-    m_pipeline_retry_frames = std::min(m_pipeline_retry_frames * 2, 30 * 600);
-    lg::warn("[ctr] pipeline: {} draws didn't fit in the command buffer, pipeline off for now",
-             gs.dropped_draws);
-  } else if (m_pipeline_off && ctr_settings().pipeline) {
-    // (AI-assisted, j2gaps) one spike frame used to cost the CPU / GPU overlap for the rest of
-    // the session: back on after a run of frames whose commands fit well in a pipeline half
-    // (60%), waiting twice as long after each overflow; stays off without the linear memory
-    const u32 half_bytes = (u32)ctr_gpu_cmd_buffer_kb() * 1024 / 2;
-    m_pipeline_calm = gs.cmd_bytes < half_bytes * 6 / 10 ? m_pipeline_calm + 1 : 0;
-    if (m_pipeline_calm >= m_pipeline_retry_frames) {
-      m_pipeline_calm = 0;
-      if (ctr_gpu_set_pipeline(1)) {
-        m_pipeline_off = false;
-        lg::info("[ctr] pipeline: on again ({} frames fit in half the command buffer)",
-                 m_pipeline_retry_frames);
-      }
-    }
-  }
   m_timing.tex_binds += gs.tex_binds;
   m_timing.draws += gs.draws;
   m_timing.gpu_wait_ms += gs.gpu_wait_ms;
@@ -695,9 +671,12 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
           m_timing.vbuf_dropped
               ? fmt::format(", {} draws DROPPED (vertex buffer full)", m_timing.vbuf_dropped)
               : std::string(),
-          (m_timing.dropped ? fmt::format(", {} draws DROPPED (command buffer full)",
-                                          m_timing.dropped)
-                            : std::string()) +
+          (m_timing.splits ? fmt::format(", {} command buffer flushes (full: waited for the GPU)",
+                                         m_timing.splits)
+                           : std::string()) +
+              (m_timing.dropped ? fmt::format(", {} draws DROPPED (no command room)",
+                                              m_timing.dropped)
+                                : std::string()) +
               (m_timing.dead_draws
                    ? fmt::format(", {} draws SKIPPED (mesh not there)", m_timing.dead_draws)
                    : std::string()),
