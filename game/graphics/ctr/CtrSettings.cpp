@@ -247,8 +247,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.vis_culling = parse_bool(v);
     } else if (key == "run_culling") {
       s.run_culling = parse_bool(v);  // (AI-assisted)
-    } else if (key == "cone_cull") {
-      s.cone_cull = parse_bool(v);  // (AI-assisted, facecull)
     } else if (key == "cull_terrain") {
       s.cull_terrain = parse_bool(v);  // (AI-assisted, terraincull)
     } else if (key == "far_copy") {

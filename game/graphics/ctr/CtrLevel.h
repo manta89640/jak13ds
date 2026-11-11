@@ -31,7 +31,6 @@
 #include "common/dma/gs.h"
 #include "common/util/FileUtil.h"
 
-#include "game/graphics/ctr/CtrCull.h"
 #include "game/graphics/ctr/CtrRenderer.h"
 #include "game/graphics/ctr/CtrKeiraRig.h"
 #include "game/graphics/ctr/CtrTodPulse.h"
@@ -707,9 +706,6 @@ struct CtrLevelData {
   // (AI-assisted, farcopy) per chunk its c3l::ExtFarCopy role (1 source, 2 copy; empty: none),
   // read whatever config.ini says (a copy is never drawn along with its sources)
   std::vector<u8> far_role;
-  // (AI-assisted, facecull) per run its normal cone (c3l::ExtCones; ctr_cull::kNoCone: none; empty:
-  // none read, config.ini cone_cull off)
-  std::vector<u32> run_cone;
   bool tf_morph(size_t ci) const {
     return ci < chunk_tf.size() && chunk_tf[ci] >= 0 && tf_chunks[chunk_tf[ci]].records_offset;
   }
@@ -1589,9 +1585,6 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // (AI-assisted, farcopy) far_copy this level draw: the squared switch distance (game units; 0:
   // the sources always), and statistics: level draws, copy chunks drawn, source chunks replaced
   float m_fc_d2 = 0.f;
-  // (AI-assisted, facecull) cone_cull this level draw, and statistics: runs it hid, their triangles
-  bool m_cone_on = false;
-  u64 m_cone_frames = 0, m_cone_chunks = 0, m_cone_runs = 0, m_cone_tris = 0;
   u64 m_fc_frames = 0, m_fc_copies = 0, m_fc_sources = 0;
   // kDrawCullCond draws of visible chunks, and of them culled (camera inside)
   u64 m_cond_draws = 0, m_cond_culled = 0;

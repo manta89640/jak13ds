@@ -44,7 +44,7 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"mip_bias", "0"},   {"envmap_min_px", "0"},
     /* the Nov 11 options, on by default */
     {"ps2_lod_scale", "1"},
-    {"far_copy", "off"},      {"cull_terrain", "off"},  {"cone_cull", "off"},
+    {"far_copy", "off"},      {"cull_terrain", "off"},
     {"vram_vertices", "off"}, {"index_u8", "off"},
     {"merc_one_bone", "off"}, {"vfp_vector", "off"},    {"anim_lod_far", "off"},
     {"merc_lod_scale", "1"},  {"shadow_count", "0"},

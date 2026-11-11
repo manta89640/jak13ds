@@ -546,59 +546,12 @@ void test_terrain_cull() {
   check(!marked(wall), "a wall is not");
 }
 
-// (AI-assisted, facecull) a cube's six faces in a back face culled draw: six facing bins; the same
-// faces in a double-sided draw, or moved by the wind: none
-void test_face_bins() {
-  Converter cv;
-  DrawMode mode;
-  mode.as_int() = 0;
-  mode.set_depth_write_enable(true);
-  DrawKey k{};
-  k.mode = mode.as_int();
-  k.texture = 0xffff;
-  k.kind = (u16)(1 | c3l::kDrawCullBack);
-  const u32 culled = cv.key_id(k);
-  k.kind = 1;
-  const u32 plain = cv.key_id(k);
-  const float c[8][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
-                         {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
-  for (const auto& p : c) {
-    SrcVertex v{};
-    v.x = p[0] * 4096.f;
-    v.y = p[1] * 4096.f;
-    v.z = p[2] * 4096.f;
-    cv.verts.push_back(v);
-  }
-  // one triangle per face, wound outward
-  const u32 f[6][3] = {{0, 3, 2}, {4, 5, 6}, {0, 1, 5}, {3, 7, 6}, {0, 4, 7}, {1, 2, 6}};
-  std::set<int> bins;
-  for (const auto& t3 : f) {
-    SrcTri t{};
-    t.v[0] = t3[0];
-    t.v[1] = t3[1];
-    t.v[2] = t3[2];
-    t.draw_key = culled;
-    bins.insert(cv.face_bin(t));
-    t.draw_key = plain;
-    check(cv.face_bin(t) == 0, "a double-sided draw's triangle has no facing bin");
-  }
-  check(bins.size() == 6 && !bins.count(0), "a cube's faces fall in six facing bins");
-  cv.verts[0].wind = 0;
-  SrcTri t{};
-  t.v[0] = 0;
-  t.v[1] = 3;
-  t.v[2] = 2;
-  t.draw_key = culled;
-  check(cv.face_bin(t) == 0, "a triangle moved by the wind has none");
-}
-
 int main() {
   try {
     lg::initialize();
     run_cpu_bench_tests();
     test_far_copies();
     test_terrain_cull();
-    test_face_bins();
     test_resize();
     test_vista_seams();
     test_atlas_order(true);

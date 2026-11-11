@@ -326,7 +326,6 @@ void fill_spheres() {
 }  // namespace
 }  // namespace ctr_cpu_bench
 #include "game/graphics/ctr/CtrSimd.h"
-#include "game/graphics/ctr/CtrCull.h"
 namespace ctr_cpu_bench {
 namespace {
 
@@ -372,43 +371,6 @@ uint32_t tod_simd(uint32_t n) {
     }
   }
   return h;
-}
-
-// ---- (AI-assisted, fdiv) the normal cone test with square roots and divides (before) and with
-// multiplies only (CtrCull.h cone_away), over 512 cones and views ----
-constexpr int kCones = 512;
-uint32_t g_cone[kCones];
-float g_cview[kCones][7];  // c[3], r, eye[3]
-void fill_cones() {
-  uint32_t s = 99;
-  auto rnd = [&]() {
-    s = s * 1664525u + 1013904223u;
-    return (float)(s >> 8) * (1.f / 16777216.f) * 2.f - 1.f;
-  };
-  for (int i = 0; i < kCones; i++) {
-    float axis[3] = {rnd(), rnd(), rnd()};
-    g_cone[i] = ctr_cull::cone_pack(axis, 0.2f + 0.75f * (rnd() * 0.5f + 0.5f));
-    for (int k = 0; k < 7; k++) {
-      g_cview[i][k] = rnd() * 50.f;
-    }
-    g_cview[i][3] = 2.f + 3.f * (rnd() * 0.5f + 0.5f);
-  }
-}
-uint32_t cones_ref(uint32_t n) {
-  uint32_t c = 0;
-  for (uint32_t k = 0; k < n; k++) {
-    const int i = (int)(k & (kCones - 1));
-    c += ctr_cull::cone_away_ref(g_cone[i], g_cview[i], g_cview[i][3], g_cview[i] + 4) ? i : 0;
-  }
-  return c;
-}
-uint32_t cones_mul(uint32_t n) {
-  uint32_t c = 0;
-  for (uint32_t k = 0; k < n; k++) {
-    const int i = (int)(k & (kCones - 1));
-    c += ctr_cull::cone_away(g_cone[i], g_cview[i], g_cview[i][3], g_cview[i] + 4) ? i : 0;
-  }
-  return c;
 }
 
 uint32_t planes3_branch(uint32_t n) {
@@ -627,8 +589,6 @@ const Case kCases[] = {
     {"cull.planes3_signs", planes3_signs, 1000000, "cull.planes3_branch"},
     {"tod.blend4_bytes", tod_bytes, 500, nullptr},
     {"tod.blend4_simd", tod_simd, 500, "tod.blend4_bytes"},
-    {"cull.cone_sqrt_div", cones_ref, 300000, nullptr},
-    {"cull.cone_mul", cones_mul, 300000, "cull.cone_sqrt_div"},
     {"vfp.xform256", xform_plain, 2000, nullptr},
     {"vfp.xform256_unrolled", xform_unrolled, 2000, "vfp.xform256"},
 #ifdef BONES_VFP_ASM
@@ -648,7 +608,6 @@ int run(double scale, void (*line)(const char* text, void* ctx), void* ctx) {
   fill_tables();
   fill_spheres();
   fill_points();
-  fill_cones();
   fill_tod();
   fill_runs();
 #ifdef BONES_VFP_ASM

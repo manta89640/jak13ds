@@ -15,7 +15,6 @@ ones with converter data need the levels converted again.
 | 6 | `ps2_lod_scale` | detail the 240-line screen can't show (coarse versions nearer) | nothing |
 | 8 | `far_copy` | detail of far plain ties (a simplified copy from 150 m) | levels converted with `--far-copies` |
 | 9 | `cull_terrain` | back faces of ground the camera can't get under | levels converted with `--terrain-cull` |
-| 10 | `cone_cull` | the vertex work of runs whose every triangle faces away | levels converted with `--face-runs` |
 
 ## 6. The PS2's detail distances for a 240-line screen
 
@@ -112,35 +111,3 @@ floor) sees through the marked ground; ground drawn as tfrag but walked on as so
 **To check on a console:** convert with `--terrain-cull`, `cull_terrain = on`; walk the beach, the
 jungle and village1 looking for holes in the ground (most likely by ledges the test missed and in
 cutscenes); compare triangles and `render ms/frame`.
-
-## 10. Runs that face away, skipped on the CPU
-
-The GPU culls back faces of the marked draws (closed tie surfaces, and the ground of section 9)
-after their vertex program has run. A run all of whose triangles face away can be left out before:
-the same picture, without its vertex work. A tie node's run holds a whole rock or house (normals
-every way), so the converter first splits such runs by the way their triangles face.
-
-**Converter** (`--face-runs`, off by default: more runs, a slightly worse vertex cache):
-- each triangle of a back face culled draw (`kDrawCullBack` or `kDrawCullTerrain`; not
-  `kDrawCullCond`, culled only from some places; not moved by the wind) gets a facing bin
-  (`face_bin`: the largest component of its normal and its sign, 6 bins); a draw's triangles of one
-  node are sorted by it and runs split where it changes;
-- per run its normal cone (`CtrCull.h make_cone`), from the written (welded, quantized) vertices
-  the run's indices point at: the mean normal as axis, packed to s8, and the widest normal from
-  that packed axis, 3 degrees wider (6 if the chunk's vertices have morph offsets), its cosine
-  rounded down; 80 degrees or wider: none. In `ExtCones`.
-
-**Why it holds** (`cone_away`): with the run's sphere (center c, radius r), the camera at e and
-v = c - e at angle t from the axis, every normal is within t + a of v's direction, so for every
-point p of the run n . (p - e) >= n . v - r >= |v| cos(t + a) - r; the run is left out when that is
-positive (every triangle has the camera behind its plane). The test (`cull_test.cpp test_cones`):
-random patches of triangles and cameras: every run the cone leaves out has each triangle facing
-away (24000 views checked, ~23% left out).
-
-**Runtime** (`cone_cull = on`, needs `cull_ties`): in the run pass, a run with a cone whose draw
-is culled (`CTR_TCC_CULL_BACK` in its state: so terrain only with `cull_terrain`) and that faces
-away is not drawn. Per run of the chunks in view: two square roots and a few products.
-
-**To check on a console:** convert with `--face-runs`, `cone_cull = on` (and `cull_ties`);
-nothing should look different; compare `render ms/frame` (the GPU's vertex work) and the runs
-and triangles hidden in the log.
