@@ -596,25 +596,8 @@ constexpr uint32_t kExtHeaderOccSize = 224;
 // ext header bytes kExtHeaderOccSize..kExtHeaderHorizonSize: a retired section (horizon), ignored
 constexpr uint32_t kExtHeaderHorizonSize = 256;
 
-/*!
- * (AI-assisted, farcopy) Far copies (ctr_level_converter --far-copies, config.ini `far_copy`,
- * docs/3ds-port/culling.md "8."): tie geometry with one version (no LOD group, wind, morph, envmap
- * shine, opening planes, hideable prototype) in chunks of its own (role 1), and a simplified copy of
- * it in chunks of the same cell (role 2). Both are ordinary tie chunks (lod_tier 0) with the cell's
- * center as lod_center: the runtime draws a cell's copies instead of its sources while the camera
- * is at least far_copy_distance from it. u8 role[count] per chunk (0: neither).
- * ExtHeader::size >= kExtHeaderFarCopySize, then this at ext_offset + kExtHeaderHorizonSize.
- */
+// ext header bytes kExtHeaderHorizonSize..kExtHeaderFarCopySize: a retired section (far copies), ignored
 constexpr uint32_t kExtHeaderFarCopySize = 272;
-struct ExtFarCopy {
-  uint32_t count;   // = the chunk count
-  uint32_t offset;  // u8 role[count], absolute
-  float error;      // the copies' simplification error (game units)
-  uint32_t pad;
-};
-static_assert(sizeof(ExtFarCopy) == kExtHeaderFarCopySize - kExtHeaderHorizonSize);
-// the converter's triangle tiers of the far copies' sources and copies (written as lod_tier 0)
-constexpr uint32_t kFarSourceTier = 5, kFarCopyTier = 6;
 
 // ext header bytes kExtHeaderFarCopySize..kExtHeaderConeSize: a retired section (normal cones), ignored
 constexpr uint32_t kExtHeaderConeSize = 288;

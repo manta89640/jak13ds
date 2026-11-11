@@ -402,81 +402,6 @@ void test_tfrag_versions() {
         "three versions");
 }
 
-// (AI-assisted, farcopy) a finely cut flat tie (one draw, one node) gets a far copy with fewer
-// triangles in the same cell; a node with a wind vertex gets none
-void test_far_copies() {
-  Converter cv;
-  DrawMode mode;
-  mode.as_int() = 0;
-  mode.set_depth_write_enable(true);
-  mode.set_zt(true);
-  mode.set_depth_test(GsTest::ZTest::GEQUAL);
-  DrawKey k{};
-  k.mode = mode.as_int();
-  k.texture = 0;
-  k.kind = (u16)(1 | c3l::kDrawCullBack);
-  const u32 key = cv.key_id(k);
-  constexpr int kN = 16;  // a 16 x 16 grid of quads over 4 m
-  auto add_plane = [&](u16 vis, float x0, bool wind) {
-    const u32 v0 = (u32)cv.verts.size();
-    for (int j = 0; j <= kN; j++) {
-      for (int i = 0; i <= kN; i++) {
-        SrcVertex v{};
-        v.x = x0 + i * 4096.f * 4 / kN;
-        v.y = 0;
-        v.z = j * 4096.f * 4 / kN;
-        v.s = i / (float)kN;
-        v.t = j / (float)kN;
-        v.rgba[0] = v.rgba[1] = v.rgba[2] = v.rgba[3] = 128;
-        if (wind) {
-          v.wind = 0;  // (a wind instance: every vertex moves)
-        }
-        cv.verts.push_back(v);
-      }
-    }
-    for (int j = 0; j < kN; j++) {
-      for (int i = 0; i < kN; i++) {
-        const u32 a = v0 + j * (kN + 1) + i, b = a + 1, c = a + kN + 1, d = c + 1;
-        for (const auto& tri : {std::array<u32, 3>{a, b, d}, std::array<u32, 3>{a, d, c}}) {
-          SrcTri t{};
-          t.v[0] = tri[0];
-          t.v[1] = tri[1];
-          t.v[2] = tri[2];
-          t.draw_key = key;
-          t.vis = vis;
-          cv.tris.push_back(t);
-        }
-      }
-    }
-  };
-  add_plane(7, 0.f, false);
-  add_plane(8, 50 * 4096.f, true);
-  const size_t n0 = cv.tris.size();
-  cv.make_far_copies(0.25f * 4096.f, [](int) { return 64.f * 4096.f; });
-  size_t src = 0, cpy = 0, untouched = 0;
-  for (size_t i = 0; i < cv.tris.size(); i++) {
-    const auto& t = cv.tris[i];
-    if (t.tier == c3l::kFarSourceTier) {
-      check(t.vis == 7, "the plain node's triangles are the sources");
-      src++;
-    } else if (t.tier == c3l::kFarCopyTier) {
-      check(i >= n0 && t.vis == 7, "the copies come after, of the same node");
-      check(!(cv.draw_keys[t.draw_key].kind & c3l::kDrawCullBack), "a copy has no culling mark");
-      check(t.fcell[0] == 0 && t.fcell[2] == 0, "a copy is in its sources' cell");
-      for (int c = 0; c < 3; c++) {
-        check(cv.verts[t.v[c]].y == 0.f, "a copy's corners are the sources' (on the plane)");
-      }
-      cpy++;
-    } else {
-      check(t.vis == 8, "the node moved by the wind keeps its triangles as they are");
-      untouched++;
-    }
-  }
-  check(src == (size_t)kN * kN * 2 && cpy >= 2 && cpy < src / 4,
-        "a flat plane's copy is a few triangles");
-  check(untouched == (size_t)kN * kN * 2, "no copy of the wind node");
-}
-
 // (AI-assisted, terraincull) ground at 0 m with a 10 m deep pit at x 60..80 m: a floor triangle
 // far from the pit is marked (and turned to face up), one by the pit's edge, one floating 10 m up
 // and a wall are not
@@ -550,7 +475,6 @@ int main() {
   try {
     lg::initialize();
     run_cpu_bench_tests();
-    test_far_copies();
     test_terrain_cull();
     test_resize();
     test_vista_seams();

@@ -703,9 +703,6 @@ struct CtrLevelData {
   // per group its near chunks (stream_units holding its near or mid version) and the frame it was
   // first held coarser in view for want of them
   std::vector<u32> tf_unit_first, tf_unit_count, tf_units, tf_hold_since;
-  // (AI-assisted, farcopy) per chunk its c3l::ExtFarCopy role (1 source, 2 copy; empty: none),
-  // read whatever config.ini says (a copy is never drawn along with its sources)
-  std::vector<u8> far_role;
   bool tf_morph(size_t ci) const {
     return ci < chunk_tf.size() && chunk_tf[ci] >= 0 && tf_chunks[chunk_tf[ci]].records_offset;
   }
@@ -1582,10 +1579,6 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_fade_runs = 0;
   u64 m_lod_groups_near = 0, m_lod_frames = 0, m_lod_tris[2] = {0, 0};
   u64 m_cull_runs = 0, m_cull_tris = 0, m_cull_chunks = 0, m_cull_frames = 0;
-  // (AI-assisted, farcopy) far_copy this level draw: the squared switch distance (game units; 0:
-  // the sources always), and statistics: level draws, copy chunks drawn, source chunks replaced
-  float m_fc_d2 = 0.f;
-  u64 m_fc_frames = 0, m_fc_copies = 0, m_fc_sources = 0;
   // kDrawCullCond draws of visible chunks, and of them culled (camera inside)
   u64 m_cond_draws = 0, m_cond_culled = 0;
   // (AI-assisted) lowres_vista / neighbour_vis: low resolution chunks drawn in near mode, and the

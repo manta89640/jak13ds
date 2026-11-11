@@ -262,11 +262,6 @@ struct CtrSettings {
   // 240-line top screen as it did of the PS2's picture (docs/3ds-port/culling.md). 1: the PS2's
   float ps2_lod_scale = 1.f;
   bool ps2_lod_scale_auto = false;
-  // (AI-assisted, farcopy) levels converted with --far-copies: a cell's plain tie geometry is drawn
-  // as its simplified copy while the camera is far_copy_distance meters or more from the cell's
-  // center (docs/3ds-port/culling.md). Off: the sources always (the copies never)
-  bool far_copy = false;
-  float far_copy_distance = 150.f;
   // (AI-assisted, terraincull) back faces of the terrain the converter marked (c3l::kDrawCullTerrain,
   // --terrain-cull: ground whose underside the camera can't get to) are culled, with cull_ties'
   // winding (needs cull_ties on). Read at level load. Off: both sides (docs/3ds-port/culling.md)

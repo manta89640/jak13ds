@@ -13,7 +13,6 @@ ones with converter data need the levels converted again.
 | # | key | removes | needs |
 |---|---|---|---|
 | 6 | `ps2_lod_scale` | detail the 240-line screen can't show (coarse versions nearer) | nothing |
-| 8 | `far_copy` | detail of far plain ties (a simplified copy from 150 m) | levels converted with `--far-copies` |
 | 9 | `cull_terrain` | back faces of ground the camera can't get under | levels converted with `--terrain-cull` |
 
 ## 6. The PS2's detail distances for a 240-line screen
@@ -39,41 +38,6 @@ No unit test: it is a factor on existing distances (the host build checks the pl
 **To check on a console:** `ps2_lod_scale = auto`; village1, the beach and the title flight: look
 at rocks, huts and cliffs as they come nearer (shape and shading changes), compare the triangle
 counts and `render ms/frame` with 1.
-
-## 8. A coarser copy of far plain ties
-
-The vista tier already replaces far scenery beyond the draw distance (500 m) with copies
-simplified to metres. Between the PS2's far-planes (30-140 m) and the draw distance a tie is drawn
-with its PS2 geometry 3 at full detail. `--far-copies` adds a copy for that range.
-
-**Converter** (`Converter::make_far_copies`, before chunking; off by default because the split
-costs draws even with `far_copy` off): tie triangles with one version (no LOD group, wind, morph,
-envmap shine, opening planes, hideable prototype, near chunk), grouped by chunking cell, draw and
-visibility id. Each group is welded (`vista_vertex_key`: positions, texture coordinates, colors,
-time of day kept apart) and simplified by meshoptimizer with an absolute error of
-`--far-copy-error` (0.25 m; topology kept, no sloppy step); a group whose copy is at least 20%
-smaller becomes sources (tier 5) and its copy is added (tier 6), both in the group's cell. The
-copy's corners are source vertices (the same time of day colors and texture coordinates); its draw
-has no back face culling mark (a simplified closed surface may open). Both are written as ordinary
-tie chunks (`lod_tier` 0, so every tie rule applies to them) with a role in `ExtFarCopy`; sharing a
-cell, they share `lod_center`. The vista tier copies the sources (tier 5), not the copies. The log
-has `<level>: far copies: N groups, N tie triangles copied as N (N%)`.
-
-**Runtime** (`emit_chunk`): a source chunk is not drawn, and its cell's copy chunk is, while the
-camera is `far_copy_distance` (150 m) or more from the cell's center; nearer, the other way round.
-One shared center for both: never both, never neither, at the cost of a switch of the whole cell at
-once. With `far_copy` off the copies are never drawn.
-
-At 150 m, 0.25 m is about 0.6 pixels of the top screen (`f ~ 400 px` per unit of size at unit
-depth): the switch should not show, except where a copy's colors differ (it keeps source vertices,
-so they don't).
-
-The test (`converter_test.cpp test_far_copies`): a finely cut flat tie gets a copy of a few
-triangles in its cell, from its own vertices, without the culling mark; a wind instance gets none.
-
-**To check on a console:** convert with `--far-copies`, `far_copy = on`; watch tie-heavy views
-(village1 from the beach, the title flight) for a cell's ties changing shape at 150 m; compare
-triangles and draws with it off (the split itself adds draws).
 
 ## 9. Back faces of the ground
 

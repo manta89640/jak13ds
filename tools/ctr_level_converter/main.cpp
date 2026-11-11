@@ -191,10 +191,6 @@ struct Options {
   // (AI-assisted) v13: tie strips wound consistently (odd strip triangles flipped), closed tie
   // surfaces oriented outward and marked for back face culling (c3l::kDrawCullBack)
   bool tie_winding = true;
-  // (AI-assisted, farcopy) c3l::ExtFarCopy: simplified copies of the plain tie geometry (off: the
-  // sources' chunks split from the others cost draws)
-  bool far_copies = false;
-  float far_copy_error = 0.25f;  // meters
   // (AI-assisted, terraincull) c3l::kDrawCullTerrain on the terrain whose back can't be seen (off:
   // the marked triangles' draws split from the others cost draws)
   bool terrain_cull = false;
@@ -364,9 +360,6 @@ struct SrcTri {
   // the tfrag geomorph's version (c3l::kRunLod*, 0: none) of tfrag group tgroup (c3l::ExtTfrag)
   u8 tlod = 0;
   u32 tgroup = UINT32_MAX;
-  // (AI-assisted, farcopy) tiers c3l::kFarSourceTier / kFarCopyTier: the cell (chunking grid) the
-  // triangle goes in, its sources' (a copy's own centroid may be in the next one)
-  int fcell[3] = {0, 0, 0};
 };
 
 // a planar opening of a tie surface marked c3l::kDrawCullCond (Converter::orient_ties):
@@ -1841,92 +1834,6 @@ struct Converter {
       }
       t.draw_key = it->second;
       terrain_marked++;
-    }
-  }
-  // (AI-assisted, farcopy) Options::far_copies: the tie triangles with one version (no LOD group,
-  // wind, morph, envmap shine, opening planes, hideable prototype, near chunk), by (cell, draw,
-  // visibility id): each group with a copy simplified to `error` (meshoptimizer, topology kept) at
-  // least 20% smaller goes to tier kFarSourceTier, the copy to kFarCopyTier, both in the group's
-  // cell. The copy's draw has no back face culling marks (the simplified surface may be open).
-  size_t far_src_tris = 0, far_copy_tris = 0, far_groups = 0;
-  template <typename CellOf>
-  void make_far_copies(float error_units, CellOf cell_of_detail) {
-    std::map<std::tuple<int, int, int, int, u32, u16>, std::vector<u32>> groups;
-    const u32 n0 = (u32)tris.size();
-    for (u32 i = 0; i < n0; i++) {
-      const auto& t = tris[i];
-      const auto& dk = draw_keys[t.draw_key];
-      if ((dk.kind & 0xff) != 1 || t.tier != 0 || t.lod != 0 || t.lod_group != UINT32_MAX ||
-          t.stream || t.proto != 0xffff || t.cond != UINT32_MAX || dk.env != 0xffff) {
-        continue;
-      }
-      bool ok = true;
-      float c[3] = {0, 0, 0};
-      for (int k = 0; k < 3; k++) {
-        const auto& v = verts[t.v[k]];
-        ok = ok && v.wind == UINT32_MAX && !v.mband;
-        c[0] += v.x;
-        c[1] += v.y;
-        c[2] += v.z;
-      }
-      if (!ok) {
-        continue;
-      }
-      const float cell = cell_of_detail((int)t.detail);
-      groups[std::make_tuple((int)t.detail, (int)std::floor(c[0] / 3 / cell),
-                             (int)std::floor(c[1] / 3 / cell), (int)std::floor(c[2] / 3 / cell),
-                             t.draw_key, t.vis)]
-          .push_back(i);
-    }
-    for (auto& [key, ids] : groups) {
-      std::map<std::array<u32, 7>, u32> weld;
-      std::vector<u32> rep, idx;
-      std::vector<float> pos;
-      for (u32 ti : ids) {
-        for (int k = 0; k < 3; k++) {
-          const u32 vi = tris[ti].v[k];
-          const auto& v = verts[vi];
-          auto [it, fresh] = weld.emplace(vista_vertex_key(v), (u32)rep.size());
-          if (fresh) {
-            rep.push_back(vi);
-            pos.insert(pos.end(), {v.x, v.y, v.z});
-          }
-          idx.push_back(it->second);
-        }
-      }
-      if (idx.size() < 3 * 4) {
-        continue;
-      }
-      std::vector<u32> out(idx.size());
-      const size_t n = meshopt_simplify(out.data(), idx.data(), idx.size(), pos.data(), rep.size(),
-                                        12, 0, error_units, meshopt_SimplifyErrorAbsolute, nullptr);
-      if (n < 3 || n * 10 > idx.size() * 8) {
-        continue;
-      }
-      DrawKey nk = draw_keys[std::get<4>(key)];
-      const u16 kind = (u16)(nk.kind & ~(c3l::kDrawCullBack | c3l::kDrawCullCond));
-      nk.cond_bin = 0;
-      const u32 ck = key_id(key_like(nk, nk.mode, nk.texture, kind));
-      const int cc[3] = {std::get<1>(key), std::get<2>(key), std::get<3>(key)};
-      for (u32 ti : ids) {
-        tris[ti].tier = c3l::kFarSourceTier;
-        memcpy(tris[ti].fcell, cc, sizeof(cc));
-      }
-      const SrcTri base = tris[ids[0]];
-      for (size_t j = 0; j + 2 < n; j += 3) {
-        SrcTri nt = base;
-        nt.v[0] = rep[out[j]];
-        nt.v[1] = rep[out[j + 1]];
-        nt.v[2] = rep[out[j + 2]];
-        nt.draw_key = ck;
-        nt.orig_key = UINT32_MAX;
-        nt.tier = c3l::kFarCopyTier;
-        memcpy(nt.fcell, cc, sizeof(cc));
-        tris.push_back(nt);
-      }
-      far_src_tris += ids.size();
-      far_copy_tris += n / 3;
-      far_groups++;
     }
   }
   /*!
@@ -4692,7 +4599,7 @@ void optimize_draws(Converter& cv,
       const auto& dk = cv.draw_keys[t.draw_key];
       const int kind = dk.kind & 0xff;
       const bool vista = opt.vista && (t.tier == 3 ||
-                                       ((t.tier == 0 || t.tier == c3l::kFarSourceTier) && kind == 1 &&
+                                       (t.tier == 0 && kind == 1 &&
                                         t.detail <= 2) ||
                                        (t.tier == 2 && kind == 0 && !has_lowres));
       if (vista && dk.texture < elsewhere.size()) {
@@ -5546,13 +5453,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       cv.env_tie_tris -= std::min(cv.env_tie_tris, dropped);
     }
   }
-  // (AI-assisted, farcopy) the plain tie geometry's simplified copies (c3l::ExtFarCopy)
-  if (opt.far_copies && !opt.merc_only) {
-    cv.make_far_copies(opt.far_copy_error * 4096.f, cell_of_detail);
-    lg::info("{}: far copies: {} groups, {} tie triangles copied as {} ({:.0f}%)", level.level_name,
-             cv.far_groups, cv.far_src_tris, cv.far_copy_tris,
-             cv.far_src_tris ? 100.0 * cv.far_copy_tris / cv.far_src_tris : 0.0);
-  }
   // (detail, cell, kind) -> triangle indices. (AI-assisted) The kind (Draw::kind: tfrag, tie,
   // shrub) keeps every chunk to one (Chunk::kind); with the default tiers it splits nothing.
   using CellKey = std::tuple<int, int, int, int, int>;
@@ -5589,15 +5489,13 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       nc = tfrag_need_class(cv, opt, t.tgroup);
     }
     const float cell = t.stream ? stream_class_cell(opt, nc) * 4096.f : cell_of_detail((int)t.detail);
-    // (AI-assisted, farcopy) a far copy and its sources: their group's cell
-    const bool fixed_cell = t.tier == c3l::kFarSourceTier || t.tier == c3l::kFarCopyTier;
     // (AI-assisted) detail + 4 * tier + 64 * shrub distance class (+ 1024 * (stream class + 3 *
     // need class): the near chunks after the others)
     auto key = std::make_tuple(
         (int)(t.detail + 4 * t.tier + 64 * t.sclass + (t.stream ? 1024 * (t.stream + 3 * nc) : 0)),
-                               fixed_cell ? t.fcell[0] : (int)std::floor(cx / 3 / cell),
-                               fixed_cell ? t.fcell[1] : (int)std::floor(cy / 3 / cell),
-                               fixed_cell ? t.fcell[2] : (int)std::floor(cz / 3 / cell),
+                               (int)std::floor(cx / 3 / cell),
+                               (int)std::floor(cy / 3 / cell),
+                               (int)std::floor(cz / 3 / cell),
                                (int)(cv.draw_keys[t.draw_key].kind & 0xff) |
                                    // (AI-assisted, j2water2) v21: envmapped tie triangles in
                                    // chunks of their own (only those get normals)
@@ -6021,7 +5919,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       // (AI-assisted, streaming) not the near chunks (near versions only)
       // small and medium ties too: the PS2 draws them at any distance, the vista beyond the draw
       // distance
-      const bool landmark = (tier == 0 || tier == (int)c3l::kFarSourceTier) && kind == 1 &&
+      const bool landmark = tier == 0 && kind == 1 &&
                             detail <= 2 && std::get<0>(cp.key) < 1024;
       const bool coarse = tier == 2 && kind == 0 && (!has_lowres || coarse_copy[pi]);
       if (!lowres && !landmark && !coarse) {
@@ -6299,7 +6197,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   std::unordered_map<PosKey, std::array<double, 3>, PosKeyHash> shared_pos;
 
   std::vector<c3l::Chunk> chunks;
-  std::vector<u8> chunk_far_role;  // (AI-assisted, farcopy) per chunk: c3l::ExtFarCopy's role
   std::vector<c3l::Vertex> out_verts;
   std::vector<u16> out_indices;
   std::vector<c3l::Draw> out_draws;
@@ -6648,12 +6545,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       c3l::Chunk ch{};
       const int detail = std::get<0>(key) % 4;
       ch.lod_tier = std::get<0>(key) / 4 % 16;
-      // (AI-assisted, farcopy) far copies and their sources: ordinary tie chunks with a role
-      u8 far_role = 0;
-      if (ch.lod_tier == c3l::kFarSourceTier || ch.lod_tier == c3l::kFarCopyTier) {
-        far_role = ch.lod_tier == c3l::kFarSourceTier ? 1 : 2;
-        ch.lod_tier = 0;
-      }
       const int sclass = std::get<0>(key) / 64 % 16;  // (AI-assisted)
       // (AI-assisted, streaming) v19 near chunk: its class (core / extra), need class
       const int stream_cls = std::get<0>(key) / 1024 % 3;
@@ -7067,7 +6958,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         add_tfrag_trailer(ch, tfrag_map, run_tlods);
       }
       chunks.push_back(ch);
-      chunk_far_role.push_back(far_role);
       chunk_stream_cls.push_back((u8)stream_cls);
     }
   }
@@ -7678,12 +7568,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   const bool env_out = ext_out && !out_env_draws.empty();
   const bool wind_out = ext_out && !wind_chunk_verts.empty();
   const bool cond_out = ext_out && !out_cond_sets.empty();
-  // (AI-assisted, farcopy) c3l::ExtFarCopy
-  const bool far_out = ext_out && opt.far_copies &&
-                       std::any_of(chunk_far_role.begin(), chunk_far_role.end(),
-                                   [](u8 r) { return r != 0; });
   const u32 eh_size = !ext_out                           ? 0
-                      : far_out                          ? c3l::kExtHeaderFarCopySize
                       : tfrag_out                        ? c3l::kExtHeaderTfragSize
                       : morph_out                        ? c3l::kExtHeaderMorphSize
                       : cond_out                         ? c3l::kExtHeaderV24Size
@@ -8094,20 +7979,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     ext_put(c3l::kExtHeaderTexKeySize, &ec, sizeof(ec));
     lg::info("{}: culling by opening planes: {} draws, {} planes", level.level_name, cds.size(),
              planes);
-  }
-  if (far_out) {
-    // (AI-assisted, farcopy) per chunk its role (load_far_copy)
-    c3l::ExtFarCopy ef{};
-    ef.count = (u32)chunk_far_role.size();
-    ef.offset = append(buf, chunk_far_role.data(), chunk_far_role.size());
-    ef.error = opt.far_copy_error * 4096.f;
-    ext_put(c3l::kExtHeaderHorizonSize, &ef, sizeof(ef));
-    size_t src = 0, cpy = 0;
-    for (const u8 r : chunk_far_role) {
-      src += r == 1;
-      cpy += r == 2;
-    }
-    lg::info("{}: far copies: {} source chunks, {} copy chunks", level.level_name, src, cpy);
   }
   if (morph_out) {
     ext_put(c3l::kExtHeaderV24Size, &em, sizeof(em));
@@ -8879,10 +8750,6 @@ int main(int argc, char** argv) {
   app.add_flag("--terrain-cull", opt.terrain_cull,
                "mark the terrain whose underside can't be seen for back face culling "
                "(c3l::kDrawCullTerrain)");
-  app.add_flag("--far-copies", opt.far_copies,
-               "simplified far copies of the plain tie geometry (c3l::ExtFarCopy)");
-  app.add_option("--far-copy-error", opt.far_copy_error,
-                 "far copies: simplification error (meters)");
   app.add_option("--vista-cell", opt.vista_cell, "vista tier cell size (meters)");
   app.add_option("--merc-cull-agree", opt.merc_cull_agree,
                  "merc back face culling marks: share of a draw's triangles agreeing with their "

@@ -975,8 +975,3 @@ the wall is broken, the sewer hover door, the strip's vents).
 the extension header (no version change: an older reader stops at its own `ExtHeader::size`, the
 sections before a present one are zero when the level has none).
 
-- `ExtFarCopy` (size >= `kExtHeaderFarCopySize` 272, at ext_offset + 256), only with
-  `--far-copies`: a role per chunk (u8: 1 the sources of a cell's far copies, 2 the copies, 0
-  neither) and the copies' error. Sources and copies are ordinary tie chunks (lod_tier 0) of the
-  same cell, so they share `lod_center`. The runtime reads the roles whatever config.ini says: a
-  copy is never drawn with its sources.
