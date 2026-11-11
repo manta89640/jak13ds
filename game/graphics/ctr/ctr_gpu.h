@@ -666,15 +666,10 @@ typedef struct {
   uint32_t fog_gen; /* (AI-assisted) the fog f24[12..17] were made with (0: not made) */
 } ctr_mesh_matrix;
 void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out);
-/* (AI-assisted) config.ini fog_stage_skip: the next ctr_gpu_draw_mesh(_prepared) draws are entirely
- * in front of where both fogs start: their combiner stage passes the color through instead of
- * mixing in the fog ramp, and (raw draws) texture unit 1, the ramp, is off for them (its cache is
- * kept). on: 1. Reset at each frame begin. */
-void ctr_gpu_set_mesh_nofog(int on);
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                                 int mesh, int first_index, int index_count);
 /* (AI-assisted, gpu-rt) the level renderer hands a pass's draws over in one list (in drawing order;
- * nofog as ctr_gpu_set_mesh_nofog for that draw): drawn one by one */
+ * nofog: unused, 0): drawn one by one */
 typedef struct {
   const ctr_draw_state* state;
   const ctr_mesh_matrix* matrix;
@@ -819,9 +814,8 @@ typedef struct {
   int compact_textures;
   unsigned int compact_bytes;
   int compact_in_vram;
-  int nofog_draws;   /* (AI-assisted) level draws without the fog stage (fog_stage_skip) */
   int color_clear_skipped; /* (AI-assisted) this frame cleared only the depth */
-  int unit1_toggles; /* (AI-assisted) texture unit 1 switched off or on (fog_stage_skip) */
+  int unit1_toggles; /* (AI-assisted) texture unit 1 switched on again */
   int fog_alpha_draws; /* (AI-assisted) level draws with the fog in the vertex alpha (alpha masks) */
   /* (AI-assisted) vertex program switches, of them with a shader code upload (another shbin), and
    * uniform vectors written at the switches */

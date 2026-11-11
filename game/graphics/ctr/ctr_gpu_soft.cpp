@@ -719,7 +719,6 @@ int s_env_tex = -1;  // (AI-assisted, j1ocean) the sky reflection's texture (oce
 // the sky reflection weight's depth fade (ocean_full_draw, ctr_gpu_ocean_full_draw_env): its
 // lowest value (0, or 0.5 for the near ocean; -1: none) and the pixel's
 float s_env_fade_lo = -1.f, s_env_fade = 1.f;
-bool s_nofog = false;
 float s_mfog_hvdf_w = 255.f, s_mfog_lo = 0.f, s_mfog_hi = 0.f;
 float s_mhaze_k = 0.f, s_mhaze_c = 0.f;  // (AI-assisted, mercsprite) ctr_gpu_set_merc_haze
 bool fog_on() {
@@ -1356,7 +1355,6 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t g, uint8_t b) {
   memcpy(s_anim_slot_tex, s_anim_slot_next, sizeof(s_anim_slot_tex));  // (AI-assisted)
   s_anim_drawn_last = s_anim_drawn;
   s_anim_drawn = 0;
-  s_nofog = false;  // (AI-assisted, far-fog) as ctr_gpu_set_mesh_nofog says
   g_soft.cur = ctr_gpu_stats{};
   g_soft.cur.color_clear_skipped = s_skip_color_clear;
   for (int i = 0; i < kW * kH && !s_skip_color_clear; i++) {
@@ -2901,7 +2899,7 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
                                 !state->clamp_t);
   // (AI-assisted) c3l v15 atlas draws: texture coordinates in 1/32768
   const float st_scale = state && (state->tcc & CTR_TCC_ST_ATLAS) ? 1.f / 32768.f : 1.f / 1024.f;
-  const bool fogged = fog_on() && !s_nofog;  // (AI-assisted, far-fog)
+  const bool fogged = fog_on();
   for (int i = first_index; i + 2 < first_index + index_count; i += 3) {
     ctr_vertex tri[3];
     float fog[3] = {0.f, 0.f, 0.f};
@@ -3206,7 +3204,7 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state,
   softstats::draw(*state);
   softstats::tb_prog(30, g_soft.meshes[mesh].col_off ? 3 : 2);
   softstats::tb_verts(ibase + first_index, index_count);
-  const bool fogged = fog_on() && !s_nofog;
+  const bool fogged = fog_on();
   auto row = [](const float* r, const float* in) {
     return r[0] * in[0] + r[1] * in[1] + r[2] * in[2] + r[3];
   };
@@ -3696,9 +3694,6 @@ void ctr_gpu_set_mesh_fog(const float* fog0, const float* fog1, uint8_t r, uint8
   s_fog_rgb[1] = g;
   s_fog_rgb[2] = b;
 }
-void ctr_gpu_set_mesh_nofog(int on) {  // (AI-assisted) fog_stage_skip: no fog stage
-  s_nofog = on != 0;
-}
 // (AI-assisted) cull_ties: back faces of CTR_TCC_CULL_BACK draws (counter-clockwise front faces
 // on screen, x right / y up; flip: the other way)
 void ctr_gpu_set_cull(int enable, int flip) {
@@ -3769,7 +3764,6 @@ void ctr_gpu_set_raw_cmds(int) {}
 void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n) {
   for (int i = 0; i < n; i++) {
     const ctr_mesh_call& c = calls[i];
-    ctr_gpu_set_mesh_nofog(c.nofog);
     if (c.morph_rows) {
       ctr_gpu_draw_mesh_morph(c.state, c.matrix, c.morph_rows, c.morph_list, c.morph_list_n,
                               c.morph_id, c.mesh, c.morph_offset, c.first_index, c.index_count);

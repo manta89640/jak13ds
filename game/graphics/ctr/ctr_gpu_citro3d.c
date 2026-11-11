@@ -416,9 +416,6 @@ static struct {
    * their stage every time (commit_texenv compares) */
   int ocean_stage2;
   int etie_stage3;      /* (AI-assisted, j2water2) combiner stage 3 holds the envmapped ties' fog */
-  /* (AI-assisted) fog_stage_skip: level draws without the fog stage (ctr_gpu_set_mesh_nofog), and
-   * texture unit 1 (the fog ramp) switched off for them (raw draws) */
-  int mesh_nofog;
   C3D_Mtx ocean_full_gs; /* GS screen units (x, y 12.4, z 24 bits) -> PICA clip space at w = 1 */
   /* the open ctr_gpu_ocean_full_reserve: vertices and indices at these g.vbuf offsets */
   int ocean_full_open;
@@ -2770,7 +2767,6 @@ static void frame_state_reset(void) {
   g.last_state_valid = 0;
   g.bound_tex = NULL;
   g.ocean_full_open = 0; /* (AI-assisted) a ctr_gpu_ocean_full_reserve never drawn */
-  g.mesh_nofog = 0;      /* (AI-assisted) and unit 1 on again with the ramp (bound below) */
   clip_reserve_reset();  /* (AI-assisted) and a ctr_gpu_clip_reserve */
   use_program(PROG_BASIC);
   /* the fog ramp stays on texture unit 1 for the whole frame (binding a texture clears the GPU's
@@ -5199,8 +5195,7 @@ static void commit_texenv(int id, const C3D_TexEnv* env, int raw) {
 }
 
 /* mesh: 0 = immediate draws, 1 = level mesh, 2 = skinned mesh (tint = constant color stage).
- * (AI-assisted) 3 = the ocean (ctr_gpu_ocean_draw), 4 = level mesh without the fog stage
- * (fog_stage_skip), 5 = level mesh with the fog amount in the vertex alpha (fog_alpha: its vertex
+ * (AI-assisted) 3 = the ocean (ctr_gpu_ocean_draw), 5 = level mesh with the fog amount in the vertex alpha (fog_alpha: its vertex
  * alpha is 0x80, the constant 0x80 stands in for it).
  * raw: written as raw commands (see "raw GPU commands"), else through citro3d. Both keep
  * citro3d's context right. */
@@ -5441,11 +5436,8 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   }
   commit_texenv(1, env1, raw);
   commit_texenv(0, env, raw);
-  /* (AI-assisted) fog_stage_skip (mesh 4): unit 1 off for those draws (raw draws: the unit enable
-   * bits only, no cache clear; the ramp's texels stay valid, a new color binds it again through
-   * citro3d), on again for the draws that read it. The context's
-   * texConfig is what the GPU has (or gets: citro3d recomputes it from its bound textures when a
-   * bind is pending, which only turns unit 1 on). */
+  /* (AI-assisted) unit 1 on (the context's texConfig is what the GPU has, or gets: citro3d
+   * recomputes it from its bound textures when a bind is pending) */
   /* (AI-assisted, far-fog) a merc draw with the game's fog (CTR_TCC_FOG): the fog ramp stage in
    * stage 2 (the ocean's), its amount from texture unit 1 (ctr_skin_opt's texcoord1) */
   const int merc_fog = mesh == 2 && (st->tcc & CTR_TCC_FOG) && g.fog_tex_valid;
@@ -5460,15 +5452,9 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   if (g.fog_tex_valid) {
     C3Di_Context* tctx = &__C3D_Context;
     const int need1 = need_ramp || (smask >= 0 && mesh != 2);
-    const int want_off = mesh == 4;
     const int is_off = !(tctx->texConfig & BIT(1));
-    const int gate = raw;
-    if (gate && want_off != is_off) {
-      if (want_off) {
-        tctx->texConfig &= ~BIT(1);
-      } else {
-        tctx->texConfig |= BIT(1);
-      }
+    if (raw && is_off) {
+      tctx->texConfig |= BIT(1);
       raw_end(raw_w(raw_ptr(), GPUREG_TEXUNIT_CONFIG, 0xB, tctx->texConfig & ~BIT(16)));
       g.cur.unit1_toggles++;
     } else if (!raw && need1 && is_off) {
@@ -7112,9 +7098,7 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
     }
   }
   const MeshSlot* ms = &g.meshes[mesh];
-  /* (AI-assisted) fog_stage_skip: mesh 4 = a level mesh without the fog stage */
-  const int mesh_mode = fa ? 5 : (g.mesh_nofog ? 4 : 1);
-  g.cur.nofog_draws += g.mesh_nofog && !fa;
+  const int mesh_mode = fa ? 5 : 1;
   g.cur.fog_alpha_draws += fa;
   if (use_raw(state)) {
     /* (AI-assisted) raw: state, vertex buffer, then (after citro3d's pending updates) the matrix
@@ -7161,10 +7145,6 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
   g.cur.triangles += index_count / 3;
 }
 
-void ctr_gpu_set_mesh_nofog(int on) {
-  g.mesh_nofog = on ? 1 : 0;
-}
-
 void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int mesh,
                        int first_index, int index_count) {
   ctr_mesh_matrix m;
@@ -7179,7 +7159,6 @@ void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n) {
   }
   for (int i = 0; i < n; i++) {
     const ctr_mesh_call* c = &calls[i];
-    g.mesh_nofog = c->nofog ? 1 : 0;
     if (c->morph_rows) {
       ctr_gpu_draw_mesh_morph(c->state, c->matrix, c->morph_rows, c->morph_list, c->morph_list_n,
                               c->morph_id, c->mesh, c->morph_offset, c->first_index,
@@ -7217,8 +7196,7 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
     }
   }
   const MeshSlot* ms = &g.meshes[mesh];
-  const int mesh_mode = g.mesh_nofog ? 4 : 1;
-  g.cur.nofog_draws += g.mesh_nofog;
+  const int mesh_mode = 1;
   if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
     g.last_clip_id = matrix->id;
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_clip, (const C3D_Mtx*)matrix->m);
@@ -7273,8 +7251,7 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
     }
   }
   const MeshSlot* ms = &g.meshes[mesh];
-  const int mesh_mode = fa ? 5 : (g.mesh_nofog ? 4 : 1);
-  g.cur.nofog_draws += g.mesh_nofog && !fa;
+  const int mesh_mode = fa ? 5 : 1;
   g.cur.fog_alpha_draws += fa;
   if (use_raw(state)) {
     /* as ctr_gpu_draw_mesh_prepared's raw path, with the records' buffer and the rows the draw
@@ -7397,8 +7374,7 @@ void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix
     }
   }
   const MeshSlot* ms = &g.meshes[mesh];
-  const int mesh_mode = fa ? 5 : (g.mesh_nofog ? 4 : 1);
-  g.cur.nofog_draws += g.mesh_nofog && !fa;
+  const int mesh_mode = fa ? 5 : 1;
   g.cur.fog_alpha_draws += fa;
   if (use_raw(state)) {
     apply_state(state, mesh_mode, 1);

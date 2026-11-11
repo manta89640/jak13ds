@@ -11420,7 +11420,6 @@ void CtrTfragRenderer::draw_jak2_late(const CtrRenderState& rs) {
   }
   m_late_calls.clear();
   draw_env_calls(m_env_late);  // (AI-assisted, j2water2) the blended envmapped ties
-  ctr_gpu_set_mesh_nofog(0);
   ctr_gpu_cull_reset();
 }
 
@@ -11615,7 +11614,6 @@ void CtrTfragRenderer::draw_wind_calls(const CtrLevelData& lev) {
     return a.state->tex != b.state->tex ? a.state->tex < b.state->tex : a.mesh < b.mesh;
   });
   for (const auto& c : m_wind_calls) {
-    ctr_gpu_set_mesh_nofog(c.nofog);
     ctr_gpu_draw_mesh_wind(c.state, c.matrix, m_wind_rows.data() + 4 * c.row_first,
                            (int)c.row_count, c.rows_id, c.mesh, lev.wind_mesh, c.slots_offset,
                            c.first, c.count);
@@ -13033,8 +13031,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     lev.outside_gen = m_levels->set_generation();
     lev.outside_cache.assign(lev.chunks.size(), 0);
   }
-  // (AI-assisted) fog_stage_skip
-  const bool fog_skip = settings.fog_stage_skip;
+  const bool fog_skip = false;  // the fog stage is never skipped (fog_stage_skip is gone)
   const bool early_depth = false;  // the early depth test is gone: no band order
   const float pzw = std::abs(cam.perspective[2][3]);
 #ifndef __3DS__
@@ -15748,7 +15745,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                          (int)count, vc.nofog ? 1 : 0, nullptr, nullptr, 0, 0, 0, nullptr, 0});
     };
 #else
-    ctr_gpu_set_mesh_nofog(vc.nofog);  // (AI-assisted) fog_stage_skip
     auto submit = [&](u32 first, u32 count) {
       if (wind) {
         wind_submit(di, slot, vc, first, count);
@@ -16153,7 +16149,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
 #else
   ctr_gpu_soft_bucket((m_name.substr(0, 2) + "/shrubfade").c_str());
   for (const auto& c : m_fade_calls) {
-    ctr_gpu_set_mesh_nofog(c.nofog);
     ctr_gpu_draw_mesh_prepared(c.state, c.matrix, c.mesh, c.first_index, c.index_count);
   }
 #endif
@@ -16179,7 +16174,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   phase(kPhLists);
   flush_calls(0);  // (AI-assisted, gpu-rt) the main pass's
   draw_env_calls(m_env_calls);  // (AI-assisted, j2water2) (none left in Jak II's case)
-  ctr_gpu_set_mesh_nofog(0);
   ctr_gpu_cull_reset();  // (AI-assisted) cull_ties
   phase(kPhFlush);
   // (AI-assisted, depthreuse) the depth after the first level drawn in near mode this frame (before

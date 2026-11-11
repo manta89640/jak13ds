@@ -287,9 +287,6 @@ struct CtrSettings {
   // (AI-assisted) meters: far scenery (lowres_vista, the vista tier) is drawn up to here (the
   // PS2's far clip plane, math-camera f: 10 km)
   float vista_distance = 10000.f;
-  // (AI-assisted) level chunks entirely in front of where both fogs start are drawn without the
-  // fog stage (texture combiner pass-through, texture unit 1 off). On (preset safe: off)
-  bool fog_stage_skip = true;
   // (AI-assisted) skin_clip_f24: each merc model's clip matrix and lights as float24 uniforms like
   // the bone rows (skin_rows_f24): 11 words less per model. Not bit-identical (rounding): off until
   // priced (pica_bench B2.unif_f24 vs B2.unif_f32, the same line as skin_rows_f24)

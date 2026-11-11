@@ -680,11 +680,10 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
               : std::string());
       lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB "
                "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB ({} in reserved "
-               "VRAM); last frame: {} level draws without the fog stage, {} with the fog in the vertex alpha ({} texture unit 1 switches); {} program switches, {} with a shader upload, {} uniform vectors at switches",
+               "VRAM); last frame: {} level draws with the fog in the vertex alpha ({} texture unit 1 switches); {} program switches, {} with a shader upload, {} uniform vectors at switches",
                gs.pools, gs.pool_bytes / 1024, gs.pools_in_vram, gs.pool_vram_bytes / 1024,
                gs.linear_free / 1024, gs.linear_largest / 1024, gs.vram_free / 1024,
                gs.compact_textures, gs.compact_bytes / 1024, gs.compact_in_vram,
-               gs.nofog_draws,
                gs.fog_alpha_draws, gs.unit1_toggles, gs.prog_switches, gs.prog_uploads,
                gs.prog_unif_vectors);
       // build time by bucket renderer
