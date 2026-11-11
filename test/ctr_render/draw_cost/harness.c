@@ -50,7 +50,6 @@ static void setup(void) {
   g_fog_alpha = 1;
   g_tex1_gating = 1;
   g_cull_enable = 1;
-  g.proc_radial = -1;
   __C3D_Context.texConfig = 3; /* units 0, 1 on (the fog ramp) */
   for (int t = 0; t < 24; t++) {
     TexSlot* s = &g.textures[t];
@@ -58,7 +57,6 @@ static void setup(void) {
     s->pool = t & 1 ? 0 : -1;
     s->levels = 1 + (t % 3);
     s->alpha_full = (t >> 2) & 1;
-    s->radial = -1;
     s->tex.data = s_texels + 2048 * t;
     s->tex.fmt = t & 2 ? GPU_ETC1A4 : GPU_RGBA8;
     s->tex.width = s->tex.height = 32;

@@ -711,7 +711,7 @@ bool s_depth_far = false;
 bool s_skip_color_clear = false;
 bool keeps_sky(const ctr_draw_state* st) {
   return st->blend == CTR_BLEND_OFF && st->zwrite &&
-         !(st->flags & ~(CTR_STATE_EARLY_DEPTH | CTR_STATE_PROCTEX));
+         !(st->flags & ~CTR_STATE_EARLY_DEPTH);
 }
 void sky_hook(const ctr_draw_state* st) {
   if (s_sky_hook && !s_target.rt && (!st || !keeps_sky(st))) {
@@ -977,7 +977,6 @@ void shade_pixel(const ctr_draw_state& st,
     softstats::tb_frag++;
     softstats::cur->px++;
     if (!s_target.rt) softstats::od[px + py * kW]++;
-    if (st.flags & CTR_STATE_PROCTEX) softstats::cur->px_proc++;
     if ((st.blend == CTR_BLEND_ALPHA || st.blend == CTR_BLEND_ADD ||
          st.blend == CTR_BLEND_OVER_CLEAR) && a < 2.f) {
       softstats::cur->px_invis++;
@@ -3818,13 +3817,9 @@ void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* drop
   *floor = 0;
 }
 void ctr_gpu_want_detailed_stats(void) {}
-void ctr_gpu_set_proctex(int) {}
 void ctr_gpu_set_compact_textures(int) {}
-int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int /*flags*/) {
+int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba) {
   return ctr_gpu_tex_create(w, h, rgba);
-}
-int ctr_gpu_tex_radial(int) {
-  return 0;
 }
 void ctr_gpu_set_overlap(int) {}
 void ctr_gpu_set_raw_cmds(int) {}

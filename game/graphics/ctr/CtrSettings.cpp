@@ -192,8 +192,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.pica_bench = parse_bool(v);  // (AI-assisted)
     } else if (key == "compact_textures") {
       s.compact_textures = parse_bool(v);
-    } else if (key == "proctex_glows") {
-      s.proctex_glows = parse_bool(v);
     } else if (key == "sprite_max_size") {
       s.sprite_max_size = std::max(0.f, f);
     } else if (key == "sprite_min_alpha") {
@@ -503,7 +501,7 @@ std::string CtrSettings::summary() const {
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
       "merc {} sprites {} ({}) "
       "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} envmap_min_px {:.0f} skin_rows_f24 {} skin_clip_f24 {} "
-      "compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} particle_fill {} "
+      "compact_textures {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} particle_fill {} "
       "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} fog_alpha {} tex1_gating {} cmd_dedup {} cull_ties {} cull_merc {} merc_fog {} raw_cmds {} opaque_alpha {} tex_cache_clear {} asm_tex {} asm_mem {} "
       "ocean_tex_half {} fast_clock {} "
       // (AI-assisted) Oct 16: the rest of the keys, so the line holds every setting
@@ -538,7 +536,7 @@ std::string CtrSettings::summary() const {
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), mip_bias,
       envmap_min_px,
       skin_rows_f24 ? "on" : "off", skin_clip_f24 ? "on" : "off",
-      compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
+      compact_textures ? "on" : "off",
       sprite_max_size, sprite_min_alpha, sprite_alpha_discard ? "on" : "off",
       particle_fill == 2 ? "strong" : (particle_fill ? "on" : "off"),
       vis_culling ? "on" : "off", run_culling ? "on" : "off", tie_lod ? "on" : "off",

@@ -249,7 +249,6 @@ typedef struct {
   uint8_t compact;    /* made by ctr_gpu_tex_create_compact (counted in the stats) */
   uint8_t alpha_full; /* texel alpha 0xff = 1.0 (compact formats store GS alpha doubled) */
   uint8_t want_vram;  /* waiting to move to the reserved VRAM (migrate_small_textures) */
-  int16_t radial;     /* index into s_radial (procedural texture color table), -1: not radial */
   int arena_off;      /* >= 0: the texels are in the reserved VRAM at this offset, not citro3d's */
   void* home;         /* arena_off >= 0: the texels in linear memory (the copy that is kept) */
 } TexSlot;
@@ -428,8 +427,6 @@ static struct {
   int cur_prog;
   /* (AI-assisted) the frame's clear color as a texture combiner constant (CTR_BLEND_OVER_CLEAR) */
   u32 clear_abgr;
-  /* the procedural texture unit's color table in use (-1: the unit is off) */
-  int proc_radial;
   ctr_draw_state last_state;
   int last_state_mesh;
   uint32_t last_tint;
@@ -641,22 +638,6 @@ static void arena_free(u32 off, u32 bytes) {
   } /* else: too fragmented, the range stays used (lost until exit) */
 }
 
-/* (AI-assisted) Radial textures (glows) as procedural texture color tables: the texture's
- * average color by distance from its center (see check_radial). */
-#define MAX_RADIAL 64
-#define RADIAL_LUT 128 /* entries used: distance 0 (center) .. 1 (edge) */
-static C3D_ProcTexColorLut* s_radial[MAX_RADIAL];
-static C3D_ProcTex s_proctex;
-static C3D_ProcTexLut s_proc_map; /* the identity: distance -> color table position */
-/* (AI-assisted, micro-gpu) the tables in the procedural texture unit's LUT memory (what citro3d
- * last uploaded there), valid in apt epoch s_proc_lut_epoch (the HOME Menu and pica_bench use the
- * GPU too). Switching the unit off and on keeps them: a glow after other draws binds the unit
- * again but uploads its tables (128 + 2 x 256 words) only when another table is wanted. */
-static const C3D_ProcTexLut* s_proc_lut_map_gpu;
-static const C3D_ProcTexColorLut* s_proc_lut_color_gpu;
-static u32 s_proc_lut_epoch;
-
-static void proc_lut_forget(const C3D_ProcTexColorLut* lut);
 /* the texels of a slot: freed (or given back to the reserved VRAM) */
 static void tex_slot_free_texels(TexSlot* t) {
   if (t->arena_off >= 0) {
@@ -667,14 +648,6 @@ static void tex_slot_free_texels(TexSlot* t) {
     t->tex.data = NULL;
   } else if (t->pool < 0) {
     C3D_TexDelete(&t->tex);
-  }
-  if (t->radial >= 0) {
-    /* (AI-assisted, micro-gpu) neither citro3d's context nor the LUT tracking may keep a freed
-     * table (another one could get its address) */
-    proc_lut_forget(s_radial[t->radial]);
-    free(s_radial[t->radial]);
-    s_radial[t->radial] = NULL;
-    t->radial = -1;
   }
   t->compact = 0;
   t->alpha_full = 0;
@@ -1753,23 +1726,6 @@ int ctr_gpu_init(void) {
   printf("[ctr] gpu_micro: %s\n", s_micro ? "on" : "off");
   resident_programs(g.ps); /* (AI-assisted, micro-gpu) shader_resident (gpu_micro) */
   g.cur_prog = PROG_NONE;
-  /* (AI-assisted) the procedural texture unit for radial textures (CTR_STATE_PROCTEX): distance
-   * from the center (sqrt(u^2 + v^2) of the absolute texture coordinates, clamped to 1) looks up
-   * the texture's color table through an identity map */
-  {
-    float map[129];
-    for (int i = 0; i <= 128; i++) {
-      map[i] = (float)i / 128.0f;
-    }
-    ProcTexLut_FromArray(&s_proc_map, map);
-    C3D_ProcTexInit(&s_proctex, 0, RADIAL_LUT);
-    C3D_ProcTexClamp(&s_proctex, GPU_PT_CLAMP_TO_EDGE, GPU_PT_CLAMP_TO_EDGE);
-    C3D_ProcTexCombiner(&s_proctex, false, GPU_PT_SQRT2, GPU_PT_SQRT2);
-    C3D_ProcTexNoiseEnable(&s_proctex, false);
-    C3D_ProcTexShift(&s_proctex, GPU_PT_NONE, GPU_PT_NONE);
-    C3D_ProcTexFilter(&s_proctex, GPU_PT_LINEAR);
-    g.proc_radial = -1;
-  }
 
   g.vbuf = (uint8_t*)linearAlloc(VBUF_BYTES);
   if (!g.vbuf) {
@@ -1788,7 +1744,6 @@ int ctr_gpu_init(void) {
   GSPGPU_FlushDataCache(g.quad_indices, QUAD_MAX * 6 * sizeof(uint16_t));
   for (int i = 0; i < MAX_TEXTURES; i++) {
     g.textures[i].pool = -1;
-    g.textures[i].radial = -1;
     g.textures[i].arena_off = -1;
   }
   g.screen_tex = -1;
@@ -1962,15 +1917,6 @@ static void res_apply(int on) {
   g.cur_prog = PROG_NONE;
 }
 
-/* (AI-assisted, micro-gpu) a radial texture's color table is freed */
-static void proc_lut_forget(const C3D_ProcTexColorLut* lut) {
-  if (s_proc_lut_color_gpu == lut) {
-    s_proc_lut_color_gpu = NULL;
-  }
-  if (__C3D_Context.procTexColorLut == lut) {
-    C3D_ProcTexColorLutBind(NULL);
-  }
-}
 void C3Di_UpdateContext(void); /* citro3d: sends what's dirty (as its draws do first) */
 enum {
   C3DiF_Active = BIT(0),
@@ -3088,7 +3034,7 @@ void ctr_gpu_run_sky_hook(void) {
  * leaves its pixels alone), no stencil or no-color pass */
 static inline int keeps_sky(const ctr_draw_state* st) {
   return st->blend == CTR_BLEND_OFF && st->zwrite &&
-         !(st->flags & ~(CTR_STATE_EARLY_DEPTH | CTR_STATE_PROCTEX));
+         !(st->flags & ~CTR_STATE_EARLY_DEPTH);
 }
 #define SKY_HOOK(st)                    \
   do {                                  \
@@ -3137,8 +3083,6 @@ static void frame_state_reset(void) {
   if (g.fog_tex_valid) {
     tex1_bind(&g.fog_tex);
   }
-  C3D_ProcTexBind(0, NULL);
-  g.proc_radial = -1;
   g.vbuf_used = 0;
   g.vbuf_flushed = 0;
   s_partial_draws = 0;
@@ -3674,7 +3618,6 @@ void ctr_gpu_frame_end(void) {
           g.cur.compact_textures++;
           g.cur.compact_bytes += t->tex.size;
           g.cur.compact_in_vram += t->arena_off >= 0;
-          g.cur.radial_textures += t->radial >= 0;
         }
       }
     }
@@ -4376,7 +4319,6 @@ void ctr_gpu_cull_reset(void) {
     g.last_state_valid = 0;
   }
 }
-static int g_proctex = 1;
 static int g_compact = 1;
 
 /* the GPU's queue run to its end (nothing left waiting for a run) */
@@ -4442,126 +4384,11 @@ int ctr_gpu_top_histogram(unsigned int counts[256]) {
 
 
 
-void ctr_gpu_set_proctex(int on) {
-  g_proctex = on ? 1 : 0;
-}
-
 void ctr_gpu_set_compact_textures(int on) {
   g_compact = on ? 1 : 0;
 }
 
 /* ---------------- (AI-assisted) compact textures ---------------- */
-
-/* Is a gray texture a radial gradient around its center (glows, light halos)? Its texels must be
- * the average at their distance from the center (distances past the edge count as the edge, as
- * the procedural texture unit clamps them), so that it draws the same pixels. On success fills
- * lut with the averages from the center (0) to the edge (RADIAL_LUT - 1): R in the low byte,
- * alpha doubled like the compact formats. */
-static int check_radial(int w, int h, const uint8_t* rgba, u32* lut) {
-  enum { BINS = 48 };
-  if (w != h || w < 16) {
-    return 0;
-  }
-  float sl[BINS], sa[BINS];
-  int cnt[BINS];
-  memset(sl, 0, sizeof(sl));
-  memset(sa, 0, sizeof(sa));
-  memset(cnt, 0, sizeof(cnt));
-  const float c = (float)w * 0.5f, inv_c = 1.0f / c;
-  float amin = 255.f, amax = 0.f;
-  for (int y = 0; y < h; y++) {
-    for (int x = 0; x < w; x++) {
-      const uint8_t* p = rgba + 4 * (y * w + x);
-      const float dx = (float)x + 0.5f - c, dy = (float)y + 0.5f - c;
-      float r = sqrtf(dx * dx + dy * dy) * inv_c;
-      if (r > 1.0f) {
-        r = 1.0f;
-      }
-      const int b = (int)(r * (BINS - 1) + 0.5f);
-      sl[b] += p[1];
-      sa[b] += p[3];
-      cnt[b]++;
-      amin = p[3] < amin ? p[3] : amin;
-      amax = p[3] > amax ? p[3] : amax;
-    }
-  }
-  if (amax - amin < 16.f) {
-    return 0; /* no alpha gradient: not a glow */
-  }
-  /* averages, empty bins (small textures) from the nearest filled one before them */
-  int last = -1;
-  for (int b = 0; b < BINS; b++) {
-    if (cnt[b]) {
-      sl[b] /= (float)cnt[b];
-      sa[b] /= (float)cnt[b];
-      last = b;
-    } else if (last >= 0) {
-      sl[b] = sl[last];
-      sa[b] = sa[last];
-    }
-  }
-  if (!cnt[0]) {
-    int f = 0;
-    while (f < BINS && !cnt[f]) {
-      f++;
-    }
-    if (f == BINS) {
-      return 0;
-    }
-    for (int b = 0; b < f; b++) {
-      sl[b] = sl[f];
-      sa[b] = sa[f];
-    }
-  }
-  float tl[RADIAL_LUT], ta[RADIAL_LUT];
-  for (int i = 0; i < RADIAL_LUT; i++) {
-    const float fb = (float)i / (float)(RADIAL_LUT - 1) * (BINS - 1);
-    const int b0 = (int)fb, b1 = b0 + 1 < BINS ? b0 + 1 : b0;
-    const float t = fb - (float)b0;
-    float l = sl[b0] + (sl[b1] - sl[b0]) * t, a = 2.f * (sa[b0] + (sa[b1] - sa[b0]) * t);
-    const u32 li = l > 255.f ? 255u : (u32)(l + 0.5f), ai = a > 255.f ? 255u : (u32)(a + 0.5f);
-    lut[i] = (ai << 24) | (li << 16) | (li << 8) | li;
-    tl[i] = (float)li;
-    ta[i] = (float)ai;
-  }
-  /* the table must give the texture's bilinear samples (at texel centers and halfway between
-   * them, clamped to the edge) within 2 in each color channel and the doubled alpha */
-  for (int j = 0; j <= 2 * h; j++) {
-    for (int i = 0; i <= 2 * w; i++) {
-      const float X = 0.5f * (float)i, Y = 0.5f * (float)j;
-      const float fx0 = floorf(X - 0.5f), fy0 = floorf(Y - 0.5f);
-      const float fx = X - 0.5f - fx0, fy = Y - 0.5f - fy0;
-      const int x0 = fx0 < 0.f ? 0 : (int)fx0, y0 = fy0 < 0.f ? 0 : (int)fy0;
-      const int x1 = x0 + 1 < w && fx0 >= 0.f ? x0 + 1 : x0;
-      const int y1 = y0 + 1 < h && fy0 >= 0.f ? y0 + 1 : y0;
-      const uint8_t* p00 = rgba + 4 * (y0 * w + x0);
-      const uint8_t* p10 = rgba + 4 * (y0 * w + x1);
-      const uint8_t* p01 = rgba + 4 * (y1 * w + x0);
-      const uint8_t* p11 = rgba + 4 * (y1 * w + x1);
-      float v[4];
-      for (int k = 0; k < 4; k++) {
-        const float top = (float)p00[k] + ((float)p10[k] - (float)p00[k]) * fx;
-        const float bot = (float)p01[k] + ((float)p11[k] - (float)p01[k]) * fx;
-        v[k] = top + (bot - top) * fy;
-      }
-      v[3] = v[3] * 2.f > 255.f ? 255.f : v[3] * 2.f;
-      const float dx = X - c, dy = Y - c;
-      float r = sqrtf(dx * dx + dy * dy) * inv_c;
-      if (r > 1.0f) {
-        r = 1.0f;
-      }
-      const float fb = r * (RADIAL_LUT - 1);
-      const int b0 = (int)fb, b1 = b0 + 1 < RADIAL_LUT ? b0 + 1 : b0;
-      const float t = fb - (float)b0;
-      const float l = tl[b0] + (tl[b1] - tl[b0]) * t, a = ta[b0] + (ta[b1] - ta[b0]) * t;
-      if (fabsf(v[0] - l) > 2.f || fabsf(v[1] - l) > 2.f || fabsf(v[2] - l) > 2.f ||
-          fabsf(v[3] - a) > 2.f) {
-        return 0;
-      }
-    }
-  }
-  return 1;
-}
 
 /* the GPU expands 5 / 6 bit channels by bit replication */
 static inline int exact5(uint8_t v) {
@@ -4573,7 +4400,7 @@ static inline int exact6(uint8_t v) {
   return (uint8_t)((c << 2) | (c >> 4)) == v;
 }
 
-int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int flags) {
+int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba) {
   if (!g_compact) {
     return ctr_gpu_tex_create(w, h, rgba);
   }
@@ -4686,34 +4513,13 @@ int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int flags) {
   t->levels = 1;
   t->compact = 1;
   t->alpha_full = 1;
-  t->radial = -1;
   t->arena_off = -1;
   t->want_vram = s_arena.base != NULL;
   s_small_waiting |= t->want_vram;
-  if ((flags & CTR_TEX_CHECK_RADIAL) && gray && !opaque) {
-    u32 lut[RADIAL_LUT];
-    int k = 0;
-    while (k < MAX_RADIAL && s_radial[k]) {
-      k++;
-    }
-    if (k < MAX_RADIAL && check_radial(w, h, rgba, lut)) {
-      s_radial[k] = (C3D_ProcTexColorLut*)malloc(sizeof(C3D_ProcTexColorLut));
-      if (s_radial[k]) {
-        memset(s_radial[k], 0, sizeof(C3D_ProcTexColorLut));
-        ProcTexColorLut_Write(s_radial[k], lut, 0, RADIAL_LUT);
-        t->radial = (int16_t)k;
-      }
-    }
-  }
   ctr_linear_lock();
   t->used = 1;
   ctr_linear_unlock();
   return slot;
-}
-
-int ctr_gpu_tex_radial(int handle) {
-  return g_proctex && handle >= 0 && handle < MAX_TEXTURES && g.textures[handle].used == 1 &&
-         g.textures[handle].radial >= 0 && s_radial[g.textures[handle].radial] != NULL;
 }
 
 /* (AI-assisted) At frame begin, in the frame (the copy is queued before its draws): compact
@@ -5886,8 +5692,8 @@ typedef struct {
   u32 words[3]; /* the state's words 1..3 (word 0 is the texture) */
   int mesh;
   uint32_t tint;
-  u32 kind;     /* textured | alpha_full << 1 (proctex draws never take the short path) */
-  u32 in[11];   /* the settings the full path reads */
+  u32 kind;     /* textured | alpha_full << 1 */
+  u32 in[10];   /* the settings the full path reads */
   u32 tex_config_bit1;
   C3D_TexEnv env0, env1;
   /* (AI-assisted, far-fog) stage 2 and g.ocean_stage2 (merc fog draws: the fog stage) */
@@ -5918,7 +5724,6 @@ static inline void state_inputs(u32* in) {
   in[7] = g.fog_abgr;
   in[8] = g.clear_abgr;
   in[9] = (u32)g_tex1_gating;
-  in[10] = (u32)g_proctex;
 }
 
 /* mesh: 0 = immediate draws, 1 = level mesh, 2 = skinned mesh (tint = constant color stage).
@@ -5928,7 +5733,6 @@ static inline void state_inputs(u32* in) {
  * raw: written as raw commands (see "raw GPU commands"), else through citro3d. Both keep
  * citro3d's context right. */
 static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, int raw) {
-  g.cur.proctex_draws += (st->flags & CTR_STATE_PROCTEX) != 0;
   _Static_assert(sizeof(*st) == 16, "ctr_draw_state compared as 4 words");
   if (g.last_state_valid && g.last_state_mesh == mesh && g.last_tint == tint &&
       words_equal(&g.last_state, st, 4)) {
@@ -5954,13 +5758,13 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
       /* (the filter and clamp bytes only matter to the bind) */
       !((((stw[1] ^ s_sf.words[0]) & 0x0000FFFFu) | ((stw[2] ^ s_sf.words[1]) & 0xFFFFFF00u) |
          (stw[3] ^ s_sf.words[2]))) &&
-      !(st->flags & CTR_STATE_PROCTEX) && g.proc_radial < 0 && g.ocean_stage2 == s_sf.stage2 &&
+      g.ocean_stage2 == s_sf.stage2 &&
       mesh != 3 && mesh != 6) {
     const u32 kind = textured0 ? 1u | ((u32)g.textures[stex0].alpha_full << 1) : 0u;
-    u32 in[11];
+    u32 in[10];
     state_inputs(in);
     C3Di_Context* fctx = &__C3D_Context;
-    if (kind == s_sf.kind && words_eq(in, s_sf.in, 11) &&
+    if (kind == s_sf.kind && words_eq(in, s_sf.in, 10) &&
         (fctx->texConfig & BIT(1)) == s_sf.tex_config_bit1 &&
         words_eq(&fctx->texEnv[0], &s_sf.env0, sizeof(C3D_TexEnv) / 4) &&
         words_eq(&fctx->texEnv[1], &s_sf.env1, sizeof(C3D_TexEnv) / 4) &&
@@ -6060,43 +5864,11 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   const int stex = tex_res(st->tex); /* (AI-assisted) an animated slot's texture */
   int textured = stex >= 0 && stex < MAX_TEXTURES && g.textures[stex].used == 1;
   TexSlot* slot = textured ? &g.textures[stex] : NULL;
-  /* (AI-assisted) radial textures from the procedural texture unit (no texels read); compact
-   * textures store GS alpha doubled (0xff = 1.0) */
-  const int proc = textured && (st->flags & CTR_STATE_PROCTEX) && g_proctex && slot->radial >= 0 &&
-                   s_radial[slot->radial];
-  const GPU_TEVSRC tsrc = proc ? GPU_TEXTURE3 : GPU_TEXTURE0;
+  /* (AI-assisted) compact textures store GS alpha doubled (0xff = 1.0) */
+  const GPU_TEVSRC tsrc = GPU_TEXTURE0;
   const int afull = textured && slot->alpha_full;
-  if (proc) {
-    if (g.proc_radial != slot->radial) {
-      C3D_ProcTexBind(0, &s_proctex);
-      /* (AI-assisted, micro-gpu) the tables only when the LUT memory has others (see
-       * s_proc_lut_epoch); citro3d's context keeps pointing at them */
-      const C3D_ProcTexColorLut* lut = s_radial[slot->radial];
-      const int known = s_proc_lut_epoch == s_raw.apt_epoch && (s_micro & MICRO_PROCLUT);
-      if (!known || s_proc_lut_map_gpu != &s_proc_map || __C3D_Context.procTexLut[1] != &s_proc_map) {
-        C3D_ProcTexLutBind(GPU_LUT_RGBMAP, &s_proc_map);
-      }
-      if (!known || s_proc_lut_color_gpu != lut || __C3D_Context.procTexColorLut != lut) {
-        C3D_ProcTexColorLutBind(s_radial[slot->radial]);
-      }
-      s_proc_lut_map_gpu = &s_proc_map;
-      s_proc_lut_color_gpu = lut;
-      s_proc_lut_epoch = s_raw.apt_epoch;
-      g.proc_radial = slot->radial;
-    }
-    if (g.bound_tex) {
-      C3D_TexBind(0, NULL); /* texture unit 0 off: it would fetch texels nothing uses */
-      s_raw.tex0_ctx = NULL; /* (AI-assisted, micro-gpu) */
-      g.bound_tex = NULL;
-    }
-  } else if (g.proc_radial >= 0) {
-    C3D_ProcTexBind(0, NULL);
-    g.proc_radial = -1;
-  }
   if (textured) {
-    if (!proc) {
-      bind_texture(slot, st, raw);
-    }
+    bind_texture(slot, st, raw);
     if (smask >= 0) {
       bind_mask(&g.textures[smask], &slot->tex, mesh == 2 ? 2 : 1);
     }
@@ -6246,9 +6018,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     const int need1 = need_ramp || (smask >= 0 && mesh != 2);
     const int want_off = g_tex1_gating ? !need1 : mesh == 4;
     const int is_off = !(tctx->texConfig & BIT(1));
-    /* (AI-assisted, micro-mg) a glow drawn raw (MICRO_RAWGLOW) leaves unit 1 as the citro3d draw
-     * did (it never switched it: the same registers at the draw) */
-    const int gate = raw && !(st->flags & CTR_STATE_PROCTEX);
+    const int gate = raw;
     if (gate && want_off != is_off) {
       if (want_off) {
         tctx->texConfig &= ~BIT(1);
@@ -6466,7 +6236,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   raw_end(p);
   *c = e;
   /* (AI-assisted, micro-mg) what this full raw state worked from and wrote (StateFast) */
-  if (!proc && mesh != 3 && mesh != 6 && g.proc_radial < 0 && smask < 0) {
+  if (mesh != 3 && mesh != 6 && smask < 0) {
     s_sf.valid = 1;
     s_sf.env2 = ctx->texEnv[2]; /* (AI-assisted, far-fog) */
     s_sf.stage2 = g.ocean_stage2;
@@ -6484,13 +6254,10 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   }
 }
 
-/* (AI-assisted) the raw path takes every draw but the glows (procedural texture unit: citro3d) */
+/* (AI-assisted) raw_cmds: the draws write their commands themselves */
 static inline int use_raw(const ctr_draw_state* st) {
-  /* (AI-assisted, micro-mg) gpu_micro: the glows too. What citro3d sent for them (the whole
-   * attribute buffer table, the fragment operations, both combiner stages, every uniform's dirty
-   * scan) is what the raw draw writes only where it changes; the procedural texture unit and
-   * texture unit 0's switch-off still go through citro3d (raw_sync sends them). */
-  return s_raw.on && (!(st->flags & CTR_STATE_PROCTEX) || (s_micro & MICRO_RAWGLOW));
+  (void)st;
+  return s_raw.on;
 }
 
 /* the immediate draws (triangle lists or strips from g.vbuf): program, state, then the draw */
@@ -6598,10 +6365,6 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
   use_program(PROG_CLIP2);
   /* the texture on units 0 and 1 (binding unit 1 clears the texture cache like any bind) */
   TexSlot* slot = &g.textures[state->tex];
-  if (g.proc_radial >= 0) {
-    C3D_ProcTexBind(0, NULL);
-    g.proc_radial = -1;
-  }
   bind_texture(slot, state, 0);
   tex1_bind(&slot->tex);
   /* rgb = (tex0 * const0 + tex1 * const1) * vertex alpha (GS units: x2 each); the color is
@@ -9788,7 +9551,7 @@ void ctr_gpu_bench_restore(void) {
   g.last_skin_valid = 0;
   g.skin_bl_valid = 0;
   g.bound_tex = NULL;
-  g.proc_radial = -1;
+  C3D_ProcTexBind(0, NULL); /* (the bench's procedural texture tests) */
 }
 
 /* ---------------- the linear heap's account ---------------- */

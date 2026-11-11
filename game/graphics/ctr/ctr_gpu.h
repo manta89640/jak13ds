@@ -79,9 +79,6 @@ enum {
   /* opaque, depth tested GEQUAL and written, never discarded by the alpha test (the level
    * renderer's draw lists; the GPU layer ignores it) */
   CTR_STATE_EARLY_DEPTH = 1,
-  /* the texture is radial (ctr_gpu_tex_radial) and the texture coordinates go from -1 to 1 across
-   * it (center 0): drawn with the procedural texture unit instead of reading texels */
-  CTR_STATE_PROCTEX = 2,
   /* (AI-assisted) the stencil buffer (only when ctr_gpu_has_stencil): STENCIL_SET marks the pixels
    * the draw writes (where it passes the depth test), STENCIL_OUT draws only where none is marked.
    * The marks are cleared with the depth buffer at the frame start. The ocean's near grid marks,
@@ -172,14 +169,9 @@ void ctr_gpu_anim_slot_set(int slot, int tex);
 uint64_t ctr_gpu_anim_slots_drawn(void);
 /* (AI-assisted) The same as ctr_gpu_tex_create (GS alpha: 0x80 = 1.0), stored in the smallest
  * 3DS format that keeps it (config.ini compact_textures): gray -> L8 / LA8, opaque -> RGB565,
- * on/off alpha -> RGBA5551, else RGBA8 (as ctr_gpu_tex_create; (AI-assisted) not RGBA4: soft
- * colored glows banded), and
- * moved to a reserved part of VRAM when there's room (vram_textures). flags: CTR_TEX_CHECK_RADIAL
- * also checks whether it is a radial gradient (glows: see CTR_STATE_PROCTEX). */
-enum { CTR_TEX_CHECK_RADIAL = 1 };
-int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int flags);
-/* 1 if the texture can be drawn with CTR_STATE_PROCTEX (radial, and config.ini proctex_glows). */
-int ctr_gpu_tex_radial(int handle);
+ * on/off alpha -> RGBA5551, else RGBA8 (as ctr_gpu_tex_create), and moved to a reserved part of
+ * VRAM when there's room (vram_textures). */
+int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba);
 
 /* Draw a triangle list. */
 void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int count);
@@ -402,9 +394,8 @@ void ctr_gpu_set_vram_textures(int on);
 /* Mip levels: 0 = off (always the first level), 1 = nearest level (default), 2 = blend two levels
  * (trilinear, slower) (config.ini mipmaps). */
 void ctr_gpu_set_mip_mode(int mode);
-/* (AI-assisted) 3DS hardware features (config.ini). proctex: radial textures drawn with the
- * procedural texture unit. compact: ctr_gpu_tex_create_compact picks small formats (off: RGBA8
- * like ctr_gpu_tex_create). */
+/* (AI-assisted) config.ini compact_textures: ctr_gpu_tex_create_compact picks small formats (off:
+ * RGBA8 like ctr_gpu_tex_create). */
 /* For the shadow self-test (CtrShadow.cpp). ctr_gpu_submit_now: in a frame, what is built so
  * far goes to the GPU as a command list of its own. ctr_gpu_top_histogram: outside a frame, once
  * the GPU has drawn all it was sent, the top screen's pixels by their blue value; 0: can't be
@@ -466,7 +457,6 @@ void ctr_gpu_note_release(unsigned int release);
  * (no vblank to spare), floor: the latency it doesn't go below for now (a frame was late there) */
 void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* dropped,
                           double* buffer_wait_ms, unsigned int* just_in_time, int* floor);
-void ctr_gpu_set_proctex(int on);
 void ctr_gpu_set_compact_textures(int on);
 /* (AI-assisted) Overlap: hand the draws so far to the GPU in the middle of a frame (after a
  * renderer bucket, when enough draws piled up), so the GPU draws them while the CPU builds the
@@ -868,12 +858,10 @@ typedef struct {
   unsigned int pool_vram_bytes; /* of which also in VRAM (the copy the GPU reads) */
   int pools, pools_in_vram;
   /* (AI-assisted) ctr_gpu_tex_create_compact textures: how many, their bytes, how many of them
-   * are in the reserved VRAM, radial ones; draws with the procedural texture */
+   * are in the reserved VRAM */
   int compact_textures;
   unsigned int compact_bytes;
   int compact_in_vram;
-  int radial_textures;
-  int proctex_draws;
   int nofog_draws;   /* (AI-assisted) level draws without the fog stage (fog_stage_skip) */
   int color_clear_skipped; /* (AI-assisted) skip_clear: this frame cleared only the depth */
   int tex_clears_skipped;  /* (AI-assisted) tex_cache_clear = uploads: binds without the clear */
@@ -902,7 +890,7 @@ typedef struct {
   int vbuf_dropped;       /* draws dropped: the vertex buffer was full */
   int dead_draws;         /* level draws skipped: their mesh is not there (deleted or not made) */
   /* (AI-assisted) filled only in the frame after ctr_gpu_want_detailed_stats (it scans all texture
-   * slots and probes the linear heap): textures, tex_bytes, compact_*, radial_textures,
+   * slots and probes the linear heap): textures, tex_bytes, compact_*,
    * linear_free, vram_free and linear_largest (the largest block linearAlloc can give) */
   int detailed;
   unsigned int linear_largest;

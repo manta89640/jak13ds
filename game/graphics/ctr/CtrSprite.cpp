@@ -651,7 +651,6 @@ void CtrSpriteRenderer::draw_glows(DmaFollower& dma, CtrRenderState& rs) {
     st.zwrite = 0;
     st.ztest = CTR_TEST_GEQUAL;
     st.atest = CTR_TEST_ALWAYS;
-    st.flags &= ~CTR_STATE_PROCTEX;
     ctr_vertex* out = bucket_for(st).verts.grow(4);
     m_have_last_ad = false;  // the bucket above isn't m_last_bucket_ptr's
     // corners in the order of the GS fan (uv 00, 10, 11, 01 as GlowRenderer)
@@ -1016,11 +1015,6 @@ void CtrSpriteRenderer::resolve_state(const AdGif& ad, Mode mode) {
     memcpy(r.tex_box, m_last_tex_box, sizeof(r.tex_box));
     r.trim = 0;
     r.ready = 0;
-    // (AI-assisted) a radial glow texture: from the procedural texture unit (no texels read);
-    // its texture coordinates then go from -1 to 1 (see m_proc below)
-    if (mode != MODE_HUD && ctr_gpu_tex_radial(st.tex)) {
-      st.flags |= CTR_STATE_PROCTEX;
-    }
     m_last_bucket_ptr = &bucket_for(st);
     r.state = st;
     r.bucket = (u32)m_last_bucket;
@@ -1402,7 +1396,7 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
     const u8 r = color_byte(v.rgba.x()), g = color_byte(v.rgba.y()), b = color_byte(v.rgba.z());
     u8 a = (u8)(color_byte(v.rgba.w()) * alpha_scale);
     // procedural texture (radial glow): texture coordinates centered on 0
-    const bool proc = (m_last_bucket_ptr->state.flags & CTR_STATE_PROCTEX) != 0;
+    const bool proc = false;  // the procedural texture glows are gone
     // config particle_fill = strong: thinning by pairs (an approximation, off by default). The
     // particle slots (2j, 2j + 1) of a chunk (48 slots: a pair never spans two) are a pair when
     // both use the same texture and state, the blend is weighted by the texture's alpha

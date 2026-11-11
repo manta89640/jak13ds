@@ -19,7 +19,7 @@ constexpr u64 kTex0 = (1ull << 14) | (3ull << 26) | (3ull << 30);
 extern "C" {
 int ctr_gpu_asm_tex() { return 0; }
 int ctr_gpu_tex_create(int, int, const uint8_t*) { return allocate_texture(); }
-int ctr_gpu_tex_create_compact(int, int, const uint8_t*, int) { return allocate_texture(); }
+int ctr_gpu_tex_create_compact(int, int, const uint8_t*) { return allocate_texture(); }
 void ctr_gpu_tex_delete(int) {}
 void ctr_gpu_tex_update(int, const uint8_t*) {}
 double ctr_gpu_time_ms() { return 0; }

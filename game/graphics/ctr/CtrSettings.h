@@ -185,8 +185,6 @@ struct CtrSettings {
   // sprite and HUD textures in the smallest 3DS format that holds them (8 / 16 bits per texel),
   // and in reserved VRAM (with vram_textures)
   bool compact_textures = true;
-  // glows (radial gradient textures) from the procedural texture unit: no texels read
-  bool proctex_glows = true;
   // world sprites (particles, glows) at most this fraction of the screen height (0 = no limit)
   float sprite_max_size = 0.f;  // (AI-assisted) 0 since Oct 12, as the PS2 (0.5 was the 30 fps cut)
   // (AI-assisted) world sprites with a half size over ~20 pixels are left out below this alpha
