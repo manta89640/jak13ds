@@ -162,12 +162,6 @@ struct CtrSettings {
   // Measure what each renderer costs the GPU: every few seconds one of them is left out for a
   // moment and the GPU time without it is logged ([ctr] gpu profile). The picture flickers.
   bool gpu_profile = false;
-  // (AI-assisted) gpu_profile = ab: instead, the switches of the A/B table (CtrRenderer.cpp
-  // kAbSwitches: run_culling, cull_ties, vista, fog_stage_skip, shadows, envmap, distort, and the
-  // snow-gpu-impl keys distort_copy, shadow_casters, sprite_*, envmap_batch, merc_*, clouds) are
-  // turned on and off in turns, in windows of ~1.5 s, and the GPU busy time of each setting is
-  // logged per level ([ctr] gpu ab). Nothing vanishes for good; the picture changes slightly.
-  bool gpu_profile_ab = false;
   // (AI-assisted) the GPU's own counters (busy % of each pipeline stage, memory traffic) over 10 s
   // of each level, logged once per level ([ctr] gpu profile <level>: hw busy ...); nothing is left
   // out of the picture. Read through the GSP service (no extra system calls). (AI-assisted) Off by
@@ -456,9 +450,6 @@ inline const CtrSettings& ctr_settings() {
   const CtrSettings* s = ctr_settings_detail::g_settings;
   return __builtin_expect(s != nullptr, 1) ? *s : ctr_settings_detail::first_use();
 }
-/*! (AI-assisted) The same, changeable: only for gpu_profile = ab (render thread, between frames;
- * the switches it changes are read by the renderers each frame). */
-CtrSettings& ctr_settings_ab();
 
 namespace ctr_gfx {
 /*! One line describing the renderer settings, for status displays. */

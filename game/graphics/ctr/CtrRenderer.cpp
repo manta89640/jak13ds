@@ -96,155 +96,6 @@ const ProfileMode kProfileModes[] = {
 };
 constexpr int kProfileModeCount = sizeof(kProfileModes) / sizeof(kProfileModes[0]);
 
-// (AI-assisted) config.ini gpu_profile = ab: the switches that are turned on and off in turns.
-// Add a row to price another setting: its config.ini key (the log's label), how to set it, and
-// how to read it (its config.ini value is the starting point and is restored at the end). The
-// setting must be read by the renderers each frame (not only at load or init).
-struct AbSwitch {
-  const char* key;
-  void (*set)(CtrSettings& s, bool on);
-  bool (*get)(const CtrSettings& s);
-};
-const AbSwitch kAbSwitches[] = {
-    // (AI-assisted) isolate missing geometry from visibility vs frustum/streaming decisions.
-    {"vis_culling", [](CtrSettings& s, bool on) { s.vis_culling = on; },
-     [](const CtrSettings& s) { return s.vis_culling; }},
-    {"run_culling", [](CtrSettings& s, bool on) { s.run_culling = on; },
-     [](const CtrSettings& s) { return s.run_culling; }},
-    {"cull_ties", [](CtrSettings& s, bool on) { s.cull_ties = on; },
-     [](const CtrSettings& s) { return s.cull_ties; }},
-    // (AI-assisted) c3l v17 tie levels of detail (off: the far versions only)
-    {"tie_lod", [](CtrSettings& s, bool on) { s.tie_lod = on; },
-     [](const CtrSettings& s) { return s.tie_lod; }},
-    // the far scenery: lowres_vista and the vista tier (vista_distance 0: none)
-    {"vista",
-     [](CtrSettings& s, bool on) {
-       static const float kConfigDistance = s.vista_distance > 0 ? s.vista_distance : 3000.f;
-       s.lowres_vista = on;
-       s.vista_distance = on ? kConfigDistance : 0.f;
-     },
-     [](const CtrSettings& s) { return s.lowres_vista && s.vista_distance > 0; }},
-    {"fog_stage_skip", [](CtrSettings& s, bool on) { s.fog_stage_skip = on; },
-     [](const CtrSettings& s) { return s.fog_stage_skip; }},
-    // the shadow volumes' draws (shadows = full: the shadow bucket; off: left out, the game still
-    // computes them)
-    {"shadows",
-     [](CtrSettings& s, bool on) {
-       s.shadows = on ? CtrSettings::ShadowMode::Full : CtrSettings::ShadowMode::Blob;
-     },
-     [](const CtrSettings& s) { return s.shadows == CtrSettings::ShadowMode::Full; }},
-    {"envmap", [](CtrSettings& s, bool on) { s.envmap = on; },
-     [](const CtrSettings& s) { return s.envmap; }},
-    {"distort", [](CtrSettings& s, bool on) { s.distort = on; },
-     [](const CtrSettings& s) { return s.distort; }},
-    // (AI-assisted) snow-gpu-impl's keys (merged Oct 11). off = the old behaviour of each one.
-    // distort_copy: rows (on) or the whole screen (off)
-    {"distort_copy", [](CtrSettings& s, bool on) { s.distort_copy_rows = on; },
-     [](const CtrSettings& s) { return s.distort_copy_rows; }},
-    // shadow_casters: the config's cap (on; 6 when the config says all) or every caster (off)
-    {"shadow_casters",
-     [](CtrSettings& s, bool on) {
-       static const int kConfigCap = s.shadow_casters > 0 ? s.shadow_casters : 6;
-       s.shadow_casters = on ? kConfigCap : 0;
-     },
-     [](const CtrSettings& s) { return s.shadow_casters > 0; }},
-    // sprite_min_alpha: the config's value for big sprites (on; 6 when it is 2) or 2 (off)
-    {"sprite_min_alpha",
-     [](CtrSettings& s, bool on) {
-       static const int kConfigAlpha = s.sprite_min_alpha > 2 ? s.sprite_min_alpha : 6;
-       s.sprite_min_alpha = on ? kConfigAlpha : 2;
-     },
-     [](const CtrSettings& s) { return s.sprite_min_alpha > 2; }},
-    {"sprite_alpha_discard", [](CtrSettings& s, bool on) { s.sprite_alpha_discard = on; },
-     [](const CtrSettings& s) { return s.sprite_alpha_discard; }},
-    {"envmap_batch", [](CtrSettings& s, bool on) { s.envmap_batch = on; },
-     [](const CtrSettings& s) { return s.envmap_batch; }},
-    {"merc_tex_sort", [](CtrSettings& s, bool on) { s.merc_tex_sort = on; },
-     [](const CtrSettings& s) { return s.merc_tex_sort; }},
-    {"merc_gen_lod", [](CtrSettings& s, bool on) { s.merc_gen_lod = on; },
-     [](const CtrSettings& s) { return s.merc_gen_lod; }},
-    {"clouds", [](CtrSettings& s, bool on) { s.clouds = on; },
-     [](const CtrSettings& s) { return s.clouds; }},
-    // (AI-assisted) gpu-b's keys (Oct 11). frame_overlap2: the config's mode (on; clean when the
-    // config says off) or off (the old frame end)
-    {"frame_overlap2",
-     [](CtrSettings& s, bool on) {
-       static const int kConfigMode = s.frame_overlap2 > 0 ? s.frame_overlap2 : 1;
-       s.frame_overlap2 = on ? kConfigMode : 0;
-     },
-     [](const CtrSettings& s) { return s.frame_overlap2 > 0; }},
-    {"sky_last", [](CtrSettings& s, bool on) { s.sky_last = on; },
-     [](const CtrSettings& s) { return s.sky_last; }},
-    {"skip_clear", [](CtrSettings& s, bool on) { s.skip_clear = on; },
-     [](const CtrSettings& s) { return s.skip_clear; }},
-    {"tex_cache_clear", [](CtrSettings& s, bool on) { s.tex_cache_uploads = on; },
-     [](const CtrSettings& s) { return s.tex_cache_uploads; }},
-    // mip_bias: the config's bias (on; +1 when the config says 0) or 0 (off)
-    {"mip_bias",
-     [](CtrSettings& s, bool on) {
-       static const float kConfigBias = s.mip_bias != 0.f ? s.mip_bias : 1.f;
-       s.mip_bias = on ? kConfigBias : 0.f;
-     },
-     [](const CtrSettings& s) { return s.mip_bias != 0.f; }},
-    // (AI-assisted) Compare texture detail at a fixed camera, including grazing surfaces.
-    {"mipmaps", [](CtrSettings& s, bool on) { s.mipmaps = on ? 2 : 0; },
-     [](const CtrSettings& s) { return s.mipmaps != 0; }},
-    // (AI-assisted, fidelity2) envmap_min_px: the config's limit (on; 16 when it says 0) or 0 (off)
-    {"envmap_min_px",
-     [](CtrSettings& s, bool on) {
-       static const float kConfigPx = s.envmap_min_px > 0.f ? s.envmap_min_px : 16.f;
-       s.envmap_min_px = on ? kConfigPx : 0.f;
-     },
-     [](const CtrSettings& s) { return s.envmap_min_px > 0.f; }},
-    {"skin_rows_f24", [](CtrSettings& s, bool on) { s.skin_rows_f24 = on; },
-     [](const CtrSettings& s) { return s.skin_rows_f24; }},
-    // early_depth: the config's mode (on, sky) or off; nothing when the config
-    // says off (it left squares where the level never drew on a New 3DS: not tried uninvited)
-    {"early_depth",
-     [](CtrSettings& s, bool on) {
-       static const bool kOpaque = s.early_depth, kSky = s.early_depth_sky;
-       s.early_depth = on && kOpaque;
-       s.early_depth_sky = on && kSky;
-     },
-     [](const CtrSettings& s) { return s.early_depth || s.early_depth_sky; }},
-    // (AI-assisted) gpu-a's keys (Oct 11): level fog in the vertex alpha, texture unit 1 gating
-    {"fog_alpha", [](CtrSettings& s, bool on) { s.fog_alpha = on; },
-     [](const CtrSettings& s) { return s.fog_alpha; }},
-    {"tex1_gating", [](CtrSettings& s, bool on) { s.tex1_gating = on; },
-     [](const CtrSettings& s) { return s.tex1_gating; }},
-    {"cull_merc", [](CtrSettings& s, bool on) { s.cull_merc = on; },
-     [](const CtrSettings& s) { return s.cull_merc; }},
-    // (AI-assisted, far-fog) the game's fog on merc models
-    {"merc_fog", [](CtrSettings& s, bool on) { s.merc_fog = on; },
-     [](const CtrSettings& s) { return s.merc_fog; }},
-    // (AI-assisted) shader-opt's keys (Oct 12): the shorter vertex programs
-    {"shader_opt", [](CtrSettings& s, bool on) { s.shader_opt = on; },
-     [](const CtrSettings& s) { return s.shader_opt; }},
-    {"cmd_dedup", [](CtrSettings& s, bool on) { s.cmd_dedup = on; },
-     [](const CtrSettings& s) { return s.cmd_dedup; }},
-    {"cmd_dedup_draw", [](CtrSettings& s, bool on) { s.cmd_dedup_draw = on; },
-     [](const CtrSettings& s) { return s.cmd_dedup_draw; }},
-    {"skin_clip_f24", [](CtrSettings& s, bool on) { s.skin_clip_f24 = on; },
-     [](const CtrSettings& s) { return s.skin_clip_f24; }},
-    // (AI-assisted, gpu-rt) ocean_tex_half
-    // (AI-assisted, onebone / idx8) the one-bone merc program and u8 quad indices
-    {"merc_one_bone", [](CtrSettings& s, bool on) { s.merc_one_bone = on; },
-     [](const CtrSettings& s) { return s.merc_one_bone; }},
-    {"index_u8", [](CtrSettings& s, bool on) { s.index_u8 = on; },
-     [](const CtrSettings& s) { return s.index_u8; }},
-    {"ocean_tex_half", [](CtrSettings& s, bool on) { s.ocean_tex_half = on; },
-     [](const CtrSettings& s) { return s.ocean_tex_half; }},
-    // (AI-assisted) gpu-conv (Oct 12): c3l v15 alpha tests / blending that can't change a pixel
-    {"opaque_alpha", [](CtrSettings& s, bool on) { s.opaque_alpha = on; },
-     [](const CtrSettings& s) { return s.opaque_alpha; }},
-    // (AI-assisted, hud3) the draws' command words written raw (config.ini raw_cmds), for A/B
-    // tests; applied at each frame's begin, where the backend forgets its raw state anyway
-    {"raw_cmds", [](CtrSettings& s, bool on) { s.raw_cmds = on; },
-     [](const CtrSettings& s) { return s.raw_cmds; }},
-};
-constexpr size_t kAbSwitchCount = sizeof(kAbSwitches) / sizeof(kAbSwitches[0]);
-constexpr double kAbWindowMs = 1500.0;
-constexpr int kAbSettleFrames = 4;  // the GPU busy times lag the frame (pipeline)
 constexpr double kProfileModeMs = 2500.0;  // per mode
 constexpr int kProfileSettleFrames = 3;    // GPU times lag the frame: skip the first ones
 // (AI-assisted) the render thread's statistics: one burst of lines this often (config.ini
@@ -309,16 +160,9 @@ void hw_profile_end(const std::string& level) {
   lg::info("{}", line);
 }
 
-// (AI-assisted) pad script "set KEY VALUE": a kAbSwitches key (or fog) from the game thread, read by
-// the renderers from the next frame on (like gpu_profile = ab's switching)
+// (AI-assisted) pad script "set KEY VALUE": diagnostics only (the settings don't change while running)
 bool pad_set(const char* key, const char* value) {
-  const std::string v = value;
-  const bool on = v == "on" || v == "1" || v == "true" || v == "yes";
-  CtrSettings& s = ctr_settings_ab();
-  if (!strcmp(key, "fog")) {
-    s.fog = on;
-    return true;
-  }
+  (void)value;
 #ifndef __3DS__
   if (!strcmp(key, "cam_path")) {
     return ctr_level_host_cam_path(value);
@@ -332,12 +176,6 @@ bool pad_set(const char* key, const char* value) {
     // (AI-assisted, micro-mg) a test: gpu_micro's changes as bits (old / new in one run)
     ctr_gpu_set_micro_mask((unsigned int)strtoul(value, nullptr, 0));
     return true;
-  }
-  for (const auto& sw : kAbSwitches) {
-    if (!strcmp(key, sw.key)) {
-      sw.set(s, on);
-      return true;
-    }
   }
   return false;
 }
@@ -749,11 +587,8 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     ctr_gpu_set_skip_color_clear(covered ? 1 : 0);
   }
   ctr_gpu_frame_begin(clear[0], clear[1], clear[2]);
-  // (AI-assisted) cull_ties (gpu_profile = ab may switch it between frames)
   ctr_gpu_set_cull(ctr_settings().cull_ties ? 1 : 0, ctr_settings().cull_flip ? 1 : 0);
-  // (AI-assisted) frame_overlap2 (gpu_profile = ab may switch it between frames)
   ctr_gpu_set_frame_overlap2(ctr_settings().frame_overlap2);
-  // (AI-assisted) early_depth (ab: the config's mode or off)
   ctr_gpu_set_early_depth(ctr_settings().early_depth ? 1 : 0);
   ctr_gpu_set_tex_cache_clear(ctr_settings().tex_cache_uploads ? 1 : 0);  // (AI-assisted)
   ctr_gpu_set_mip_bias(ctr_settings().mip_bias);                          // (AI-assisted)
@@ -762,11 +597,9 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_set_early_depth_params(
       ctr_settings().early_depth_sky || (ctr_settings().early_depth && ctr_settings().sky_last),
       ctr_settings().early_depth_func, ctr_settings().early_depth_clear);
-  // (AI-assisted) fog_alpha, tex1_gating (gpu_profile = ab may switch them between frames too)
   ctr_gpu_set_fog_alpha(ctr_settings().fog_alpha ? 1 : 0);
   ctr_gpu_set_tex1_gating(ctr_settings().tex1_gating ? 1 : 0);
   ctr_gpu_set_shader_opt(ctr_settings().shader_opt ? 1 : 0);        // (AI-assisted)
-  // (AI-assisted, onebone / idx8) gpu_profile = ab may switch them between frames
   ctr_gpu_set_merc_one_bone(ctr_settings().merc_one_bone ? 1 : 0);
   ctr_gpu_set_index_u8(ctr_settings().index_u8 ? 1 : 0);
   ctr_gpu_set_vram_vertices(ctr_settings().vram_vertices ? 1 : 0);  // (AI-assisted, vramvtx)
@@ -914,9 +747,6 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   }
   if (!ctr_settings().gpu_profile && ctr_settings().gpu_counters) {
     hw_counters_frame();
-  }
-  if (ctr_settings().gpu_profile_ab) {
-    ab_frame(gs.gpu_busy_ms, gs.gpu_busy_frames, gs.triangles, gs.draws);
   }
   if (ctr_settings().gpu_profile) {
     if (!m_profile_active && !m_profile_level.empty() && ctr_gpu_time_ms() >= m_profile_arm_ms &&
@@ -1333,81 +1163,6 @@ void CtrRenderer::auto_detail_frame(float /*gpu_busy_ms*/, float gpu_active_ms,
 #endif
 }
 
-// (AI-assisted) config.ini gpu_profile = ab. A cycle has two windows per switch of kAbSwitches
-// (~1.5 s each): the switch on, then off (every other cycle off, then on, so a slow change of the
-// view doesn't favour one side); the other switches keep their config.ini values. The first
-// frames of a window aren't counted (the GPU times lag). After every cycle one line per switch:
-// the mean GPU busy time per frame with it on and off since the level started, and triangles /
-// draws. Per level (the sums restart at a level change); runs as long as the setting is there.
-void CtrRenderer::ab_frame(float gpu_busy_ms, int gpu_busy_frames, int triangles, int draws) {
-  CtrSettings& s = ctr_settings_ab();
-  const double now = ctr_gpu_time_ms();
-  if (!m_ab.init) {
-    m_ab.init = true;
-    for (const auto& sw : kAbSwitches) {
-      m_ab.config.push_back(sw.get(s));
-    }
-    m_ab.stats.assign(kAbSwitchCount, AbStats());
-    m_ab.window = 0;
-    m_ab.window_start = now;
-    lg::info("[ctr] gpu ab: {} switches, {:.1f} s windows (gpu_profile = ab)", kAbSwitchCount,
-             kAbWindowMs / 1000.0);
-  }
-  if (m_profile_level != m_ab.level) {
-    // a new level: its own sums; config values while it loads
-    m_ab.level = m_profile_level;
-    m_ab.stats.assign(kAbSwitchCount, AbStats());
-    m_ab.cycle = 0;
-    m_ab.window = 0;
-    m_ab.window_frames = 0;
-    m_ab.window_start = m_profile_arm_ms;  // ~10 s after the level started
-  }
-  const size_t sw = m_ab.window / 2;
-  const bool first_half = m_ab.window % 2 == 0;
-  const bool on = (m_ab.cycle % 2 == 0) == first_half;
-  if (now < m_ab.window_start) {
-    for (size_t i = 0; i < kAbSwitchCount; i++) {
-      kAbSwitches[i].set(s, m_ab.config[i]);
-    }
-    return;
-  }
-  // this window's settings (for the next frame)
-  for (size_t i = 0; i < kAbSwitchCount; i++) {
-    kAbSwitches[i].set(s, i == sw ? on : m_ab.config[i]);
-  }
-  if (gpu_busy_frames && ++m_ab.window_frames > kAbSettleFrames) {
-    auto& st = m_ab.stats[sw];
-    st.busy[on] += gpu_busy_ms / gpu_busy_frames;
-    st.tris[on] += triangles;
-    st.draws[on] += draws;
-    st.frames[on]++;
-  }
-  if (now - m_ab.window_start < kAbWindowMs) {
-    return;
-  }
-  m_ab.stats[sw].windows[on]++;
-  m_ab.window_start = now;
-  m_ab.window_frames = 0;
-  if (++m_ab.window < 2 * kAbSwitchCount) {
-    return;
-  }
-  m_ab.window = 0;
-  m_ab.cycle++;
-  for (size_t i = 0; i < kAbSwitchCount; i++) {
-    const auto& st = m_ab.stats[i];
-    if (!st.frames[0] || !st.frames[1]) {
-      continue;
-    }
-    const double b1 = st.busy[1] / st.frames[1], b0 = st.busy[0] / st.frames[0];
-    lg::info("[ctr] gpu ab {} cycle {}: {} on {:.2f} ms, off {:.2f} ms (on - off {:+.2f} ms; "
-             "{:.0f} / {:.0f} triangles, {:.0f} / {:.0f} draws; {}+{} windows, config {})",
-             m_ab.level, m_ab.cycle, kAbSwitches[i].key, b1, b0, b1 - b0,
-             st.tris[1] / st.frames[1], st.tris[0] / st.frames[0], st.draws[1] / st.frames[1],
-             st.draws[0] / st.frames[0], st.windows[1], st.windows[0],
-             m_ab.config[i] ? "on" : "off");
-  }
-}
-
 void CtrRenderer::profile_frame(double gpu_draw_ms) {
   const double now = ctr_gpu_time_ms();
   if (m_profile_ms.empty()) {
@@ -1662,7 +1417,7 @@ bool CtrRenderer::run_buckets(DmaFollower& dma, size_t sky_hook_bucket, int call
     // most of them empty every frame: two system calls and two 64-bit to double conversions each)
     const bool timed = dma.current_tag_offset() != m_rs.next_bucket;
     const double tb = timed ? ctr_gpu_time_ms() : 0.0;
-    // (AI-assisted) shadows switched off by gpu_profile = ab: the shadow bucket left out
+    // (AI-assisted) shadows not full: the shadow bucket left out
     const bool ab_skip = ctr_settings().shadows != CtrSettings::ShadowMode::Full &&
                          m_buckets[bucket_id]->name() == "shadow";
 #ifndef __3DS__

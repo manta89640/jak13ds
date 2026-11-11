@@ -35,7 +35,7 @@ A key's value is, first match wins (one table for every reader:
      `fog_stage_skip`, `ocean_tex_half`, `opaque_alpha`,
      `skip_clear`, `tie_lod`, `merc_fog`, `streaming` off,
      `tex_cache_clear = always`, `c3l_read_buffer = 0`;
-   - `bench`: `pica_bench = on`, `gpu_profile = ab`, `gpu_perflog = on`, `gpu_counters = on`,
+   - `bench`: `pica_bench = on`, `gpu_perflog = on`, `gpu_counters = on`,
      `overlap = off`;
    - `breakdown`: `gpu_breakdown = on`;
 4. the default (below; `ctr_cfg_defaults` for the keys read outside the renderer).
@@ -265,7 +265,6 @@ fast_clock = on            # steady_clock from the system tick without divides. 
 
 # ---- measuring ----
 gpu_profile = off          # every 2.5 s leaves out one group of renderers and logs what each costs the GPU (flickers); also logs the GPU's own counters once per level (`[ctr] gpu profile <level>: hw busy % ...`: which pipeline stage is busy, and memory traffic per frame; zeros in Azahar)
-                           # (AI-assisted) gpu_profile = ab: A/B windows instead. Each switch of the table (vis_culling, run_culling, cull_ties, vista, fog_stage_skip, shadows (the volumes' draws), envmap, distort, distort_copy, shadow_casters, sprite_min_alpha, sprite_alpha_discard, envmap_batch, merc_tex_sort, merc_gen_lod, clouds, frame_overlap2, sky_last, skip_clear, early_depth, tex_cache_clear, mip_bias, envmap_min_px, skin_rows_f24, fog_alpha, tex1_gating, cull_merc, shader_opt, cmd_dedup, cmd_dedup_draw, skin_clip_f24, ocean_tex_half, opaque_alpha; CtrRenderer.cpp kAbSwitches) is turned on for ~1.5 s, then off for ~1.5 s (the next cycle off first), the others staying at their config.ini values; from 10 s after each level starts, for as long as the setting is there. Log, after each cycle (~45 s), per switch: [ctr] gpu ab <level> cycle N: <key> on X ms, off Y ms (on - off D ms; triangles, draws ...): the GPU busy time per frame (needs frame_pacing = steady). color16 and depth16 change the render target and can't be switched while running: price them with two sessions
 stats_period = 15          # (AI-assisted) seconds between the render thread's statistics lines ([ctr] render ms/frame ... triangles, draws; culling); 5 for measuring fixed views
 render_watchdog = off      # (AI-assisted) a watchdog thread (core 0, 16 KB stack) logs once per second for the first 60 s that the render thread is alive: `[ctr] render alive Ns: frame F, last stage S` ("(no frame in the last second)" when it stalled), to find where a boot hangs. Off by default since Oct 12 (it was always on: ~60 log lines per session)
 vram_probe = off           # hardware diagnostic for textures read wrongly from VRAM (ctr_gpu_vprobe.c): per-frame GPU probes of a VRAM pattern texture, a live pool texture and pool VRAM, every GPU write checked against our allocations, the shared font hashed; `[vprobe]` lines, the event ring dumped at the first failure

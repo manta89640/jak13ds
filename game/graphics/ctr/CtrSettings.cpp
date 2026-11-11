@@ -193,8 +193,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
     } else if (key == "mipmaps") {
       s.mipmaps = v == "off" || v == "0" ? 0 : (v == "trilinear" || v == "2" ? 2 : 1);
     } else if (key == "gpu_profile") {
-      s.gpu_profile_ab = v == "ab";  // (AI-assisted)
-      s.gpu_profile = !s.gpu_profile_ab && parse_bool(v);
+      s.gpu_profile = parse_bool(v);
     } else if (key == "gpu_counters") {
       s.gpu_counters = parse_bool(v);
     } else if (key == "render_watchdog") {
@@ -621,7 +620,7 @@ std::string CtrSettings::summary() const {
       fps_cap, ocean_texture_rate, ocean_near_alpha, shader_basic ? "new" : "old",
       defer_flush ? "on" : "off", cmd_dump ? "on" : "off", render_watchdog ? "on" : "off",
       stats_period, color_stream ? "on" : "off",
-      gpu_profile ? " gpu_profile" : (gpu_profile_ab ? " gpu_profile ab" : ""),
+      gpu_profile ? " gpu_profile" : "",
       gpu_counters ? " gpu_counters" : "",
       gpu_perflog ? " gpu_perflog" : "",
       pica_bench ? " pica_bench" : "",
@@ -645,10 +644,6 @@ const CtrSettings& first_use() {
   return s;
 }
 }  // namespace ctr_settings_detail
-
-CtrSettings& ctr_settings_ab() {
-  return settings_instance();
-}
 
 namespace ctr_gfx {
 std::string settings_summary() {
