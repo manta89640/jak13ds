@@ -3494,7 +3494,6 @@ void ctr_gpu_mesh_flush(int mesh, int offset, int size) {
     ctr_gpu_flush_range(g_soft.meshes[mesh].verts.data() + offset, (unsigned int)size);
   }
 }
-void ctr_gpu_set_micro_mask(unsigned int) {}
 
 void* ctr_gpu_mesh_colors_inplace(int mesh) {
   if (!soft_mesh_ok(mesh, false) ||

@@ -76,6 +76,7 @@ extern const uint8_t ctr_mesh_opt_df_fa_shbin[];
 extern const size_t ctr_mesh_opt_df_fa_shbin_size;
 #define OPT_DVLBS 8
 void ctr_thread_install_crash_handler(void); /* platform/3ds/port */
+int ctr_config_bool(const char* key, int def); /* platform/3ds/port */
 static void gl_to_pica_check(void); /* (AI-assisted) */
 
 /* (AI-assisted) hardware hang bisect: where the render thread is (ctr_gpu_diag_stage) and how
@@ -1034,9 +1035,6 @@ static void use_program(int prog) {
   g.cur_prog = prog;
 }
 
-static void res_apply(int on);
-static void resident_programs(const ProgSet* rp);
-
 static float s_gs_half_height = 112.0f; /* ctr_gpu_set_gs_half_height */
 
 static void setup_projection(void);
@@ -1241,199 +1239,6 @@ static void prog_set_free(ProgSet* p) {
     }
   }
   memset(p, 0, sizeof(*p));
-}
-
-/* (AI-assisted, micro-gpu) shader_resident (always on with gpu_micro): every vertex program of the
- * set in use in one code image that stays in the GPU's shader memory. citro3d uploads a program's
- * code and operand descriptors at every switch to a program of another DVLP (C3D_BindProgram compares
- * the DVLPs): with one shbin per program, every switch (~8 per frame) wrote its code again. Here
- * the shbins' code is put one after another (351 of 512 instruction slots) and their operand
- * descriptors into one table without duplicates (49 of 128; the ones a MAD uses first, MAD has 5
- * bits for the index), each instruction's descriptor index rewritten, and each program's DVLE
- * pointed at the image with its main offset moved by where its code went. So the first program
- * bound uploads all of it and a switch writes only the entry point and the output map (citro3d's
- * shaderProgramConfigure without the code). The instructions a draw runs are the same, only at
- * another place (cmd_report.py --kicks resolves them per draw). Only programs without flow control
- * (no addresses to move; check_shaders.py refuses flow control anyway) and with known instruction
- * formats are merged; anything else keeps its own shbins. Uniforms are unchanged: a switch still
- * keeps none (the programs' uniforms overlap). */
-static u32 s_res_code[512];
-static u32 s_res_desc[128];
-static DVLP_s s_res_dvlp;
-int ctr_config_bool(const char* key, int def); /* platform/3ds/port */
-
-/* (AI-assisted, micro-gpu) config.ini gpu_micro (default on; off: every micro-gpu change of the
- * command stream and its submission back to the Oct 17 behaviour, for the safe preset):
- * the bits of s_micro. */
-enum {
-  MICRO_RESIDENT = 1,   /* shader_resident's one code image */
-  MICRO_TEXREGS = 2,    /* (unused: was texture unit 0's changed registers with cmd_dedup) */
-  MICRO_GAS = 4,        /* (unused: was GAS_DELTAZ_DEPTH with cmd_dedup) */
-  MICRO_PROCLUT = 8,    /* the procedural texture tables kept in the GPU's LUT memory */
-  MICRO_ATLAS = 16,     /* the mesh scales written raw */
-  MICRO_FENCE = 32,     /* steady pacing's fence words in the vertex buffer */
-  MICRO_FLUSHMERGE = 64, /* cache flush requests of near ranges merged */
-  /* (AI-assisted, micro-mg) round 2 */
-  MICRO_RAWGLOW = 128, /* the glows (procedural texture) as raw draws, not through citro3d */
-  MICRO_TEXSTATE = 256, /* a raw draw state that differs only in its texture: only the bind */
-  MICRO_FLUSHGAP = 512  /* deferred flush ranges up to DEFER_GAP2 apart in one request */
-};
-#define MICRO_ALL 1023u
-static u32 s_micro = MICRO_ALL;
-static u32 s_micro_cfg = MICRO_ALL; /* config.ini gpu_micro's */
-static volatile u32 s_micro_want; /* (AI-assisted, micro-mg) ctr_gpu_set_micro_mask's (bit 31: set) */
-/* the programs' DVLEs as their shbins have them and in the image (res_apply) */
-static struct {
-  DVLE_s* dvle;
-  DVLP_s* own;
-  u32 main, endmain, base;
-} s_res_prog[38]; /* 2 x 19 */
-static int s_res_n;
-static int s_res_on; /* the DVLEs point at the image */
-
-/* the operand descriptor field of a known instruction: 7 bits (1), 5 (MAD, MADI: 2), none (0),
- * or -1: not merged */
-static int res_desc_bits(u32 ins) {
-  const u32 op = ins >> 26;
-  if (op <= 0x0F || op == 0x12 || op == 0x13 || (op >= 0x18 && op <= 0x1B)) {
-    return 1;
-  }
-  if (op == 0x21 || op == 0x22) {
-    return 0; /* NOP, END */
-  }
-  if (op >= 0x30) {
-    return 2;
-  }
-  return -1;
-}
-
-static void res_apply(int on);
-
-/* the image of the programs' code */
-static void resident_programs(const ProgSet* rp) {
-  s_res_n = 0;
-  if (!(s_micro & MICRO_RESIDENT)) {
-    printf("[ctr] shader_resident: off\n");
-    return;
-  }
-  DVLE_s* dvles[2 * 21];
-  int n = 0;
-  for (int k = 0; k < 1; k++) {
-    const ProgSet* p = rp;
-    /* (AI-assisted, j2water) + ocean_env (Jak II); (j2water2) + etie (Jak II) */
-    const shaderProgram_s* all[21] = {&p->basic,     &p->mesh,       &p->mesh_fa,    &p->skin,
-                                &p->env,       &p->clip,       &p->clip2,      &p->ocean,
-                                &p->ocean_full, &p->ocean_full_clip, &p->mesh_df, &p->mesh_df_fa,
-                                &p->ocean_env, &p->etie,       &p->mesh_wind,  &p->skin_mask,
-                                &p->etie_fa,   &p->mesh_morph, &p->mesh_morph_fa,
-                                &p->tfrag_morph, &p->tfrag_morph_fa};
-    for (int i = 0; i < 21; i++) {
-      if (!all[i]->vertexShader) {
-        continue;
-      }
-      DVLE_s* d = all[i]->vertexShader->dvle;
-      int seen = 0;
-      for (int j = 0; j < n; j++) {
-        seen |= dvles[j] == d;
-      }
-      if (!seen) {
-        dvles[n++] = d;
-      }
-    }
-  }
-  /* the distinct DVLPs, their code places, and the descriptor table (MAD's first) */
-  DVLP_s* dvlps[2 * 21];
-  u32 base[2 * 21];
-  int np = 0;
-  u32 code = 0, ndesc = 0;
-  for (int i = 0; i < n; i++) {
-    int seen = 0;
-    for (int j = 0; j < np; j++) {
-      seen |= dvlps[j] == dvles[i]->dvlp;
-    }
-    if (!seen) {
-      DVLP_s* d = dvles[i]->dvlp;
-      if (d->codeSize > 512 - code) {
-        printf("[ctr] shader_resident: the programs don't fit in shader memory, off\n");
-        return;
-      }
-      for (u32 k = 0; k < d->codeSize; k++) {
-        const int bits = res_desc_bits(d->codeData[k]);
-        const u32 di = bits == 2 ? (d->codeData[k] & 0x1F) : (d->codeData[k] & 0x7F);
-        if (bits < 0 || (bits && di >= d->opdescSize)) {
-          printf("[ctr] shader_resident: instruction %08lx not merged, off\n",
-                 (unsigned long)d->codeData[k]);
-          return;
-        }
-      }
-      dvlps[np] = d;
-      base[np] = code;
-      code += d->codeSize;
-      np++;
-    }
-  }
-  for (int pass = 2; pass >= 1; pass--) {
-    /* pass 2: the descriptors a MAD uses (indices < 32), pass 1: the others */
-    for (int j = 0; j < np; j++) {
-      const DVLP_s* d = dvlps[j];
-      for (u32 k = 0; k < d->codeSize; k++) {
-        if (res_desc_bits(d->codeData[k]) != pass) {
-          continue;
-        }
-        const u32 v = d->opcdescData[d->codeData[k] & (pass == 2 ? 0x1F : 0x7F)];
-        u32 f = 0;
-        while (f < ndesc && s_res_desc[f] != v) {
-          f++;
-        }
-        if (f == ndesc) {
-          if (ndesc == 128 || (pass == 2 && ndesc == 32)) {
-            printf("[ctr] shader_resident: too many operand descriptors, off\n");
-            return;
-          }
-          s_res_desc[ndesc++] = v;
-        }
-      }
-    }
-  }
-  for (int j = 0; j < np; j++) {
-    const DVLP_s* d = dvlps[j];
-    for (u32 k = 0; k < d->codeSize; k++) {
-      u32 ins = d->codeData[k];
-      const int bits = res_desc_bits(ins);
-      if (bits) {
-        const u32 m = bits == 2 ? 0x1Fu : 0x7Fu;
-        const u32 v = d->opcdescData[ins & m];
-        u32 f = 0;
-        while (s_res_desc[f] != v) {
-          f++;
-        }
-        ins = (ins & ~m) | f;
-      }
-      s_res_code[base[j] + k] = ins;
-    }
-  }
-  s_res_dvlp.codeSize = code;
-  s_res_dvlp.codeData = s_res_code;
-  s_res_dvlp.opdescSize = ndesc;
-  s_res_dvlp.opcdescData = s_res_desc;
-  s_res_n = 0;
-  for (int i = 0; i < n; i++) {
-    for (int j = 0; j < np; j++) {
-      if (dvles[i]->dvlp == dvlps[j]) {
-        s_res_prog[s_res_n].dvle = dvles[i];
-        s_res_prog[s_res_n].own = dvlps[j];
-        s_res_prog[s_res_n].main = dvles[i]->mainOffset;
-        s_res_prog[s_res_n].endmain = dvles[i]->endmainOffset;
-        s_res_prog[s_res_n].base = base[j];
-        s_res_n++;
-        break;
-      }
-    }
-  }
-  res_apply(1);
-  printf("[ctr] shader_resident: %d programs from %d shbins in one image, %lu instructions, %lu "
-         "operand descriptors\n",
-         n, np, (unsigned long)code, (unsigned long)ndesc);
 }
 
 /* (AI-assisted) the ctr_*_opt programs and the ones that build on them, after basic, clip, clip2,
@@ -1718,10 +1523,6 @@ int ctr_gpu_init(void) {
   if (!load_opt_set()) {
     return -5;
   }
-  /* (AI-assisted, micro-gpu) config.ini gpu_micro */
-  s_micro = s_micro_cfg = ctr_config_bool("gpu_micro", 1) ? MICRO_ALL : 0;
-  printf("[ctr] gpu_micro: %s\n", s_micro ? "on" : "off");
-  resident_programs(g.ps); /* (AI-assisted, micro-gpu) shader_resident (gpu_micro) */
   g.cur_prog = PROG_NONE;
 
   g.vbuf = (uint8_t*)linearAlloc(VBUF_BYTES);
@@ -1894,25 +1695,6 @@ _Static_assert(offsetof(C3Di_Context, lightEnv) == 0x10c, "citro3d context layou
 _Static_assert(offsetof(C3Di_Context, texEnvBuf) == 0x19c, "citro3d context layout");
 _Static_assert(offsetof(C3Di_Context, fogLut) == 0x1a8, "citro3d context layout");
 extern C3Di_Context __C3D_Context;
-/* (AI-assisted, micro-gpu) shader_resident: */
-/* the DVLEs to the image (on) or their own shbins'. A change while a program is bound: citro3d
- * is made to upload the code at the next bind (no program bound: ctx->program), and the next
- * use_program binds (the frame begin's use_program(PROG_BASIC) does) */
-static void res_apply(int on) {
-  on = on && s_res_n > 0;
-  if (on == s_res_on) {
-    return;
-  }
-  for (int i = 0; i < s_res_n; i++) {
-    DVLE_s* d = s_res_prog[i].dvle;
-    d->dvlp = on ? &s_res_dvlp : s_res_prog[i].own;
-    d->mainOffset = s_res_prog[i].main + (on ? s_res_prog[i].base : 0);
-    d->endmainOffset = s_res_prog[i].endmain + (on ? s_res_prog[i].base : 0);
-  }
-  s_res_on = on;
-  __C3D_Context.program = NULL;
-  g.cur_prog = PROG_NONE;
-}
 
 void C3Di_UpdateContext(void); /* citro3d: sends what's dirty (as its draws do first) */
 enum {
@@ -2727,7 +2509,7 @@ static int pres_init(void) {
 
 /* after the frame's draws are in the GPU queue: its transfer to a free screen buffer, the
  * fence, and the frame handed to the vblank callback */
-static void pres_queue_frame(u32* fence_id) {
+static void pres_queue_frame(void) {
   int b = -1;
   const u64 t0 = svcGetSystemTick();
   for (int tries = 0; b < 0; tries++) {
@@ -2785,14 +2567,9 @@ static void pres_queue_frame(u32* fence_id) {
    * GPU queue stalled: black top screen, frozen game, sound still playing). Azahar fills any
    * memory. */
   {
-    /* (AI-assisted, micro-gpu) fence_id: the frame's number already in its vertex buffer
-     * (ctr_gpu_frame_end), out of the CPU cache with the vertices: no flush request of its own */
-    u32* id = fence_id;
-    if (!id) {
-      id = s_pres.ids + 4 * (s_pres.q_tail % PRESENT_Q);
-      id[0] = id[1] = id[2] = id[3] = g.frame_no;
-      cache_flush_now(id, 16);
-    }
+    u32* id = s_pres.ids + 4 * (s_pres.q_tail % PRESENT_Q);
+    id[0] = id[1] = id[2] = id[3] = g.frame_no;
+    cache_flush_now(id, 16);
     GX_TextureCopy(id, 0, s_pres.fence, 0, 16, 8 /* raw copy */);
   }
   /* the latency: up after a late frame. (AI-assisted) Down after a window of 150 frames (~5 s)
@@ -3123,13 +2900,6 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   }
   apt_gate_enter(); /* (AI-assisted, gpu-home) waits while the HOME Menu or sleep has the GPU */
   anim_slots_frame_begin(); /* (AI-assisted) */
-  if (s_micro_want) {
-    /* (AI-assisted, micro-mg) ctr_gpu_set_micro_mask (a test): from this frame on */
-    s_micro = s_micro_cfg = s_micro_want & MICRO_ALL;
-    s_micro_want = 0;
-    printf("[ctr] gpu_micro mask 0x%lx\n", (unsigned long)s_micro);
-  }
-  res_apply((s_micro & MICRO_RESIDENT) != 0); /* (AI-assisted, micro-gpu) */
   /* texture combiner constant: R in the low byte */
   g.clear_abgr = 0xff000000u | ((u32)b << 16) | ((u32)gr << 8) | (u32)r;
   if (s_pipeline) {
@@ -3175,17 +2945,6 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
  * clouds, ocean, eyes; blend shape vertices; the fog ramp) wait here until the frame's commands
  * go to the GPU (flush_vbuf, at every submission point), merged where the ranges touch. */
 #define DEFER_FLUSH_MAX 48
-#define DEFER_GAP (8u * 1024u) /* (AI-assisted, micro-gpu) see flush_vbuf */
-/* with kernel flushes a call costs less than cleaning a gap's lines: only near ranges merge */
-#define DEFER_GAP_KERNEL 1024u
-/* (AI-assisted, micro-mg) with MICRO_FLUSHGAP. Azahar charges ~16.7k ticks (62 us) of the render
- * thread for each GSP flush request (an IPC; tens of microseconds on hardware too), and the level's
- * time of day colors alone flushed 20-35 ranges per frame (Snowy, Misty). Cleaning the cache lines
- * of a 64 KB gap is 2048 line operations: less than one request even if the kernel cleans line by
- * line (if it cleans the whole cache above a size, as citro3d's whole linear heap flush per frame
- * relies on, merging costs nothing). */
-#define DEFER_GAP2 (64u * 1024u)
-extern u32 __ctru_linear_heap, __ctru_linear_heap_size; /* libctru */
 static struct {
   u32 start[DEFER_FLUSH_MAX], end[DEFER_FLUSH_MAX];
   int n;
@@ -3212,19 +2971,6 @@ static void cache_flush_frame(const void* addr, u32 size) {
     }
   }
   if (s_defer.n == DEFER_FLUSH_MAX) {
-    /* (AI-assisted, micro-mg) MICRO_FLUSHGAP: into a range of the linear heap less than DEFER_GAP2
-     * away, rather than a request of its own now */
-    const u32 lin0 = __ctru_linear_heap, lin1 = __ctru_linear_heap + __ctru_linear_heap_size;
-    if (!kernel_flush_on() && (s_micro & MICRO_FLUSHGAP) && a >= lin0 && e <= lin1) {
-      for (int i = 0; i < s_defer.n; i++) {
-        if (s_defer.start[i] >= lin0 && s_defer.end[i] <= lin1 && a <= s_defer.end[i] + DEFER_GAP2 &&
-            e + DEFER_GAP2 >= s_defer.start[i]) {
-          s_defer.start[i] = a < s_defer.start[i] ? a : s_defer.start[i];
-          s_defer.end[i] = e > s_defer.end[i] ? e : s_defer.end[i];
-          return;
-        }
-      }
-    }
     cache_flush_now(addr, size);
     return;
   }
@@ -3237,37 +2983,6 @@ static void flush_vbuf(void) {
   if (g.vbuf_used > g.vbuf_flushed) {
     cache_flush_frame(g.vbuf + g.vbuf_flushed, (u32)(g.vbuf_used - g.vbuf_flushed));
     g.vbuf_flushed = g.vbuf_used;
-  }
-  /* (AI-assisted, micro-gpu) ranges of the linear heap less than the gap apart in one flush: a GSP
-   * request is an IPC, cleaning a few more cache lines between them costs far less */
-  if (s_defer.n > 1 && (s_micro & MICRO_FLUSHMERGE)) {
-    for (int i = 1; i < s_defer.n; i++) { /* by start (insertion sort, at most 48) */
-      const u32 a = s_defer.start[i], e = s_defer.end[i];
-      int j = i - 1;
-      while (j >= 0 && s_defer.start[j] > a) {
-        s_defer.start[j + 1] = s_defer.start[j];
-        s_defer.end[j + 1] = s_defer.end[j];
-        j--;
-      }
-      s_defer.start[j + 1] = a;
-      s_defer.end[j + 1] = e;
-    }
-    const u32 lin0 = __ctru_linear_heap, lin1 = __ctru_linear_heap + __ctru_linear_heap_size;
-    const u32 gap = kernel_flush_on()             ? DEFER_GAP_KERNEL
-                    : (s_micro & MICRO_FLUSHGAP) ? DEFER_GAP2
-                                                 : DEFER_GAP;
-    int k = 0;
-    for (int i = 1; i < s_defer.n; i++) {
-      const u32 a = s_defer.start[i], e = s_defer.end[i];
-      if (a <= s_defer.end[k] + gap && s_defer.start[k] >= lin0 && e <= lin1 && a >= lin0) {
-        s_defer.end[k] = e > s_defer.end[k] ? e : s_defer.end[k];
-      } else {
-        k++;
-        s_defer.start[k] = a;
-        s_defer.end[k] = e;
-      }
-    }
-    s_defer.n = k + 1;
   }
   for (int i = 0; i < s_defer.n; i++) {
     cache_flush_now((const void*)s_defer.start[i], s_defer.end[i] - s_defer.start[i]);
@@ -3430,16 +3145,6 @@ void ctr_gpu_frame_end(void) {
   }
   ctr_gpu_rt_end(); /* (AI-assisted) impostors: a render to texture left open */
   diag_rt("frame_end: flush");
-  /* (AI-assisted, micro-gpu) steady pacing's fence words (the frame number the fence copy writes)
-   * at the end of the frame's vertex buffer, flushed with it: one GSP request less per frame. The
-   * buffer is written again two frames later, after this frame's fence landed (overlap2_wait_frame,
-   * or C3D_FrameBegin's wait for an idle GPU) */
-  u32* fence_id = NULL;
-  if ((s_micro & MICRO_FENCE) && s_pres.on && g.vbuf_used + 16 <= VBUF_BYTES) {
-    fence_id = (u32*)(g.vbuf + g.vbuf_used);
-    fence_id[0] = fence_id[1] = fence_id[2] = fence_id[3] = (u32)g.frame_no;
-    g.vbuf_used += 16;
-  }
   flush_vbuf();
   /* the rest of the frame's GPU work in one piece: all of it queued, or none */
   if (!gx_begin()) {
@@ -3488,7 +3193,7 @@ void ctr_gpu_frame_end(void) {
   }
   if (s_pres.on) {
     diag_rt("frame_end: present queue (wait for a free screen buffer)");
-    pres_queue_frame(fence_id);
+    pres_queue_frame();
   }
   /* all our buffers are flushed when written: only flush the command list, not the whole
    * linear heap (C3D_FrameEnd's default) */
@@ -5496,46 +5201,6 @@ static void commit_texenv(int id, const C3D_TexEnv* env, int raw) {
   }
 }
 
-/* (AI-assisted, micro-mg) gpu_micro: what the last full raw apply_state_tint worked from and
- * wrote (MICRO_TEXSTATE). A raw state whose other words, mesh, tint, texture kind and inputs
- * (the settings below) are those, while the GPU's (the context's) combiner stages and fragment
- * operations are still what it wrote, gets the same combiner and fragment registers from the
- * full path, so only its texture is bound (bind_texture, as the full path does). */
-typedef struct {
-  int valid;
-  u32 words[3]; /* the state's words 1..3 (word 0 is the texture) */
-  int mesh;
-  uint32_t tint;
-  u32 kind;     /* textured | alpha_full << 1 */
-  u32 in[6];    /* the settings the full path reads */
-  u32 tex_config_bit1;
-  C3D_TexEnv env0, env1;
-  /* (AI-assisted, far-fog) stage 2 and g.ocean_stage2 (merc fog draws: the fog stage) */
-  C3D_TexEnv env2;
-  int stage2;
-  C3Di_Effect effect;
-} StateFast;
-static StateFast s_sf;
-static u32 s_state_fast; /* statistics (ctr_gpu_micro_line) */
-static inline int words_eq(const void* a, const void* b, unsigned n) {
-  const alias_u32* x = (const alias_u32*)a;
-  const alias_u32* y = (const alias_u32*)b;
-  u32 d = 0;
-#pragma GCC unroll 16
-  for (unsigned i = 0; i < n; i++) {
-    d |= x[i] ^ y[i];
-  }
-  return d == 0;
-}
-static inline void state_inputs(u32* in) {
-  in[0] = (u32)g_cull_enable;
-  in[1] = (u32)g_cull_flip;
-  in[2] = (u32)g.fog_tex_valid;
-  in[3] = g.fog_abgr;
-  in[4] = g.clear_abgr;
-  in[5] = (u32)g_tex1_gating;
-}
-
 /* mesh: 0 = immediate draws, 1 = level mesh, 2 = skinned mesh (tint = constant color stage).
  * (AI-assisted) 3 = the ocean (ctr_gpu_ocean_draw), 4 = level mesh without the fog stage
  * (fog_stage_skip), 5 = level mesh with the fog amount in the vertex alpha (fog_alpha: its vertex
@@ -5552,7 +5217,6 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   g.last_state_mesh = mesh;
   g.last_tint = tint;
   g.last_state_valid = 1;
-  /* (AI-assisted, micro-mg) gpu_micro: the same state but for its texture (see StateFast) */
   const int stex0 = tex_res(st->tex); /* (AI-assisted) an animated slot's texture */
   const int textured0 = stex0 >= 0 && stex0 < MAX_TEXTURES && g.textures[stex0].used == 1;
   /* c3l v23: the texture's alpha mask, for the programs that give it coordinates
@@ -5562,32 +5226,6 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
       (mesh == 5 && (g.cur_prog == PROG_MESH_FA || g.cur_prog == PROG_MESH_DF_FA ||
                      g.cur_prog == PROG_MESH_MORPH_FA || g.cur_prog == PROG_TFRAG_MORPH_FA));
   const int smask = textured0 && mask_prog ? tex_mask(stex0) : -1;
-  const alias_u32* stw = (const alias_u32*)st;
-  if (raw && s_sf.valid && smask < 0 && (s_micro & MICRO_TEXSTATE) && s_sf.mesh == mesh &&
-      s_sf.tint == tint &&
-      /* (the filter and clamp bytes only matter to the bind) */
-      !((((stw[1] ^ s_sf.words[0]) & 0x0000FFFFu) | ((stw[2] ^ s_sf.words[1]) & 0xFFFFFF00u) |
-         (stw[3] ^ s_sf.words[2]))) &&
-      g.ocean_stage2 == s_sf.stage2 &&
-      mesh != 3 && mesh != 6) {
-    const u32 kind = textured0 ? 1u | ((u32)g.textures[stex0].alpha_full << 1) : 0u;
-    u32 in[6];
-    state_inputs(in);
-    C3Di_Context* fctx = &__C3D_Context;
-    if (kind == s_sf.kind && words_eq(in, s_sf.in, 6) &&
-        (fctx->texConfig & BIT(1)) == s_sf.tex_config_bit1 &&
-        words_eq(&fctx->texEnv[0], &s_sf.env0, sizeof(C3D_TexEnv) / 4) &&
-        words_eq(&fctx->texEnv[1], &s_sf.env1, sizeof(C3D_TexEnv) / 4) &&
-        words_eq(&fctx->texEnv[2], &s_sf.env2, sizeof(C3D_TexEnv) / 4) &&
-        words_eq(&fctx->effect, &s_sf.effect, sizeof(C3Di_Effect) / 4)) {
-      if (textured0) {
-        bind_texture(&g.textures[stex0], st, 1);
-      }
-      s_state_fast++;
-      return;
-    }
-  }
-  s_sf.valid = 0;
   /* stage 1: lighting tint for skinned meshes, pass-through otherwise */
   C3D_TexEnv e1;
   C3D_TexEnv* env1 = &e1;
@@ -6026,23 +5664,6 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   }
   raw_end(p);
   *c = e;
-  /* (AI-assisted, micro-mg) what this full raw state worked from and wrote (StateFast) */
-  if (mesh != 3 && mesh != 6 && smask < 0) {
-    s_sf.valid = 1;
-    s_sf.env2 = ctx->texEnv[2]; /* (AI-assisted, far-fog) */
-    s_sf.stage2 = g.ocean_stage2;
-    s_sf.words[0] = ((const alias_u32*)st)[1];
-    s_sf.words[1] = ((const alias_u32*)st)[2];
-    s_sf.words[2] = ((const alias_u32*)st)[3];
-    s_sf.mesh = mesh;
-    s_sf.tint = tint;
-    s_sf.kind = textured ? 1u | ((u32)afull << 1) : 0u;
-    state_inputs(s_sf.in);
-    s_sf.tex_config_bit1 = ctx->texConfig & BIT(1);
-    s_sf.env0 = ctx->texEnv[0];
-    s_sf.env1 = ctx->texEnv[1];
-    s_sf.effect = *c;
-  }
 }
 
 /* (AI-assisted) raw_cmds: the draws write their commands themselves */
@@ -7457,26 +7078,12 @@ static void mesh_fog_rows(const float* m, float out[8]) {
 }
 
 /* (AI-assisted) the mesh programs' scales (x: texture coordinates, 1/1024 or c3l v15 atlases'
- * 1/32768). (micro-gpu) raw: written straight away, the same words C3D_UpdateUniforms writes for
- * it (config, then w z y x as f32), with citro3d's copy of the uniform set and not marked: before,
- * every change made the draw's raw_sync run all of C3Di_UpdateContext (~2000 instructions) for
- * this one vector.
- * When citro3d has uniforms to send anyway (unif_pending), it sends this one with them. */
+ * 1/32768), sent by citro3d with the draw's sync */
 static void mesh_scales_set(int atlas, int raw) {
-  const int loc = g.ps->uloc_scales;
+  (void)raw;
   const float sx = atlas ? 1.0f / 32768.0f : 1.0f / 1024.0f;
-  if (!raw || !(s_micro & MICRO_ATLAS) || s_raw.unif_pending || loc < 0 ||
-      C3D_FVUnifDirty[GPU_VERTEX_SHADER][loc]) {
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, loc, sx, 1.0f / 255.0f, 1.0f, 1.0f / 127.0f);
-    raw_note_unif();
-    return;
-  }
-  C3D_FVec* u = &C3D_FVUnif[GPU_VERTEX_SHADER][loc];
-  u->x = sx;
-  u->y = 1.0f / 255.0f;
-  u->z = 1.0f;
-  u->w = 1.0f / 127.0f;
-  raw_end(raw_unif(raw_ptr(), loc, (const u32*)u, 4, 1)); /* (C3D_FVec: w z y x in memory) */
+  C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_scales, sx, 1.0f / 255.0f, 1.0f, 1.0f / 127.0f);
+  raw_note_unif();
 }
 
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
@@ -7883,7 +7490,7 @@ void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix
   g.cur.triangles += index_count / 3;
 }
 
-/* (AI-assisted, micro-gpu) the gpu_micro statistics line since the last call */
+/* (AI-assisted) the cache flush statistics line since the last call */
 int ctr_gpu_micro_line(char* out, int size) {
   static u32 frame0;
   const u32 frames = (u32)g.frame_no - frame0;
@@ -7891,18 +7498,16 @@ int ctr_gpu_micro_line(char* out, int size) {
     return 0;
   }
   const double f = frames;
-  /* all threads' flushes (textures made by the loader thread too); MICRO_TEXSTATE */
+  /* all threads' flushes (textures made by the loader thread too) */
   const int l = snprintf(out, size,
-                         "[ctr] gpu micro: cache flushes %.1f per frame by the kernel, %.1f GSP "
-                         "requests (%.1f merged ranges at submits of %.1f deferred); %.1f draw "
-                         "states only bound their texture",
+                         "[ctr] gpu flushes: cache flushes %.1f per frame by the kernel, %.1f GSP "
+                         "requests (%.1f ranges at submits of %.1f deferred)",
                          s_flush_svcs / f, s_flush_requests / f, s_defer_flushed / f,
-                         s_defer_added / f, s_state_fast / f);
+                         s_defer_added / f);
   s_flush_requests = 0;
   s_flush_svcs = 0;
   s_defer_added = 0;
   s_defer_flushed = 0;
-  s_state_fast = 0;
   frame0 = (u32)g.frame_no;
   return l < size ? l : size - 1;
 }
@@ -8287,10 +7892,6 @@ void* ctr_gpu_mesh_colors_inplace(int mesh) {
     return NULL;
   }
   return (uint8_t*)g.meshes[mesh].verts + g.meshes[mesh].col_off;
-}
-
-void ctr_gpu_set_micro_mask(unsigned int mask) {
-  s_micro_want = (u32)mask | BIT(31);
 }
 
 void ctr_gpu_flush_range(const void* addr, unsigned int size) {

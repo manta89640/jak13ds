@@ -168,11 +168,6 @@ bool pad_set(const char* key, const char* value) {
     return ctr_level_host_cam_path(value);
   }
 #endif
-  if (!strcmp(key, "gpu_micro_mask")) {
-    // (AI-assisted, micro-mg) a test: gpu_micro's changes as bits (old / new in one run)
-    ctr_gpu_set_micro_mask((unsigned int)strtoul(value, nullptr, 0));
-    return true;
-  }
   return false;
 }
 
@@ -736,7 +731,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
                  sw.verts, sw.frames, sw.ms / sw.frames, sw.max_ms);
       }
       {
-        // (AI-assisted, gpu-rt) gpu_breakdown, gpu_micro's statistics
+        // (AI-assisted, gpu-rt) gpu_breakdown, the cache flush statistics
         char line[2048];
         if (ctr_gpu_breakdown_line(line, sizeof(line),
                                     m_profile_level.empty() ? "-" : m_profile_level.c_str()) > 0) {

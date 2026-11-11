@@ -616,16 +616,12 @@ void ctr_gpu_mesh_flush(int mesh, int offset, int size);
  * heap ranges are what matter): queued, not flushed now. In a frame (between ctr_gpu_frame_begin
  * and ctr_gpu_frame_end) every queued range is flushed before the next part of the command list
  * goes to the GPU (a partial submit, a screen copy or the frame end), touching and near ranges of
- * the linear heap merged into one GSP request each (gpu_micro: up to 64 KB apart); outside a frame
+ * the linear heap that overlap merged into one GSP request each; outside a frame
  * at once. One GSP request costs tens of microseconds of the calling thread (~62 us in Azahar):
  * call this for every dirty range (e.g. each chunk's rewritten vertices) and let the merging do the
  * rest, rather than flushing yourself. ctr_gpu_mesh_flush is this for a part of a mesh's
  * vertices. Any thread may call it outside a frame; in a frame, the render thread. */
 void ctr_gpu_flush_range(const void* addr, unsigned int size);
-/* (AI-assisted, micro-mg) a test (pad script "set gpu_micro_mask N"): gpu_micro's changes as the
- * bits of N (0 = all off, 1023 = all on; ctr_gpu_citro3d.c MICRO_*) from the next frame on, for
- * old / new measurements of one view in one run */
-void ctr_gpu_set_micro_mask(unsigned int mask);
 
 /* bones: palette_count 3x4 row-major matrices, (pos, 1) -> camera space (x, y, z).
  * clip: row-major 4x4 from (camera x, y, z, 1) to OpenGL-style clip space.
@@ -735,7 +731,7 @@ int ctr_gpu_morph_ready(void);
 void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                               const float* unif, uint32_t unif_id, int mesh, int tail_offset,
                               int first_index, int index_count);
-/* (AI-assisted, micro-gpu) the gpu_micro statistics line since the last call ([ctr] gpu micro ...);
+/* (AI-assisted) the cache flush statistics line since the last call ([ctr] gpu flushes ...);
  * 0: nothing to say */
 int ctr_gpu_micro_line(char* out, int size);
 
