@@ -25,36 +25,6 @@ inline void cross3(const float* a, const float* b, float* out) {
   out[2] = a[0] * b[1] - a[1] * b[0];
 }
 
-/*!
- * (AI-assisted, sizecull) An upper bound of how many pixels across a sphere looks: `focal` pixels per
- * unit of size at unit depth, `fwd` the view's unit direction. A sphere of center depth z, distance
- * d spans at most 2 r f d / (z (z - r)) along the screen (the off-axis stretch d / z included).
- * Reaching to the camera's plane: huge.
- */
-//! (AI-assisted, fdiv) sphere_px(...) < lim, without its square root and divide: with positive
-//! z - r both sides of 2 r f d < lim z (z - r) are non-negative, so they compare squared.
-inline bool sphere_px_below(const float* c, float r, const float* eye, const float* fwd,
-                            float focal, float lim) {
-  const float v[3] = {c[0] - eye[0], c[1] - eye[1], c[2] - eye[2]};
-  const float z = dot3(v, fwd);
-  if (!(z - r > 1e-3f * (r + 1.f)) || !(lim > 0)) {
-    return false;
-  }
-  const float a = 2.f * r * focal;
-  const float b = lim * z * (z - r);
-  return a * a * dot3(v, v) < b * b;
-}
-
-inline float sphere_px(const float* c, float r, const float* eye, const float* fwd, float focal) {
-  const float v[3] = {c[0] - eye[0], c[1] - eye[1], c[2] - eye[2]};
-  const float z = dot3(v, fwd);
-  if (!(z - r > 1e-3f * (r + 1.f))) {
-    return 1e30f;
-  }
-  const float d = std::sqrt(dot3(v, v));
-  return 2.f * r * focal * d / (z * (z - r));
-}
-
 /*
  * (AI-assisted, facecull) Normal cones (config.ini `cone_cull`, docs/3ds-port/culling.md "10."): a
  * run of back face culled triangles whose normals ((p1 - p0) x (p2 - p0), the converter's outward

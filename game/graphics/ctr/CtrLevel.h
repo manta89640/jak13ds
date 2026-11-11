@@ -704,8 +704,6 @@ struct CtrLevelData {
   // per group its near chunks (stream_units holding its near or mid version) and the frame it was
   // first held coarser in view for want of them
   std::vector<u32> tf_unit_first, tf_unit_count, tf_units, tf_hold_since;
-  // (AI-assisted, sizecull) per chunk and per run: hidden by min_run_px (1), for its hysteresis
-  std::vector<u8> small_chunk, small_run;
   // (AI-assisted, farcopy) per chunk its c3l::ExtFarCopy role (1 source, 2 copy; empty: none),
   // read whatever config.ini says (a copy is never drawn along with its sources)
   std::vector<u8> far_role;
@@ -1588,8 +1586,6 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_fade_runs = 0;
   u64 m_lod_groups_near = 0, m_lod_frames = 0, m_lod_tris[2] = {0, 0};
   u64 m_cull_runs = 0, m_cull_tris = 0, m_cull_chunks = 0, m_cull_frames = 0;
-  // (AI-assisted, sizecull) min_run_px this level draw: pixels per game unit at unit depth (0: off),
-  // and statistics
   // (AI-assisted, farcopy) far_copy this level draw: the squared switch distance (game units; 0:
   // the sources always), and statistics: level draws, copy chunks drawn, source chunks replaced
   float m_fc_d2 = 0.f;
@@ -1597,9 +1593,6 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   bool m_cone_on = false;
   u64 m_cone_frames = 0, m_cone_chunks = 0, m_cone_runs = 0, m_cone_tris = 0;
   u64 m_fc_frames = 0, m_fc_copies = 0, m_fc_sources = 0;
-  float m_sz_focal = 0.f;
-  float m_sz_fwd[3] = {0, 0, 1};
-  u64 m_sz_frames = 0, m_sz_chunks = 0, m_sz_runs = 0, m_sz_tris = 0;
   // kDrawCullCond draws of visible chunks, and of them culled (camera inside)
   u64 m_cond_draws = 0, m_cond_culled = 0;
   // (AI-assisted) lowres_vista / neighbour_vis: low resolution chunks drawn in near mode, and the

@@ -255,8 +255,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.far_copy = parse_bool(v);  // (AI-assisted, farcopy)
     } else if (key == "far_copy_distance") {
       s.far_copy_distance = std::clamp(f, 30.f, 2000.f);
-    } else if (key == "min_run_px") {
-      s.min_run_px = std::clamp(f, 0.f, 8.f);  // (AI-assisted, sizecull)
     } else if (key == "ps2_lod_scale") {
       // (AI-assisted, ps2lodscale) auto | 0.3 .. 1
       s.ps2_lod_scale_auto = v == "auto";

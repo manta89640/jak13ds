@@ -13,7 +13,6 @@ ones with converter data need the levels converted again.
 | # | key | removes | needs |
 |---|---|---|---|
 | 6 | `ps2_lod_scale` | detail the 240-line screen can't show (coarse versions nearer) | nothing |
-| 7 | `min_run_px` | runs and chunks under a pixel or so across | nothing |
 | 8 | `far_copy` | detail of far plain ties (a simplified copy from 150 m) | levels converted with `--far-copies` |
 | 9 | `cull_terrain` | back faces of ground the camera can't get under | levels converted with `--terrain-cull` |
 | 10 | `cone_cull` | the vertex work of runs whose every triangle faces away | levels converted with `--face-runs` |
@@ -41,30 +40,6 @@ No unit test: it is a factor on existing distances (the host build checks the pl
 **To check on a console:** `ps2_lod_scale = auto`; village1, the beach and the title flight: look
 at rocks, huts and cliffs as they come nearer (shape and shading changes), compare the triangle
 counts and `render ms/frame` with 1.
-
-## 7. Runs smaller than a pixel
-
-A run (up to 8 tie instances, a tfrag node) whose bounding sphere covers under `min_run_px` pixels
-of the top screen is not drawn, and neither is a chunk. Shrubs gain most (about half of their
-triangles hit no pixel center at the title).
-
-**Size** (`CtrCull.h sphere_px`): with this frame's focal length (pixels of the 400-wide screen per
-unit at unit depth, as `tie_lod_px` takes it) and the view's direction, `2 r f d / (z (z - r))`: the
-sphere's diameter at its nearest depth, stretched by `d / z` for where it is off the view's axis. It
-is never less than the extent of the sphere's projection (the test projects 400 points of each of
-3000 random spheres). Reaching to the camera's plane: never hidden.
-
-**Hysteresis:** per chunk and run a flag; one hidden comes back only above 1.25x the limit, so a
-run near it doesn't blink as the camera moves. Runs are tested only in chunks far enough for a 10
-cm run to be under the limit.
-
-Hidden runs can still be drawn with their neighbours by the small-gap merge, as the view test's.
-
-**Cost:** per chunk in view a dot product, a square root and a division; per run of far chunks the
-same. 2 bytes per run of memory while it is on.
-
-**To check on a console:** `min_run_px = 1`; look at far grass, rocks and lamps for things
-missing that showed before, compare the triangles (the beach, Misty, the jungle).
 
 ## 8. A coarser copy of far plain ties
 
