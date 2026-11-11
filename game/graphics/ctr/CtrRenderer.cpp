@@ -716,9 +716,6 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     ctr_gpu_diag_stage("level loads (process_pending_loads)");
     m_levels->process_pending_loads(m_rs.frame_idx);
     load_ms = ctr_gpu_time_ms() - tl;
-    if (load_ms >= 4.0) {
-      m_auto.load_frame = m_rs.frame_idx;  // (AI-assisted, levellod) auto_detail: a load frame
-    }
     if (load_ms >= 20.0) {
       lg::info("[ctr] render thread frame {}: {:.0f} ms in level loads", m_rs.frame_idx, load_ms);
     }
@@ -879,8 +876,6 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.vbuf_dropped += gs.vbuf_dropped;
   m_timing.dead_draws += gs.dead_draws;
   m_timing.frames++;
-  // (AI-assisted) the time of day work isn't GPU load: auto_detail counts it only for stepping
-  // down (levellod: see auto_detail_frame)
   const double tod_ms = ctr_level_tod_take_ms();
   m_levels->note_frame_ms(t3 - t0);
   if (long_frame_log && t3 - t0 >= kRenderLongMs) {
@@ -898,21 +893,6 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.tod_ms += tod_ms;
   m_timing.tod_max_ms = std::max(m_timing.tod_max_ms, tod_ms);
   m_timing.tod_over += tod_ms > 2.0;
-  if (ctr_settings().auto_detail) {
-#ifndef __3DS__
-    // (AI-assisted, title-popin) host test: env CTR_AUTO_DETAIL_MODEL gives auto_detail the GPU time
-    // of the hardware fit (hw-nov01e: 16.1 ms + 0.164 ms per 1000 triangles) of this frame's
-    // triangles, plus the env's ms (a forced overload)
-    static const bool model = getenv("CTR_AUTO_DETAIL_MODEL") != nullptr;
-    if (model) {
-      static const float extra = (float)atof(getenv("CTR_AUTO_DETAIL_MODEL"));
-      const float ms = 16.1f + 0.164f * gs.triangles / 1000.f + extra;
-      auto_detail_frame(ms, ms, 1, 0.0, 0.0);
-    } else
-#endif
-    auto_detail_frame(gs.gpu_busy_ms, gs.gpu_active_ms, gs.gpu_busy_frames, t2 - t1 - tod_ms,
-                      t2 - t1);
-  }
   if (!ctr_settings().gpu_profile && ctr_settings().gpu_counters) {
     hw_counters_frame();
   }
@@ -1060,47 +1040,6 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
         }
       }
 #endif
-      if (ctr_settings().auto_detail && m_auto.init) {
-        const auto& s = ctr_settings();
-        const auto& c = m_auto.ctl;
-        const float t = std::max(c.x, 0.f);
-        // the far ring's distances at x (above the config: x > 0)
-        const float tie_t = s.tie_distance_scale > 0
-                                ? s.tie_distance_scale + (std::max(s.tie_distance_scale_max,
-                                                                   s.tie_distance_scale) -
-                                                          s.tie_distance_scale) * t
-                                : 0.f;
-        const auto& rl = m_auto.relief;
-        const float r = c.r();
-        const auto kn = rl.at(r);
-        const auto& tm = m_auto.time.ms;
-        auto secs = [&](int i) {
-          return fmt::format("{:.1f}/{:.1f}/{:.1f} s", tm[i][0] / 1000.0, tm[i][1] / 1000.0,
-                             tm[i][2] / 1000.0);
-        };
-        const float ties = r > 0 ? kn.tie_distance_scale : tie_t;
-        lg::info("[ctr] auto detail x {:.2f} (ceiling {:.2f}, mean {:.1f} ms, band {:.0f} +- {:.0f}; "
-                 "{:.1f} s above the config): ties {}, shrubs x{:.2f}; relief {:.2f} of {}: "
-                 "tie_lod_px {:.1f} ({}), lod_distance {} ({}), tie limit ({}){} at the config / "
-                 "between / old value; {} steps down ({} for the render thread), {} up",
-                 c.x, c.ceil, c.mean, s.auto_detail_gpu_ms, ctr_detail::Controller::kBand,
-                 m_auto.above_ms / 1000.0,
-                 ties > 0 ? fmt::format("x{:.2f}", ties) : std::string("none"),
-                 s.shrub_scale + (std::max(s.shrub_scale_max, s.shrub_scale) - s.shrub_scale) * t,
-                 r, rl.n, kn.tie_lod_px, secs(ctr_detail::kTieLodPx),
-                 kn.lod_distance > 0 ? fmt::format("{:.0f} m", kn.lod_distance) : std::string("off"),
-                 secs(ctr_detail::kLodDistance), secs(ctr_detail::kTieDistance),
-                 rl.stage[ctr_detail::kShrubFar] < 0
-                     ? std::string()
-                     : fmt::format(", shrubs x{:.2f} ({}), ties by their vista copies from {} ({})",
-                                   kn.shrub_far, secs(ctr_detail::kShrubFar),
-                                   kn.tie_far > 0 ? fmt::format("{:.0f} m", kn.tie_far) : "-",
-                                   secs(ctr_detail::kTieFar) + " / " + secs(ctr_detail::kTieFar2)),
-                 c.sheds, c.sheds_cpu, c.restores);
-        m_auto.ctl.sheds = m_auto.ctl.sheds_cpu = m_auto.ctl.restores = 0;
-        m_auto.time = ctr_detail::KnobTime();
-        m_auto.above_ms = 0;
-      }
     }
     m_timing = Timing();
   }
@@ -1194,8 +1133,6 @@ bool CtrRenderer::profile_skips(const std::string& name) const {
 }
 
 void CtrRenderer::note_levels(const std::vector<std::string>& levels) {
-  // (AI-assisted, levellod) auto_detail: the title screen's fast day (auto_detail_frame)
-  m_title_loaded = std::find(levels.begin(), levels.end(), "title") != levels.end();
   // the first level that isn't the title screen is the one being played
   std::string lev;
   for (const auto& l : levels) {
@@ -1205,7 +1142,6 @@ void CtrRenderer::note_levels(const std::vector<std::string>& levels) {
     }
   }
   if (lev != m_profile_level) {
-    m_auto.area = true;
     if (m_profile_active) {
       // a level change in the middle: stop (draw everything), measure the new one later
       m_profile_active = false;
@@ -1214,124 +1150,6 @@ void CtrRenderer::note_levels(const std::vector<std::string>& levels) {
     m_profile_level = lev;
     m_profile_arm_ms = ctr_gpu_time_ms() + 10000.0;  // after the load and the level start
   }
-}
-
-// config.ini auto_detail: the controller (CtrAutoDetail.h) follows the GPU's time from the frame's
-// command list on (active) and the render thread's build with the time of day, frame by frame;
-// a level load's frames and a level's first ~3 s of draws (their time of day rewrites) don't count
-void CtrRenderer::auto_detail_frame(float /*gpu_busy_ms*/, float gpu_active_ms,
-                                    int gpu_busy_frames, double /*build_ms*/, double build_tod_ms) {
-  const auto& cs = ctr_settings();
-  const double now = ctr_gpu_time_ms();
-  if (!m_auto.init) {
-    m_auto.init = true;
-    const bool t_range =
-        cs.shrub_scale_max > cs.shrub_scale ||
-        (cs.tie_distance_scale > 0 && cs.tie_distance_scale_max > cs.tie_distance_scale);
-    m_auto.relief.init(cs.tie_lod_px, cs.lod_distance, cs.tie_distance_scale, cs.draw_distance,
-                       g_game_version == GameVersion::Jak1, g_game_version == GameVersion::Jak2);
-    // fixed: the relief's floor is the position, the controller has no range to move in
-    const float relief_floor = -(float)m_auto.relief.n;
-    m_auto.ctl.range(relief_floor, cs.auto_detail_fixed ? relief_floor : (t_range ? 1.f : 0.f));
-    if (g_game_version == GameVersion::Jak1) {
-      m_auto.ctl.unit_costs(m_auto.relief, ctr_detail::kJak1LeverMs);
-    }
-    ctr_level_set_detail(m_auto.ctl.x, cs.auto_detail_fixed);
-    m_auto.last_ms = now;
-  }
-  m_auto.time.add(m_auto.relief, m_auto.ctl.r(), now - m_auto.last_ms);
-  m_auto.above_ms += m_auto.ctl.x > 0 ? now - m_auto.last_ms : 0.0;
-  m_auto.last_ms = now;
-#ifndef __3DS__
-  // host, env CTR_DETAIL_FORCE=X: the position pinned at X (lever measurements)
-  if (const char* fx = getenv("CTR_DETAIL_FORCE")) {
-    const float x = std::clamp((float)atof(fx), m_auto.ctl.lo, m_auto.ctl.hi);
-    if (m_auto.ctl.x != x || m_rs.frame_idx % 30 == 0) {
-      m_auto.ctl.x = x;
-      ctr_level_set_detail(x, true);
-    }
-    return;
-  }
-#endif
-  // Jak II, linear memory short (CtrLevels::need_update): the position stays under its cap. A
-  // ceiling already under the cap (a shed's, the relief's) rises by its own rule, up to the cap
-  if (const float cap = ctr_level_mem_cap(); cap < 1.f) {
-    if (m_auto.ctl.ceil >= cap) {
-      m_auto.ctl.ceil = cap;
-      m_auto.ctl.ceil_frame = m_auto.ctl.frame;
-    }
-    if (m_auto.ctl.x > cap) {
-      m_auto.ctl.x = cap;
-      ctr_level_set_detail(cap);
-    }
-  }
-  if (!gpu_busy_frames) {
-    return;  // no GPU time this frame (frame_pacing = fast): the detail stays
-  }
-  // (AI-assisted, citadel) the target and margins are for fps_cap = 30's 33 ms frame
-  const double k = cs.fps_cap >= 60 ? 0.5 : 1.0;
-  const double target = cs.auto_detail_gpu_ms * k;
-  const bool load = m_auto.load_frame && m_rs.frame_idx <= m_auto.load_frame + 2;
-  bool moved = false, snap = false;
-  // the title's relief (its late flight) isn't carried into play: the level starts at the config
-  if (m_auto.title && !m_title_loaded && m_auto.ctl.x != 0) {
-    m_auto.ctl.reset();
-    moved = snap = true;
-  }
-  m_auto.title = m_title_loaded;
-  if (m_auto.area) {
-    m_auto.area = false;
-    m_auto.ctl.new_area();
-  }
-  const bool settled = !m_auto.load_frame || m_rs.frame_idx > m_auto.load_frame + 90;
-  moved = m_auto.ctl.step((double)gpu_active_ms / gpu_busy_frames, build_tod_ms, !load, target, k,
-                          settled, snap ? 1e9f : ctr_level_detail()) ||
-          moved;
-
-  if (moved) {
-    ctr_level_set_detail(m_auto.ctl.x, snap);
-  }
-  if (m_jak2 && m_auto.relief.n > 0 && !cs.auto_detail_fixed) {
-    // Jak II's relief (the far levers, under the config's detail): its begin, each lever as it
-    // starts to move, its end
-    const float r = m_auto.ctl.r();
-    const int n = m_auto.relief.n;
-    if (r > 0 && !m_auto.relief_on) {
-      m_auto.relief_on = true;
-      m_auto.relief_t0 = now;
-      m_auto.relief_deep = 0;
-      m_auto.relief_logged = 0;
-      lg::info("[ctr] detail relief on: load {:.1f} ms a frame against {:.0f} + {:.0f} with the "
-               "config's detail",
-               m_auto.ctl.mean, target, ctr_detail::Controller::kBand * k);
-    }
-    if (m_auto.relief_on) {
-      m_auto.relief_deep = std::max(m_auto.relief_deep, r);
-      if (r > (float)m_auto.relief_logged && m_auto.relief_logged < n) {
-        m_auto.relief_logged++;
-        const auto kn = m_auto.relief.at((float)m_auto.relief_logged);
-        lg::info("[ctr] detail relief level {} of {} begun (at its end: shrub fade bands x{:.2f} "
-                 "beyond {:.0f} m, ties by their vista copies from {})",
-                 m_auto.relief_logged, n, kn.shrub_far, ctr_detail::kNearRingMeters,
-                 kn.tie_far > 0 ? fmt::format("{:.0f} m", kn.tie_far)
-                                : std::string("the draw distance"));
-      }
-      if (r <= 0) {
-        m_auto.relief_on = false;
-        lg::info("[ctr] detail relief off after {:.0f} s (deepest level {:.2f} of {})",
-                 (now - m_auto.relief_t0) / 1000.0, m_auto.relief_deep, n);
-      }
-    }
-  }
-#ifndef __3DS__
-  // host: env CTR_DETAIL_LOG, the controller every 30 frames
-  static const bool dlog = getenv("CTR_DETAIL_LOG") != nullptr;
-  if (dlog && m_rs.frame_idx % 30 == 0) {
-    lg::info("[detail] f={} x={:.2f} ceil={:.2f} mean={:.1f} busy={:.1f} build={:.1f}",
-             m_rs.frame_idx, m_auto.ctl.x, m_auto.ctl.ceil, m_auto.ctl.mean,
-             (double)gpu_active_ms / gpu_busy_frames, build_tod_ms);
-  }
-#endif
 }
 
 // (AI-assisted) config.ini gpu_profile = ab. A cycle has two windows per switch of kAbSwitches

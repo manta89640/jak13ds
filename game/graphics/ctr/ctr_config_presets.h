@@ -54,9 +54,9 @@ static const ctr_cfg_kv ctr_cfg_preset_bench[] = {
     {"pica_bench", "on"}, {"cpu_bench", "on"}, {"gpu_profile", "ab"}, {"gpu_perflog", "on"},
     {"gpu_counters", "on"}, {"overlap", "off"},
 };
-/* full: the detail of the builds before the fixed cuts (slower: under 30 fps in busy places) */
+/* full: every civilian, particle and shadow (slower: under 30 fps in busy places) */
 static const ctr_cfg_kv ctr_cfg_preset_full[] = {
-    {"auto_detail", "off"},    {"traffic_density", "1"},
+    {"traffic_density", "1"},
     {"particle_density", "1"}, {"shadows", "all"},
 };
 /* (AI-assisted, j2cuts) fast: normal plus Jak II's behaviour-changing cuts of the game thread

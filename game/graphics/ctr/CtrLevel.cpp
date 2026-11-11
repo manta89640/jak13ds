@@ -7,7 +7,7 @@
 
 #include "CtrLevel.h"
 
-#include "game/graphics/ctr/CtrAutoDetail.h"
+#include "game/graphics/ctr/CtrDetail.h"
 #include "game/graphics/ctr/CtrHaze.h"
 #include "game/graphics/ctr/CtrKeiraRig.h"
 #include "game/graphics/ctr/CtrHot.h"  // (AI-assisted, hottext)
@@ -352,7 +352,6 @@ LevelMem level_mem(const CtrLevelData& lev) {
             vec_bytes(lev.blerc_targets) + vec_bytes(lev.blerc_dests) +
             vec_bytes(lev.outside_cache) + vec_bytes(lev.mesh_index_first) +
             vec_bytes(lev.mesh_index_end) + vec_bytes(lev.chunk_state) +
-            vec_bytes(lev.chunk_detail_q) + vec_bytes(lev.lod_detail_q) +
             vec_bytes(lev.lod_cell_sphere) +
             vec_bytes(lev.stream_units) + vec_bytes(lev.chunk_unit) +
             vec_bytes(lev.group_unit_first) + vec_bytes(lev.group_unit_count) +
@@ -1611,6 +1610,8 @@ static const float kShrubNearK =
 #endif
 // a shrub run's fade (CtrTfragRenderer::m_run_fade): blend FIX's 0x80 = drawn as it is
 constexpr u8 kRunOpaque = 0x80;
+// CtrLevelData::chunk_state: the chunk's distance was decided at least once
+constexpr u8 kChunkDecided = 16;
 constexpr float kNeedReadMeters = 30.f, kNeedKeepMeters = 45.f, kNeedSwapMeters = 30.f;
 constexpr float kNeedDormMeters = 45.f;
 constexpr float kNeedFarMeters = 10000.f;  // added for a level in far mode: the first to go
@@ -1623,12 +1624,12 @@ constexpr u64 kNeedIdleRoom = 512 * 1024;           // kept free for the start o
 constexpr u64 kNeedLoadDefault = 4u * 1024 * 1024;  // a load whose size isn't known yet
 constexpr u64 kNeedLoadMargin = 512 * 1024;
 constexpr u64 kNeedFillRoom = 8u * 1024 * 1024;     // with this much to spare: the rest too
-constexpr float kNeedCapStep = 0.125f;
-constexpr u32 kNeedShortPasses = 4, kNeedOkPasses = 75;
-constexpr u64 kNeedCapHoldFrames = 900;
-constexpr u64 kNeedCapUpRoom = 3u * 1024 * 1024;
-// a chunk's largest draw distance (game units) at any auto_detail position, with the 10%
-// hysteresis (draw_level's decide_dist); 0: none (drawn at any distance: kept)
+constexpr u32 kNeedShortPasses = 4;
+// chunks by need are read and kept out to these distance factors (the old auto_detail range's far
+// end, where its memory cap stayed; the drawn limits are never beyond them)
+constexpr float kNeedShrubScale = 1.f, kNeedShrubMeters = 120.f, kNeedTieScale = 3.f;
+// a chunk's largest draw distance (game units), with the 10% hysteresis (draw_level's
+// decide_dist); 0: none (drawn at any distance: kept)
 float dist_limit(const CtrLevelData& lev, const c3l::Chunk& ch) {
   const auto& s = ctr_settings();
   float d = 0;
@@ -1638,16 +1639,14 @@ float dist_limit(const CtrLevelData& lev, const c3l::Chunk& ch) {
   float k = 1.1f;
   if (ch.kind == c3l::CHUNK_KIND_SHRUB) {
     if (lev.shrub_ps2_dist) {
-      d = ch.max_dist * kShrubFarK * std::max(s.shrub_scale_max, s.shrub_scale) * s.detail_scale;
+      d = ch.max_dist * kShrubFarK * std::max(kNeedShrubScale, s.shrub_scale) * s.detail_scale;
     } else if (s.shrub_distance > 0) {
-      d = std::max(s.shrub_distance_max, s.shrub_distance) * 4096.f * s.detail_scale;
+      d = std::max(kNeedShrubMeters, s.shrub_distance) * 4096.f * s.detail_scale;
     } else {
       d = ch.max_dist * s.detail_scale;
     }
   } else if (ch.kind == c3l::CHUNK_KIND_TIE) {
-    // without a draw limit (tie_distance_scale none) the farthest auto_detail one still decides
-    // what a level short of memory may free
-    d = ch.max_dist * std::max(s.tie_distance_scale_max, s.tie_distance_scale) * s.detail_scale;
+    d = ch.max_dist * std::max(kNeedTieScale, s.tie_distance_scale) * s.detail_scale;
     k = std::max(k, kHoldInView);
   }
   return d > 0 ? d * k : 0.f;
@@ -1669,25 +1668,21 @@ float dist_d2(const c3l::Chunk& ch, const float pos[][3], int np) {
   }
   return d2;
 }
-// a managed chunk's reach from its sphere's surface at auto_detail position t: its draw limit with
-// the hysteresis or fade band it goes by
-float need_reach(const CtrLevelData& lev, const c3l::Chunk& ch, float t) {
+// a managed chunk's reach from its sphere's surface: its draw limit at the kNeed factors with the
+// hysteresis or fade band it goes by
+float need_reach(const CtrLevelData& lev, const c3l::Chunk& ch) {
   const auto& s = ctr_settings();
   float d = 0;
   if (ch.kind == c3l::CHUNK_KIND_SHRUB) {
     if (lev.shrub_ps2_dist) {
-      const float k0 = s.shrub_scale;
-      d = ch.max_dist * kShrubFarK * (k0 + (std::max(s.shrub_scale_max, k0) - k0) * t) *
-          s.detail_scale;
+      d = ch.max_dist * kShrubFarK * std::max(kNeedShrubScale, s.shrub_scale) * s.detail_scale;
     } else if (s.shrub_distance > 0) {
-      const float d0 = s.shrub_distance;
-      d = (d0 + (std::max(s.shrub_distance_max, d0) - d0) * t) * 4096.f * s.detail_scale;
+      d = std::max(kNeedShrubMeters, s.shrub_distance) * 4096.f * s.detail_scale;
     } else {
       d = ch.max_dist * s.detail_scale;
     }
   } else {
-    const float k0 = s.tie_distance_scale;
-    d = ch.max_dist * (k0 + (std::max(s.tie_distance_scale_max, k0) - k0) * t) * s.detail_scale;
+    d = ch.max_dist * std::max(kNeedTieScale, s.tie_distance_scale) * s.detail_scale;
   }
   if (!(d > 0)) {
     return dist_limit(lev, ch);
@@ -1804,7 +1799,7 @@ bool CtrLevels::take_tex_trim() {
   return true;
 }
 
-void CtrLevels::need_scan(const float pos[kNeedPos][3], int np, float t, u64 frame) {
+void CtrLevels::need_scan(const float pos[kNeedPos][3], int np, u64 frame) {
   constexpr float kM = 4096.f;
   m_need_have.clear();
   m_need_want.clear();
@@ -1836,7 +1831,7 @@ void CtrLevels::need_scan(const float pos[kNeedPos][3], int np, float t, u64 fra
         left_out = true;
       }
       const bool hidden = lev.dormant && ch.kind == c3l::CHUNK_KIND_TIE && chunk_hideable(lev, ci);
-      float reach = need_reach(lev, ch, t);
+      float reach = need_reach(lev, ch);
       if (hidden) {
         reach = std::min(reach, kNeedDormMeters * kM);
       }
@@ -1876,7 +1871,7 @@ void CtrLevels::need_free(CtrLevelData& lev, u32 ci) {
 u64 CtrLevels::need_make_room(u64 want) {
   float pos[kNeedPos][3];
   const int np = need_positions(pos);
-  need_scan(pos, np, ctr_settings().auto_detail ? m_need_cap : 0.f, m_render_frame.load());
+  need_scan(pos, np, m_render_frame.load());
   std::sort(m_need_have.begin(), m_need_have.end(),
             [](const NeedCand& a, const NeedCand& b) { return a.e > b.e; });
   // (the game black: nothing is on screen, the ones in range of a continue's place go too)
@@ -1932,7 +1927,7 @@ void CtrLevels::need_update(u64 frame, u32 free_now, u64 parts_room, bool level_
                       parts_room + arena_claim + (level_loading ? 0 : kNeedIdleRoom);
   s64 room = (s64)free_now - (s64)reserve;
   s64 room_in = (s64)free_now - (s64)base;
-  need_scan(pos, np, s.auto_detail ? m_need_cap : 0.f, frame);
+  need_scan(pos, np, frame);
   auto& have = m_need_have;
   auto& want = m_need_want;
   std::sort(have.begin(), have.end(),
@@ -2088,53 +2083,26 @@ void CtrLevels::need_update(u64 frame, u32 free_now, u64 parts_room, bool level_
   if (coming) {
     bump_set_generation();
   }
-  // more needed than fits: the distances come in (auto_detail's position capped; what is in view
-  // keeps its distance until it is out of view), and go out again when there is room to spare
+  // more needed than fits: logged (a load's or a repair's wait alone: four times as long first)
   m_dst.short_max = std::max(m_dst.short_max, short_bytes);
   if (short_bytes) {
     m_dst.short_passes++;
-    m_need_ok = 0;
     m_tex_trim_left = 2;
-    // (a load's or a repair's wait alone: four times as long before the distances come in)
     m_need_short += short_bytes > m_need_deficit ? 4 : 1;
     if (m_need_short >= 4 * kNeedShortPasses) {
       m_need_short = 0;
       const double now = ctr_gpu_time_ms();
-      if (s.auto_detail && m_need_cap > 0) {
-        m_need_cap = std::max(0.f, m_need_cap - kNeedCapStep);
-        m_need_cap_frame = frame;
-        ctr_level_set_mem_cap(m_need_cap);
-        lg::warn("[ctr] linear memory short: {} KB of chunks within their draw distance (or a "
-                 "load's parts) have no room ({} KB free, {} KB kept for the floor, loads and "
-                 "reads; {} of {} KB of chunks by need there): tie and shrub distances at most "
-                 "auto detail {:.2f} now",
-                 short_bytes / 1024, free_now / 1024, reserve / 1024, m_dst.resident / 1024,
-                 m_dst.managed / 1024, m_need_cap);
-      } else if (now - m_need_log_ms >= kPartsLogMs) {
+      if (now - m_need_log_ms >= kPartsLogMs) {
         m_need_log_ms = now;
-        lg::error("[ctr] linear memory short at the nearest distances: {} KB of chunks within "
-                  "their draw distance (or a load's parts) have no room ({} KB free, {} KB kept "
-                  "for the floor, loads and reads; {} of {} KB of chunks by need there)",
+        lg::error("[ctr] linear memory short: {} KB of chunks within their draw distance (or a "
+                  "load's parts) have no room ({} KB free, {} KB kept for the floor, loads and "
+                  "reads; {} of {} KB of chunks by need there)",
                   short_bytes / 1024, free_now / 1024, reserve / 1024, m_dst.resident / 1024,
                   m_dst.managed / 1024);
       }
     }
   } else {
     m_need_short = 0;
-    if (m_need_cap < 1.f && room > (s64)kNeedCapUpRoom &&
-        frame >= m_need_cap_frame + kNeedCapHoldFrames) {
-      if (++m_need_ok >= kNeedOkPasses) {
-        m_need_ok = 0;
-        m_need_cap = std::min(1.f, m_need_cap + kNeedCapStep);
-        m_need_cap_frame = frame;
-        ctr_level_set_mem_cap(m_need_cap);
-        lg::info("[ctr] linear memory: {} KB to spare again, tie and shrub distances up to auto "
-                 "detail {:.2f}",
-                 room / 1024, m_need_cap);
-      }
-    } else {
-      m_need_ok = 0;
-    }
   }
 }
 
@@ -2143,8 +2111,8 @@ void CtrLevels::need_update(u64 frame, u32 free_now, u64 parts_room, bool level_
 // Sandover: a glimpse under the logo, then the end of logo-intro-2 and logo-loop, which repeats
 // without a cut. kTitlePath is that path to within 1.3 m (meters, the host's CTR_TITLE_VIS_LOG).
 // While the title level is wanted, a chunk no point of the path can draw is left out of the load
-// (kTitleFreed), or freed if the level was there before: one beyond its largest draw distance at
-// any auto_detail position, a vista copy whose sources are drawn from all of the path. The view
+// (kTitleFreed), or freed if the level was there before: one beyond its largest draw distance,
+// a vista copy whose sources are drawn from all of the path. The view
 // isn't used: the loop turns all the way round, it would leave out < 0.1 MB more. If the camera
 // leaves the path, or the title ends, every such chunk is read back, the nearest first.
 namespace {
@@ -2215,8 +2183,7 @@ float title_path_far(const float* p) {
   return std::sqrt(best);
 }
 
-// whether some point of the path may draw chunk ci (draw_level's rules, the settings now, any
-// auto_detail position)
+// whether some point of the path may draw chunk ci (draw_level's rules, the settings now)
 bool title_needed(const CtrLevelData& lev, size_t ci) {
   constexpr float kM = 4096.f;
   const auto& s = ctr_settings();
@@ -2235,7 +2202,7 @@ bool title_needed(const CtrLevelData& lev, size_t ci) {
       return false;
     }
     // a run shows where its source chunk is beyond its distance: one with a limit of its own
-    // (auto_detail moves it), or one the path leaves the draw distance (far mode: the LOD
+    // (the floor may cut it), or one the path leaves the draw distance (far mode: the LOD
     // distance) of
     float lim = draw;
     if (s.lod_distance > 0) {
@@ -2824,9 +2791,7 @@ inline u32 tod_alpha_of(const CtrLevelData::Tod& t, u32 c) {
   return t.akind.empty() ? (t.aword.empty() ? 0 : t.aword[0]) : t.aword[t.akind[c]];
 }
 
-// (AI-assisted) render thread: the time of day work of this frame (blends and rewrites), taken out
-// of auto_detail's build time (ctr_level_tod_take_ms): it is not GPU load, and counting it pulled
-// the tie / shrub distances in while the title screen's day ran
+// render thread: the time of day work of this frame (blends and rewrites, ctr_level_tod_take_ms)
 double g_tod_frame_ms = 0;
 
 // min(255, x) for x < 2^31 (USAT on ARM)
@@ -10214,12 +10179,11 @@ void CtrLevels::stream_log() {
   if (m_dst.managed) {
     lg::info("[ctr] chunks by need: {} of {} KB there; {} freed for room ({} KB; {} KB for a load "
              "out of memory), {} reads of {} chunks ({} KB needed, {} KB to fill), {} passes "
-             "short of room (at most {} KB within their draw distance or of a load waiting); "
-             "auto detail at most {:.2f}",
+             "short of room (at most {} KB within their draw distance or of a load waiting)",
              m_dst.resident / 1024, m_dst.managed / 1024, m_dst.freed_chunks,
              m_dst.freed_bytes / 1024, m_dst.load_bytes / 1024, m_dst.read_jobs,
              m_dst.read_chunks, m_dst.read_bytes / 1024, m_dst.fill_bytes / 1024,
-             m_dst.short_passes, m_dst.short_max / 1024, m_need_cap);
+             m_dst.short_passes, m_dst.short_max / 1024);
   }
   {
     const u64 resident = m_dst.resident, managed = m_dst.managed;
@@ -10394,45 +10358,8 @@ bool outside_detail(const CtrLevelData& l, const float* s, float margin) {
   return d2 > s[3] * s[3];
 }
 
-// (AI-assisted) auto_detail: how far between the near (0) and the far (1) shrub / tie distances
-// (render thread: set by CtrRenderer from the GPU time, read here); below 0 the relief
-// (CtrAutoDetail.h: -1 per knob moved toward its old value)
-float g_detail_t = 0.25f;
-// the position the levels are drawn with: g_detail_t followed at ctr_detail::kSlew per frame
-float g_detail_now = 0.25f;
-u64 g_detail_now_frame = 0;
-bool g_detail_snap = true;
-float g_detail_mem_cap = 1.f;  // ctr_level_set_mem_cap
 // (AI-assisted, j2intro / title3) the screen is black this frame (ctr_level_set_screen_black)
 bool g_screen_black = false;
-// (AI-assisted, title-popin) the auto_detail position as stored per chunk / tie LOD group
-// (CtrLevelData::chunk_detail_q): 0..kDetailQ over -kReliefMax..1, 0xff none yet
-constexpr float kDetailQ = 250.f;
-constexpr float kDetailLo = -ctr_detail::kReliefMax;
-u8 detail_q(float t) {
-  return (u8)std::lround((std::clamp(t, kDetailLo, 1.f) - kDetailLo) / (1.f - kDetailLo) * kDetailQ);
-}
-float detail_at(u8 q) {
-  return kDetailLo + q / kDetailQ * (1.f - kDetailLo);
-}
-// the relief's knobs at position t (no relief at t >= 0); one entry of cache (the held chunks and
-// groups of a frame mostly share the position they were decided with)
-struct ReliefAt {
-  ctr_detail::Relief rl;
-  float t = 2.f;
-  ctr_detail::Knobs kn{};
-  explicit ReliefAt(const CtrSettings& s) {
-    rl.init(s.tie_lod_px, s.lod_distance, s.tie_distance_scale, s.draw_distance,
-            g_game_version == GameVersion::Jak1, g_game_version == GameVersion::Jak2);
-  }
-  const ctr_detail::Knobs& at(float tt) {
-    if (tt != t) {
-      t = tt;
-      kn = rl.at(std::max(-tt, 0.f));
-    }
-    return kn;
-  }
-};
 // the factor on the PS2's tie and tfrag LOD distances (its switches and geomorph bands)
 constexpr float kPs2LodScale = 1.f;
 
@@ -10451,8 +10378,7 @@ CTR_HOT bool sphere_in_view(const CtrBackgroundCamera& cam, const float* s) {
 // (AI-assisted) a chunk's draw distance limit (game units, 0: none): the converter's (small and
 // medium objects) times detail_scale. With chunk kinds (newer c3l files): shrubs up to
 // shrub_distance (GPU-bound levels had 200-300k shrub triangles within the converter's 100 m),
-// ties times tie_distance_scale (most ties stopped at 100 m: pop-in); with auto_detail both move
-// toward their _max values as far as the GPU time allows. (micro-level: worked out in draw_level's
+// ties times tie_distance_scale (most ties stopped at 100 m: pop-in). (micro-level: worked out in draw_level's
 // chunk loop, its factors once per level draw)
 
 // (AI-assisted, micro-level) a chunk's runs, one by one (CtrTfragRenderer::draw_level, emit_chunk):
@@ -10623,14 +10549,13 @@ void cull_check_count(bool ok, const std::string& level, const char* what, u32 f
 }
 // a cluster's members' decision state before deciding them one by one
 struct CullCheckSnap {
-  std::vector<u8> state, q, vsrc;
+  std::vector<u8> state, vsrc;
   std::vector<u32> hold;
   size_t visible = 0;
   u64 emits = 0;
   void snap(const CtrLevelData& lev, u32 first, u32 n, const std::vector<u8>& vista_src,
             const u32* hold_since) {
     state.assign(lev.chunk_state.begin() + first, lev.chunk_state.begin() + first + n);
-    q.assign(lev.chunk_detail_q.begin() + first, lev.chunk_detail_q.begin() + first + n);
     vsrc.assign(n, 0);
     if (!vista_src.empty()) {
       memcpy(vsrc.data(), &vista_src[first], n);
@@ -10642,8 +10567,7 @@ struct CullCheckSnap {
   }
   bool same(const CtrLevelData& lev, u32 first, u32 n, const std::vector<u8>& vista_src,
             const u32* hold_since) const {
-    bool ok = memcmp(state.data(), &lev.chunk_state[first], n) == 0 &&
-              memcmp(q.data(), &lev.chunk_detail_q[first], n) == 0;
+    bool ok = memcmp(state.data(), &lev.chunk_state[first], n) == 0;
     if (!vista_src.empty()) {
       ok = ok && memcmp(vsrc.data(), &vista_src[first], n) == 0;
     }
@@ -10672,26 +10596,8 @@ double ctr_level_tod_take_ms() {
   return ms;
 }
 
-void ctr_level_set_detail(float t, bool snap) {
-  g_detail_t = detail_at(detail_q(t));  // (on the grid of the held positions)
-  g_detail_snap = g_detail_snap || snap;
-}
-
-void ctr_level_set_mem_cap(float cap) {
-  // (never under 0: the grid's point next to 0 is, which the controller took for relief)
-  g_detail_mem_cap = cap >= 1.f ? 1.f : std::max(0.f, detail_at(detail_q(std::max(cap, 0.f))));
-}
-
-float ctr_level_mem_cap() {
-  return g_detail_mem_cap;
-}
-
 void ctr_level_set_screen_black(bool black) {
   g_screen_black = black;
-}
-
-float ctr_level_detail() {
-  return g_detail_now;
 }
 
 ctr_draw_state ctr_state_from_draw_mode(DrawMode mode, int tex) {
@@ -11529,16 +11435,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     make_cull_clusters(lev);  // (AI-assisted, j2cull) once per load
   }
   const CtrSettings& settings = ctr_settings();
-  // the auto_detail position the levels are drawn with (once per frame) and the relief's knobs at it
-  if (g_detail_now_frame != rs.frame_idx) {
-    g_detail_now_frame = rs.frame_idx;
-    g_detail_now = g_detail_snap || g_screen_black ? g_detail_t
-                                                   : ctr_detail::slew(g_detail_now, g_detail_t);
-    g_detail_snap = false;
-  }
-  const float t_pos = settings.auto_detail ? g_detail_now : 0.f;
-  ReliefAt relief(settings);
-  const ctr_detail::Knobs knobs = relief.at(t_pos);
+  // the fixed detail floor (CtrDetail.h)
+  const ctr_detail::Floor dfl = ctr_detail::floor_of(
+      settings.tie_lod_px, settings.lod_distance, settings.tie_distance_scale,
+      settings.draw_distance, g_game_version == GameVersion::Jak1,
+      g_game_version == GameVersion::Jak2);
   {
     const u32 taken = g_pop.taken;  // (AI-assisted, title3: CTR_POP_LOG; taken since the last draw)
     g_pop = PopLog();
@@ -11572,7 +11473,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const float focal =
         pzw > 0 ? 200.f * std::abs(cam.fog.x() * cam.perspective[0][0] / 256.f) / pzw : 0.f;
     if (settings.tie_lod && focal > 0) {
-      m_levels->note_k_any(settings.detail_scale * focal / std::max(knobs.tie_lod_px, 0.25f) *
+      m_levels->note_k_any(settings.detail_scale * focal / std::max(dfl.tie_lod_px, 0.25f) *
                            1.1f);
     }
   }
@@ -11693,7 +11594,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
 #endif
   // fog (ctr_gpu_set_mesh_fog): the game's (tfrag3.vert), and towards the draw distance
   const float draw_dist = settings.draw_distance * 4096.f;
-  const float lod_dist = knobs.lod_distance * 4096.f;
+  const float lod_dist = dfl.lod_distance * 4096.f;
   const float lod_dist_cfg = settings.lod_distance * 4096.f;  // (far mode's landmark rule)
   // camera outside the level's bounds by more than far_level_distance: the level is only seen
   // from a neighbouring one
@@ -11935,25 +11836,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // operations on them as before), and the arrays and the camera in locals: the u8 stores to the
   // chunk states had every member and vector loaded again after each of them
   const float det = settings.detail_scale;
-  // (AI-assisted, title-popin) the auto_detail factors at position t (t = g_detail_t: this frame's)
-  const bool auto_detail = settings.auto_detail;
-  const float shrub_k0 = settings.shrub_scale, shrub_d0 = settings.shrub_distance,
-              tie_k0 = settings.tie_distance_scale;
-  const float shrub_k_span = std::max(settings.shrub_scale_max, shrub_k0) - shrub_k0;
-  const float shrub_d_span = std::max(settings.shrub_distance_max, shrub_d0) - shrub_d0;
-  // (tie_k0 0: no tie distance limit, at any auto_detail position: d = 0 below)
-  const float tie_k_span =
-      tie_k0 > 0 ? std::max(settings.tie_distance_scale_max, tie_k0) - tie_k0 : 0.f;
-  const float t_now = std::max(t_pos, 0.f);
-  const float shrub_k = shrub_k0 + shrub_k_span * t_now;
-  const float shrub_d = shrub_d0 + shrub_d_span * t_now;
-  // (the tie chunks' own factor: the clusters' test; the relief's limits are never beyond it)
-  const float tie_k = tie_k0 + tie_k_span * t_now;
+  // the config's factors (tie_k 0: no tie distance limit); the floor's limits are never beyond them
+  const float shrub_k = settings.shrub_scale, shrub_d = settings.shrub_distance,
+              tie_k = settings.tie_distance_scale;
   const bool shrub_ps2 = lev.shrub_ps2_dist;
   const bool shrub_fixed = settings.shrub_distance > 0;
   const float shrub_fixed_dist = shrub_d * 4096.f * det;
   const float ring0 = ctr_detail::kNearRingMeters * 4096.f;
-  // the level's vista copies can be drawn: a relief limit only cuts a chunk that has one
+  // the level's vista copies can be drawn: a floor limit only cuts a chunk that has one
   bool vista_ok = lev.has_vista && draw_dist > 0 && vista_dist > draw_dist;
   for (const u32 vi : lev.vista_chunks) {
     vista_ok = vista_ok && lev.meshes[vi] >= 0;
@@ -11970,20 +11860,19 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   if (lev.chunk_vok.size() != lev.chunks.size()) {
     lev.chunk_vok.assign(lev.chunks.size(), 0xff);
   }
-  // a tie chunk's limit at position t (0: none): its own, and where its vista copy stands in the
-  // relief's tie limit and far cap, never under ring 0 (vok: the copies can be drawn)
-  auto tie_limit_v = [&](size_t ci, const c3l::Chunk& ch, float t, bool vok) {
-    const float own = ch.max_dist * (tie_k0 + tie_k_span * std::max(t, 0.f)) * det;
-    if (t >= 0 || !vok || !lev.vista_copy[ci]) {
+  // a tie chunk's limit (0: none): its own (the config's), and where its vista copy stands in the
+  // floor's tie limit and far cap, never under ring 0 (vok: the copies can be drawn)
+  auto tie_limit_v = [&](size_t ci, const c3l::Chunk& ch, bool vok) {
+    const float own = ch.max_dist * tie_k * det;
+    if (!dfl.on || !vok || !lev.vista_copy[ci]) {
       return own;
     }
-    const auto& kn = relief.at(t);
     return ctr_detail::far_cap(
-        ctr_detail::ring_limit(ch.max_dist * kn.tie_distance_scale * det, own, ring0),
-        kn.tie_far * 4096.f, ring0);
+        ctr_detail::ring_limit(ch.max_dist * dfl.tie_distance_scale * det, own, ring0),
+        dfl.tie_far * 4096.f, ring0);
   };
-  auto tie_limit = [&](size_t ci, const c3l::Chunk& ch, float t) {
-    return tie_limit_v(ci, ch, t, vista_ok);
+  auto tie_limit = [&](size_t ci, const c3l::Chunk& ch) {
+    return tie_limit_v(ci, ch, vista_ok);
   };
   auto is_tfrag = [](const c3l::Chunk& ch) {
     return ch.kind == c3l::CHUNK_KIND_TFRAG && (ch.lod_tier == 1 || ch.lod_tier == 2);
@@ -11995,26 +11884,20 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   for (const CtrLevelData* l : m_loaded) {
     tfrag_cut = tfrag_cut || !(l->has_vista && draw_dist > 0 && vista_dist > draw_dist);
   }
-  // (AI-assisted, title-popin) a chunk's own distance limit (0: none) at auto_detail position t
-  auto chunk_limit = [&](size_t ci, const c3l::Chunk& ch, float t) {
-    const float tp = std::max(t, 0.f);
+  // a chunk's own distance limit by the config alone (0: none): the floor's is never beyond it
+  auto cfg_limit = [&](const c3l::Chunk& ch) {
     if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_ps2) {
-      return ch.max_dist * kShrubFarK * (shrub_k0 + shrub_k_span * tp) * det;
+      return ch.max_dist * kShrubFarK * shrub_k * det;
     } else if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_fixed) {
-      return (shrub_d0 + shrub_d_span * tp) * 4096.f * det;
+      return shrub_d * 4096.f * det;
     } else if (ch.kind == c3l::CHUNK_KIND_TIE) {
-      return tie_limit(ci, ch, t);
+      return ch.max_dist * tie_k * det;
     }
     return ch.max_dist * det;
   };
   m_tie_fade.assign(lev.chunks.size(), kRunOpaque);
   m_copy_fade.assign(lev.has_vista ? lev.chunks.size() : 0, kRunOpaque);
   bool copy_fades = false;  // a vista copy is fading in this draw
-  const u8 q_now = detail_q(t_pos);
-  if (lev.chunk_detail_q.size() != lev.chunks.size()) {
-    lev.chunk_detail_q.assign(lev.chunks.size(), 0xff);
-  }
-  u8* const chunk_q = lev.chunk_detail_q.data();
   const float cx = cam.trans[0], cy = cam.trans[1], cz = cam.trans[2];
   // ctr_pop: the fog over a sphere's nearest point (0..1), a pop of something in view
   auto fog_at = [&](const float* b, bool vista) {
@@ -12031,14 +11914,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     pst.pops[c]++;
     if (pop_log_on()) {
       const float x = b[0] - cx, y = b[1] - cy, z = b[2] - cz;
-      lg::info("[popE] f={} {} {}: {} {} d={:.0f} r={:.0f} x={:.2f}", rs.frame_idx, lev.name,
+      lg::info("[popE] f={} {} {}: {} {} d={:.0f} r={:.0f}", rs.frame_idx, lev.name,
                ctr_pop::kNames[c], what, id, std::sqrt(x * x + y * y + z * z) / 4096.f,
-               b[3] / 4096.f, t_pos);
+               b[3] / 4096.f);
     }
   };
   bool dist_cfg = true;  // decide_dist: the config's limit would draw it
   // (AI-assisted, streaming) a chunk's distance decision (draw distance, its own limit, 10%
-  // hysteresis, auto_detail's held distances, kept while in view and moving away): the chunk loop's,
+  // hysteresis, kept while in view and moving away): the chunk loop's,
   // and the near chunks' (before the tie LOD groups, which need them). Updates the chunk's state.
   if (m_shrub_lim.size() < lev.chunks.size()) {
     m_shrub_lim.resize(lev.chunks.size());
@@ -12055,7 +11938,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if (lev.vista_copy[ci]) {
         u8& cv = lev.chunk_vok[ci];
         if (vok_hold && cv == 0 &&
-            tie_limit_v(ci, ch, t_pos, true) != tie_limit_v(ci, ch, t_pos, false) &&
+            tie_limit_v(ci, ch, true) != tie_limit_v(ci, ch, false) &&
             sphere_in_view(cam, ch.bsphere)) {
           vok = false;
           pst.copy_held++;
@@ -12064,11 +11947,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
       // a tie chunk: whole up to its limit; over the band beyond it its vista copy fades in over
       // it, then it fades out over the copy (no copy: it fades out; at the draw distance: the haze)
-      auto lim_of = [&](float t) {
-        const float own = tie_limit_v(ci, ch, t, vok);
+      auto lim_of = [&](float own) {
         return own > 0 ? (draw_dist > 0 ? std::min(draw_dist, own) : own) : draw_dist;
       };
-      const float lim = lim_of(t_pos);
+      const float lim = lim_of(tie_limit_v(ci, ch, vok));
       const float dx = ch.bsphere[0] - cx, dy = ch.bsphere[1] - cy, dz = ch.bsphere[2] - cz;
       const float d2 = dx * dx + dy * dy + dz * dz;
       auto alpha = [&](float l) {
@@ -12091,8 +11973,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         copy_fades = copy_fades || (m_copy_fade[ci] > 0 && m_copy_fade[ci] < kRunOpaque);
       }
       dist_ok = fade != 0;
-      chunk_q[ci] = q_now;
-      dist_cfg = dist_ok || (t_pos < 0 && q(alpha(lim_of(0.f))) != 0);
+      state |= kChunkDecided;
+      dist_cfg = dist_ok || (dfl.on && q(alpha(lim_of(cfg_limit(ch)))) != 0);
       if (was_in != dist_ok) {
         const float out = lim * ctr_detail::kFadeBand + ch.bsphere[3];
         m_pop_why[ci] = (dist_ok ? fade >= kRunOpaque : d2 < out * out) ? 1 + ctr_pop::kLimit : 0xff;
@@ -12112,7 +11994,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       } else if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_fixed) {
         d = shrub_fixed_dist;
       } else if (ch.kind == c3l::CHUNK_KIND_TIE) {
-        d = tie_limit(ci, ch, t_pos);
+        d = tie_limit(ci, ch);
       } else {
         d = ch.max_dist * det;
       }
@@ -12132,43 +12014,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         };
         const float f = was_in ? 1.1f : 1.f;
         dist_ok = within(max_dist, f);
-        // no chunk in view goes because auto_detail moved: it keeps the distances it was decided
-        // with while they decide otherwise
-        int in_view = -1;
-        float dd = d;
-        const u8 cq = chunk_q[ci];
-        // (AI-assisted, titlemove) only for going: a chunk the new distances show is shown (held
-        // back, a shrub cell culled while the GPU was busy came in only once the camera was within
-        // the old, shorter distance: close up)
-        if (auto_detail && cq != q_now && cq != 0xff && d > 0 && !dist_ok &&
-            (ch.kind == c3l::CHUNK_KIND_SHRUB || ch.kind == c3l::CHUNK_KIND_TIE ||
-             (is_tfrag(ch) && !vista_chunk))) {
-          const float d_old = chunk_limit(ci, ch, detail_at(cq));
-          const bool ok_old = within(limit_with(d_old), f);
-          if (ok_old != dist_ok) {
-            in_view = sphere_in_view(cam, ch.bsphere);
-            if (in_view) {
-              dist_ok = ok_old;
-              dd = d_old;
-            }
-          }
-        }
-        if (dd == d) {
-          chunk_q[ci] = q_now;
-        }
+        state |= kChunkDecided;
         // (AI-assisted, title-popin) in view and moving away: drawn up to kHoldInView x its own
         // distance (not beyond the draw distance). (AI-assisted, titlemove) not shrubs: they
         // follow the PS2's distances (the user: "small things like shrubs pop in when i walk close,
         // but if i walk away they stay"); their runs are culled by distance one by one too
         // (emit_chunk)
-        if (was_in && !dist_ok && dd > 0 && (base_dist <= 0 || dd < base_dist) &&
-            ch.kind != c3l::CHUNK_KIND_SHRUB) {
-          if (in_view < 0) {
-            in_view = sphere_in_view(cam, ch.bsphere);
-          }
-          if (in_view) {
-            dist_ok = within(limit_with(dd * kHoldInView), 1.f);
-          }
+        if (was_in && !dist_ok && d > 0 && (base_dist <= 0 || d < base_dist) &&
+            ch.kind != c3l::CHUNK_KIND_SHRUB && sphere_in_view(cam, ch.bsphere)) {
+          dist_ok = within(limit_with(d * kHoldInView), 1.f);
         }
         if (pop_log_on() && was_in != dist_ok && sphere_in_view(cam, ch.bsphere)) {
           (dist_ok ? g_pop.chunk_in : g_pop.chunk_out)[ch.kind & 3]++;
@@ -12180,8 +12034,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         const bool tie_or_tfrag =
             ch.kind == c3l::CHUNK_KIND_TIE || (is_tfrag(ch) && !vista_chunk);
         dist_cfg = dist_ok;
-        if (!dist_ok && t_pos < 0 && tie_or_tfrag) {
-          dist_cfg = within(limit_with(chunk_limit(ci, ch, 0.f)), 1.f);
+        if (!dist_ok && dfl.on && tie_or_tfrag) {
+          dist_cfg = within(limit_with(cfg_limit(ch)), 1.f);
         }
         if (was_in != dist_ok) {
           u8 why = 1 + ctr_pop::kLimit;
@@ -12190,19 +12044,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           } else if (vista_chunk) {
             why = 1 + ctr_pop::kVista;
           } else if (tie_or_tfrag) {
-            bool moved = false;
-            if (cq != q_now && cq != 0xff) {
-              moved = within(limit_with(chunk_limit(ci, ch, detail_at(cq))), f) == was_in;
-            }
-            why = 1 + (moved ? ctr_pop::kCtl
-                             : (t_pos < 0 && dd != chunk_limit(ci, ch, 0.f) ? ctr_pop::kLine
-                                                                           : ctr_pop::kLimit));
+            why = 1 + (dfl.on && d != cfg_limit(ch) ? ctr_pop::kLine : ctr_pop::kLimit);
           }
           m_pop_why[ci] = why;
         }
         state = (u8)(dist_ok ? (state | 4) : (state & ~4));
         if (ch.kind == c3l::CHUNK_KIND_SHRUB && ci < m_shrub_lim.size()) {
-          m_shrub_lim[ci] = limit_with(dd);  // (AI-assisted, titlemove) for its runs
+          m_shrub_lim[ci] = limit_with(d);  // (AI-assisted, titlemove) for its runs
         }
       }
     }
@@ -12226,7 +12074,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       const float pzw = std::abs(cam.perspective[2][3]);
       const float focal =
           pzw > 0 ? 200.f * std::abs(cam.fog.x() * cam.perspective[0][0] / 256.f) / pzw : 0.f;
-      kb = std::max(kb, settings.detail_scale * focal / std::max(knobs.tie_lod_px, 0.25f) *
+      kb = std::max(kb, settings.detail_scale * focal / std::max(dfl.tie_lod_px, 0.25f) *
                             1.1f * 1.25f);
     }
     for (size_t u = 0; u < lev.stream_units.size(); u++) {
@@ -12256,8 +12104,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // (AI-assisted) c3l v17 tie levels of detail: each group's near version while the camera is
   // within its distance (the prototype's PS2 far-plane, times tie_lod_scale) of its sphere, with 10%
   // hysteresis, decided for every group every frame (turning the camera doesn't switch any).
-  // auto_detail pulls the distances in to half while the GPU is busy. tie_lod = off: the far
-  // versions only (as before v17).
+  // tie_lod = off: the far versions only (as before v17).
   const bool tie_lod = !lev.lod_groups.empty() && lev.run_lod.size() >= lev.vis_runs.size();
   // ctr_pop: far mode changed since the last draw
   const u8 far_now = (u8)((far_level ? 1 : 0) | (far_tfrag ? 2 : 0));
@@ -12291,28 +12138,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // error would show as more than tie_lod_px pixels (focal: this frame's projection, pixels of
     // the 400-wide top screen per unit of x / depth; make_cam_mat). The PS2 morphs geometry 2 into
     // 3 up to the far-plane; switching there between 0 and 3 made pops of 3 px (median) to 19 px
-    // in village1, and auto_detail pulling the distances in made them larger. Older files: the
-    // PS2 distance, auto_detail pulling it in to half while the GPU is busy.
+    // in village1. Older files: half the PS2 distance (the floor).
     const bool by_error = lev.lod_error.size() == lev.lod_groups.size();
     const float pzw = std::abs(cam.perspective[2][3]);
     const float focal =
         pzw > 0 ? 200.f * std::abs(cam.fog.x() * cam.perspective[0][0] / 256.f) / pzw : 0.f;
-    // the distance factor at auto_detail position t: with shape errors tie_lod_px pixels (auto_detail
-    // doesn't move it: pulling the switch in made the pops larger); older files: the PS2 distance,
-    // pulled in to half while the GPU is busy
+    // the distance factor: with shape errors the floor's tie_lod_px pixels; older files: half the
+    // PS2 distance
     const float k0 = settings.tie_lod ? settings.detail_scale : 0.f;
     // the PS2's distances (the floor, the geomorph's planes, older files' switch) x kPs2LodScale
     const float k0p = k0 * kPs2LodScale;
-    // (AI-assisted, streaming: lod_auto, was auto_detail: the chunk loop's auto_detail is above now)
-    // (AI-assisted, autodetail) with shape errors: the relief's tie_lod_px at t
-    const bool lod_auto = settings.auto_detail && (by_error ? relief.rl.stage[ctr_detail::kTieLodPx] >= 0 : true);
-    auto k_at = [&](float t) {
-      if (by_error) {
-        return k0 * focal / std::max(relief.at(t).tie_lod_px, 0.25f);
-      }
-      return lod_auto ? k0p * (0.5f + 0.5f * std::max(t, 0.f)) : k0p;
-    };
-    const float k = k_at(t_pos);
+    const float k = by_error ? k0 * focal / std::max(dfl.tie_lod_px, 0.25f) : 0.5f * k0p;
     // (AI-assisted, lodnear) the PS2 floor: by screen-space error alone (4 px of the 400-wide top
     // screen) half of the groups switched to geometry 3 nearer than their PS2 far-plane, some at
     // 3-15 m (jungle, beach: "coarse models really close"); the PS2 morphs toward geometry 3 only up
@@ -12322,7 +12158,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     lev.lod_floor_k = by_error && k > 0 ? k0p / k : 0.f;
     // (AI-assisted, titlemove) the title: no group switches nearer than kTitleLodMin meters
     lev.lod_min_e = title_on && by_error && k > 0 ? title_min * 4096.f / k : 0.f;
-    // ring 0: the relief's factor never moves a switch nearer than kNearRingMeters
+    // ring 0: the floor's factor never moves a switch nearer than kNearRingMeters
     const float k_cfg = by_error ? k0 * focal / std::max(settings.tie_lod_px, 0.25f) : k0p;
     const bool ring_on = by_error && k > 0 && k < k_cfg;
     lev.lod_ring_e = ring_on ? ctr_detail::kNearRingMeters * 4096.f / k : 0.f;
@@ -12333,10 +12169,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       lev.lod_floor_k = 0.f;
     }
 #endif
-    if (lev.lod_detail_q.size() != lev.lod_groups.size()) {
-      lev.lod_detail_q.assign(lev.lod_groups.size(), 0xff);
-    }
-    u8* const lod_q = lev.lod_detail_q.data();
     if (lev.lod_switch_at.size() != lev.lod_groups.size()) {
       lev.lod_switch_at.assign(lev.lod_groups.size(), 0);
     }
@@ -12350,7 +12182,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // view once the data came (1 s at 30 fps)
     constexpr u32 kHoldFrames = 30;  // (AI-assisted, lodnear: was 120)
     // the PS2's geomorph (c3l::ExtMorph): its distances x detail_scale, never pulled in by the
-    // relief (geometry 3's own vertex colors can't carry geometry 0's lighting: nearer, it shows)
+    // floor (geometry 3's own vertex colors can't carry geometry 0's lighting: nearer, it shows)
     const bool morph_on = !lev.group_mid.empty();
     const float kd = k0p;
     auto dx2 = [&](const float* c) {
@@ -12365,13 +12197,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // (AI-assisted, j2cull) cluster by cluster (CtrLevelData::CullCluster): a cluster beyond every
     // member's near distance (largest switch distance x k, with margins for float rounding) whose
     // members all were far and not held last frame (state 2) stands for their decisions: each
-    // would come out far again, state 2, its lod_detail_q this frame's (only so without lod_auto:
-    // its in-view hold reads them)
+    // would come out far again, state 2
     const u8* const lod_st = lev.lod_state.data();
-    const bool lod_skip = (by_error || !lod_auto) && lev.lod_state.size() == lev.lod_groups.size();
+    const bool lod_skip = by_error && lev.lod_state.size() == lev.lod_groups.size();
     const bool cull_check = cull_check_enabled();
     bool lod_check = false;
-    std::vector<u8> chk_lod_q;
     u32 chk_near = 0;
     for (const auto& gcl : lev.lod_clusters) {
       if (lod_skip && !(gcl.flags & CtrLevelData::kClPlain)) {
@@ -12388,17 +12218,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         if (far) {
           u32 g = gcl.first;
           const u32 end = gcl.first + gcl.count;
-          while (g < end && lod_st[g] == 2 && (!lod_auto || lod_q[g] == q_now)) {
+          while (g < end && lod_st[g] == 2) {
             g++;
           }
           if (g == end) {
-            memset(lod_q + gcl.first, q_now, gcl.count);
             m_ph_lod_skipped += gcl.count;
             if (!cull_check) {
               continue;
             }
             lod_check = true;
-            chk_lod_q.assign(lod_q + gcl.first, lod_q + end);
             chk_near = near;
           }
         }
@@ -12501,7 +12329,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                        : !forced ? ctr_pop::kLate : gone ? ctr_pop::kEvict : ctr_pop::kLine,
               lg.bsphere, forced ? "morph group far" : "morph group near", (u32)g);
         }
-        lod_q[g] = q_now;
         st = (u8)((st & 4) | 2 | (v < 2 ? 1 : 0) | (v == 1 ? 8 : 0) | (forced ? 16 : 0));
         near += v < 2;
         continue;
@@ -12511,39 +12338,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       const float sw = by_error ? lev.lod_switch_error(g) : lg.dist;
       const float f = (st & 1) ? 1.1f : 1.f;
       auto near_at = [&](float kk) {
-        // (AI-assisted, autodetail) at another factor the PS2 floor and the title's least distance
-        // stay where they are (lod_switch_error has this frame's factor in them)
-        float swk = by_error && kk != k
-                        ? std::max(std::max(lev.lod_error[g] * kk, lg.dist * lev.lod_floor_k * k),
-                                   lev.lod_min_e * k)
-                        : sw * kk;
-        if (by_error && kk != k && kk < k_cfg) {
-          swk = ctr_detail::ring_limit(
-              swk,
-              std::max(std::max(lev.lod_error[g] * k_cfg, lg.dist * lev.lod_floor_k * k),
-                       lev.lod_min_e * k),
-              ctr_detail::kNearRingMeters * 4096.f);
-        }
-        const float lim = swk * f + lg.bsphere[3];
+        const float lim = sw * kk * f + lg.bsphere[3];
         return kk > 0 && d2 < lim * lim;
       };
       bool n = near_at(k);
-      // (AI-assisted, title-popin) no switch in view because auto_detail moved: a group in view
-      // keeps the factor it was decided with while the two would choose differently (except a
-      // GPU about to miss frames, for the far version)
-      bool held = false;
-      bool held_was = false;  // (ctr_pop: the controller's factor decides otherwise than the old)
-      if (lod_auto && (st & 2) && lod_q[g] != q_now && lod_q[g] != 0xff) {
-        const bool n_old = near_at(k_at(detail_at(lod_q[g])));
-        held_was = n_old != n;
-        if (n_old != n && sphere_in_view(cam, lg.bsphere)) {
-          n = n_old;
-          held = true;
-        }
-      }
-      if (!held) {
-        lod_q[g] = q_now;
-      }
       // (AI-assisted, streaming) c3l v19: the near version only while every near chunk holding it
       // is there and within its distance; else the far version (data late: statistics). A group
       // drawn far in view for want of its data (bit 4: held) keeps its far version while in view
@@ -12680,7 +12478,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         pop(far_flip ? ctr_pop::kFar
             : forced ? (gone ? ctr_pop::kEvict : ctr_pop::kLine)
                      : (st & 16) ? ctr_pop::kLate
-                                 : held_was ? ctr_pop::kCtl : ctr_pop::kLod,
+                                 : ctr_pop::kLod,
             lg.bsphere, n ? "tie group near" : "tie group far", (u32)g);
       }
       st = (u8)((keep_far ? 4 : 0) | 2 | (n ? 1 : 0) | (forced ? 16 : 0));
@@ -12688,8 +12486,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
       if (lod_check) {
         lod_check = false;
-        bool ok = chk_near == near &&
-                  memcmp(chk_lod_q.data(), lod_q + gcl.first, gcl.count) == 0;
+        bool ok = chk_near == near;
         for (u32 g = gcl.first; g < gcl.first + gcl.count; g++) {
           ok = ok && lod_st[g] == 2;
         }
@@ -13080,7 +12877,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         float near_lim = banded ? std::min(lev.chunk_band_x[ci] * shrub_k * det, lim)
                                 : lim * kShrubNearK;
         // (Jak 1's shrub lever: bands that start beyond ring 0 drawn nearer)
-        const float shrub_lever = t_pos < 0 ? knobs.shrub_far : 1.f;
+        const float shrub_lever = dfl.shrub_far;
         float lim_c = lim;
         ctr_detail::shrub_band(&near_lim, &lim_c, shrub_lever, ring0);
         const float dcx = ch.bsphere[0] - cam.trans[0], dcy = ch.bsphere[1] - cam.trans[1],
@@ -13359,7 +13156,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // (AI-assisted, j2cull) the chunks cluster by cluster (CtrLevelData::CullCluster). A cluster
   // beyond the distance limit of each of its members (their largest limit this frame, by kind: the
   // limits decide_dist works out), whose members were all beyond theirs last frame (state bit 2
-  // clear, decided with this auto_detail position, no dormant hold; tiers 1 / 2: the coarse version
+  // clear, decided before, no dormant hold; tiers 1 / 2: the coarse version
   // chosen and the cell beyond 0.9 x lod_distance) needs none of their decisions: each would come
   // out "beyond, as before" (not drawn, nothing changed) and only a vista source to mark. Its test
   // has margins for float rounding: where it can't tell, the members are decided one by one.
@@ -13431,7 +13228,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // last frame's decisions: all beyond
     for (u32 ci = cl.first; ci < cl.first + cl.count; ci++) {
       const u8 st = chunk_state[ci];
-      if ((st & 4) || chunk_q[ci] != q_now || (hold_since && hold_since[ci])) {
+      if ((st & 4) || !(st & kChunkDecided) || (hold_since && hold_since[ci])) {
         return false;
       }
       if (!far_tfrag && (chunks[ci].lod_tier == 1 || chunks[ci].lod_tier == 2) && (st & 3) != 2) {
@@ -13472,9 +13269,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       lev.hole_since[ci] = f;
       if (pop_log_on()) {
         const float x = ch.bsphere[0] - cx, y = ch.bsphere[1] - cy, z = ch.bsphere[2] - cz;
-        lg::info("[hole] f={} {} ci={} kind={} tier={} {} d={:.0f} r={:.0f} x={:.2f}", rs.frame_idx,
-                 lev.name, ci, ch.kind, ch.lod_tier, miss ? "no mesh" : "relief limit",
-                 std::sqrt(x * x + y * y + z * z) / 4096.f, ch.bsphere[3] / 4096.f, t_pos);
+        lg::info("[hole] f={} {} ci={} kind={} tier={} {} d={:.0f} r={:.0f}", rs.frame_idx,
+                 lev.name, ci, ch.kind, ch.lod_tier, miss ? "no mesh" : "floor limit",
+                 std::sqrt(x * x + y * y + z * z) / 4096.f, ch.bsphere[3] / 4096.f);
       }
     }
     lev.hole_last[ci] = f;
@@ -13528,7 +13325,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // versions of a cell share lod_center and see the same decisions: exactly one is drawn.
     u8& state = chunk_state[ci];
     bool lod_ok = true;
-    int tier_q = -1;  // (AI-assisted, autodetail) the position a tier decision held in view keeps
     if (!far_tfrag && (ch.lod_tier == 1 || ch.lod_tier == 2)) {
       // detailed version up close, coarse version further away
       const u8 last = state & 3;
@@ -13552,24 +13348,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         return nr;
       };
       bool near = near_with(lod_dist);
-      // (AI-assisted, autodetail) no tier switch in view because the relief moved lod_distance
-      // (except a GPU about to miss frames, for the coarse version)
-      const u8 cq = chunk_q[ci];
-      if (auto_detail && last && cq != q_now && cq != 0xff) {
-        const float ld_old = relief.at(detail_at(cq)).lod_distance * 4096.f;
-        if (ld_old != lod_dist) {
-          const bool near_old = near_with(ld_old);
-          if (near_old != near) {
-            if (in_view < 0) {
-              in_view = sphere_in_view(cam, &lev.lod_cell_sphere[ci * 4]);
-            }
-            if (in_view) {
-              near = near_old;
-              tier_q = cq;
-            }
-          }
-        }
-      }
 #ifndef __3DS__
       // host A/B, env CTR_TIER_AB: on odd frames every cell's coarse tier
       static const bool tier_ab = getenv("CTR_TIER_AB") != nullptr;
@@ -13589,9 +13367,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // (AI-assisted) lowres_vista: the low resolution tfrag is far scenery (vista_distance)
     const bool vista_chunk = lowres_vista && ch.lod_tier == 3;
     const bool dist_ok = decide_dist(ci, ch, state, vista_chunk);
-    if (tier_q >= 0) {
-      chunk_q[ci] = (u8)tier_q;
-    }
     if (dist_ok && !m_copy_fade.empty() && m_copy_fade[ci] > 0 &&
         (m_copy_fade[ci] < kRunOpaque || m_tie_fade[ci] < kRunOpaque)) {
       vista_source(ci);  // (its vista copy with the chunk, in the band)
@@ -14798,10 +14573,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // distance per kind tfrag, tie, shrub; tie LOD switches near / far; groups drawn far for late
     // data, kept far once it came; time of day groups rewritten; near chunks taken since the last
     // draw)
-    lg::info("[pop] f={} {} cam={:.1f},{:.1f},{:.1f} vis={} far={} t={:.2f} in={}/{}/{} out={}/{}/{} "
+    lg::info("[pop] f={} {} cam={:.1f},{:.1f},{:.1f} vis={} far={} in={}/{}/{} out={}/{}/{} "
              "lod+={} lod-={} late={} held={} tod={} taken={} r0late={} black={}",
              rs.frame_idx, lev.name, cam.trans.x() / 4096.f, cam.trans.y() / 4096.f,
-             cam.trans.z() / 4096.f, m_visible.size(), far_level ? 1 : 0, g_detail_t,
+             cam.trans.z() / 4096.f, m_visible.size(), far_level ? 1 : 0,
              g_pop.chunk_in[1], g_pop.chunk_in[2], g_pop.chunk_in[3], g_pop.chunk_out[1],
              g_pop.chunk_out[2], g_pop.chunk_out[3], g_pop.lod_up, g_pop.lod_down, late_groups,
              held_groups, pop_tod, g_pop.taken, ring0_late, g_screen_black ? 1 : 0);

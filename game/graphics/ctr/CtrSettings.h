@@ -38,25 +38,12 @@ struct CtrSettings {
   // converter's distances of small and medium ties (100 / 300 m) times this
   float shrub_distance = 50.f;
   // 0 (config "none"): ties without a distance limit, as the PS2 (geometry 3 beyond the far-plane).
-  // 1.5: small ties to 150 m, medium to 450 m (the baseline auto_detail rarely needs to leave)
+  // 1.5: small ties to 150 m, medium to 450 m. The fixed detail floor (CtrDetail.h) cuts further.
   float tie_distance_scale = 1.5f;
-  // (AI-assisted) auto_detail: those two grow toward shrub_distance_max / tie_distance_scale_max
-  // while the GPU has time to spare (its time per frame under auto_detail_gpu_ms) and go back
-  // when it hasn't, so the distances are as far as each place allows (Precursor Basin has room,
-  // Rock Village hardly any). Needs frame_pacing = steady (the GPU time comes from its fence).
-  bool auto_detail = true;
-  // auto_detail = fixed (default): the far ring always at the relief's floor (CtrAutoDetail.h),
-  // nothing moves with the load; on: the GPU-time controller; off: the config's distances
-  bool auto_detail_fixed = true;
-  float shrub_distance_max = 120.f;
-  float tie_distance_scale_max = 3.f;
   // (AI-assisted) .c3l v14 (c3l::kShrubPs2DistVersion): each shrub is drawn up to its prototype's
   // PS2 distance (the middle of its PS2 fade: the fort wall ropes 155 m, grass 60-75 m) times
-  // shrub_scale (growing toward shrub_scale_max with auto_detail), times detail_scale.
-  // shrub_distance / shrub_distance_max are for older files.
+  // shrub_scale, times detail_scale. shrub_distance is for older files.
   float shrub_scale = 1.f;
-  float shrub_scale_max = 1.f;
-  float auto_detail_gpu_ms = 27.f;
   // renderers
   bool merc = true;
   bool sprites = true;

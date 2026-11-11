@@ -654,8 +654,7 @@ only where its error is at most tie_lod_px pixels. (AI-assisted, lodnear, Oct 18
 than the PS2's: near at least within the group's `dist` (the PS2 far-plane) x detail_scale, so the
 switch distance is max(error x focal / tie_lod_px, far-plane) x detail_scale + radius (see
 performance.md "Coarse ties close to the camera"). Without them (older files), near within dist x
-detail_scale (x 0.5..1 with auto_detail: half while the GPU is busy; a group in view keeps the factor
-it was decided with until it is out of view). 10% hysteresis; every group every frame, so turning
+detail_scale x 0.5 (the fixed detail floor). 10% hysteresis; every group every frame, so turning
 the camera switches nothing. Why: the PS2 morphs geometry 2 into 3 up to the far-plane, the 3DS
 switched 0 against 3 there: village1's shape errors at the far-plane are 3.3 px median, 8.3 px for
 one group in ten, 19 px at most (the title camera: up to 19.7 px pops, palms and huts).
@@ -753,7 +752,7 @@ geometry 0 only, unmorphed).
   that); per draw the rows its vertices use (draw rows).
 - **Runtime.** A morph group is drawn with its near version while the distance to its sphere is
   under the mid-plane x k, its mid version under the far-plane x k, else its far version (k:
-  detail_scale; auto_detail's relief never pulls them in: geometry 3's colors can't carry
+  detail_scale; the detail floor never pulls them in: geometry 3's colors can't carry
   geometry 0's lighting, and nearer than the far-plane the switch showed as the light changing),
   no hysteresis. On the title flight the far version not nearer than kTitleLodMin (100 m):
   geometry 3's colors are the converter's fit (lod-light), not the PS2's color morph, and

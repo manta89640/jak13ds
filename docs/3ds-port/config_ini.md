@@ -42,11 +42,11 @@ ocean = full
 
 - **normal**: everything that is finished and works on the New 3DS (the default), with fixed
   detail cuts for a steady 30 fps: shrub fade bands beyond 40 m at half their distance, tie objects
-  beyond 150 m drawn by their simpler vista copies (both games; `auto_detail = fixed`); Jak II
+  beyond 150 m drawn by their simpler vista copies (both games; the fixed detail floor); Jak II
   also half the city's civilians and civilian vehicles (`traffic_density = 0.5`), 70% of the
   particles (`particle_density = 0.7`) and shadows at the PS2's distances (`shadows = full`).
-- **full**: the most detail, as the earlier builds drew at their best: `auto_detail = off`,
-  `traffic_density = 1`, `particle_density = 1`, `shadows = all` (every shadow at any distance).
+- **full**: `traffic_density = 1`, `particle_density = 1`, `shadows = all` (every shadow at any
+  distance).
   Slower: Jak II's Haven City runs under 30 fps with it.
 - **fast** (AI-assisted, Nov 11; not yet run on a console): normal plus Jak II's cuts of the game
   thread, which change what you see a little: far city people animate at 15 or 10 frames a second

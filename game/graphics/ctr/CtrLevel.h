@@ -227,14 +227,14 @@ struct CtrLevelData {
     }
     const float e = std::max(std::max(lod_error[g], lod_groups[g].dist * lod_floor_k), lod_min_e);
     if (lod_ring_e > 0) {
-      // the relief's factor: within ring 0 the config's switch
+      // the floor's factor: within ring 0 the config's switch
       const float e_cfg = std::max(std::max(lod_error[g] * lod_cfg_ratio,
                                             lod_groups[g].dist * lod_floor_k), lod_min_e);
       return std::max(e, std::min(e_cfg, lod_ring_e));
     }
     return e;
   }
-  // the relief moved the factor (else 0): ring 0 in the units of lod_switch_error, and the
+  // the floor moved the factor (else 0): ring 0 in the units of lod_switch_error, and the
   // config's factor / this one
   float lod_ring_e = 0.f, lod_cfg_ratio = 1.f;
   float lod_bound_e() const { return std::max(lod_min_e, lod_ring_e); }
@@ -303,15 +303,9 @@ struct CtrLevelData {
   u64 repair_retry_frame = 0;  // after a repair that left parts out: not before this frame
   u8 repair_failures = 0;      // repairs in a row that made nothing (longer waits)
   // (AI-assisted) last frame's decisions, for hysteresis (CtrTfragRenderer::draw_level): per chunk
-  // bits 0-1 detailed/coarse (1 near, 2 far, 0 not decided yet), bit 2 within its draw distance
+  // bits 0-1 detailed/coarse (1 near, 2 far, 0 not decided yet), bit 2 within its draw distance,
+  // bit 3 shrub runs faded, bit 4 its distance decided at least once
   std::vector<u8> chunk_state;
-  // (AI-assisted, title-popin) the auto_detail position (ctr_level_detail x kDetailQ) each chunk's
-  // distance and each tie LOD group's version were last decided with (0xff: none yet). A chunk or
-  // group in view keeps deciding with it, so a change of the auto_detail distances never makes
-  // something on screen appear, vanish or change its version; it takes the new distances when it
-  // is out of view, or when the old and the new decide alike.
-  std::vector<u8> chunk_detail_q;
-  std::vector<u8> lod_detail_q;
   std::vector<u16> lod_switch_at;  // per tie LOD group: the frame (u16) it last switched version
   // (AI-assisted, title-popin) per chunk of tiers 1/2: a sphere around its lod_center holding both
   // versions of the cell (the same for both: their in-view tests agree), x y z r
@@ -1321,7 +1315,7 @@ class CtrLevels {
     float e;
   };
   // have: the resident ones nothing draws now; want: the absent ones
-  void need_scan(const float pos[kNeedPos][3], int np, float t, u64 frame);
+  void need_scan(const float pos[kNeedPos][3], int np, u64 frame);
   void need_free(CtrLevelData& lev, u32 ci);
   // a load out of memory: the resident ones beyond their reach, the farthest first, until want
   // bytes are freed (0: all of them); returns the bytes freed
@@ -1337,11 +1331,8 @@ class CtrLevels {
   u64 m_need_deficit = 0;
   // the stream arena's segment a near chunk needed now had no linear memory for, and its frame
   u64 m_stream_claim = 0, m_stream_claim_frame = 0;
-  // the auto_detail position the linear memory allows (1: no limit), the passes in a row short of
-  // room / with room to spare, the frame it last moved, the last shortage line
-  float m_need_cap = 1.f;
-  u32 m_need_short = 0, m_need_ok = 0;
-  u64 m_need_cap_frame = 0;
+  // the passes in a row short of room, the last shortage line
+  u32 m_need_short = 0;
   double m_need_log_ms = 0;
   // Jak 1 title screen (CtrLevel.cpp "Title screen"): the title level is wanted (set_wanted; the
   // loader reads it), the camera left the attract path this title, the per-frame residency update
@@ -1434,13 +1425,6 @@ struct CtrBackgroundCamera {
 static_assert(sizeof(CtrBackgroundCamera) == 16 * 23);
 
 /*! TFRAG_LEVEL0/1 buckets: draws the whole level background (tfrag + tie) from the .c3l. */
-/*! (AI-assisted) config.ini auto_detail: where the shrub / tie distances are between their near
- * (0) and far (1) values (render thread). */
-void ctr_level_set_detail(float t, bool snap = false);
-/*! Jak II: the highest auto_detail position the linear memory allows (1: no limit; render thread:
- * CtrLevels::need_update sets it, CtrRenderer's controller stays under it). */
-void ctr_level_set_mem_cap(float cap);
-float ctr_level_mem_cap();
 // host A/B, env CTR_ARRIVAL_OFF: the arrival changes off (load order, faster reading, holds)
 bool ctr_arrival_off();
 #ifndef __3DS__
@@ -1455,9 +1439,7 @@ extern std::mutex g_host_gpu_mutex;
  * kept hidden or far "in view" for late data then (nobody saw it missing): dormant chunks read
  * back and near chunks that came are drawn at once (CtrTfragRenderer::draw_level). */
 void ctr_level_set_screen_black(bool black);
-float ctr_level_detail();
-/*! (AI-assisted) render thread: the time of day blend / rewrite ms since the last call (taken out
- * of auto_detail's build time). */
+/*! (AI-assisted) render thread: the time of day blend / rewrite ms since the last call. */
 double ctr_level_tod_take_ms();
 
 class CtrTfragRenderer : public CtrBucketRenderer {

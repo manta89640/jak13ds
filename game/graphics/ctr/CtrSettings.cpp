@@ -17,7 +17,7 @@
 #include "common/log/log.h"
 #include "common/util/FileUtil.h"
 
-#include "game/graphics/ctr/CtrAutoDetail.h"
+#include "game/graphics/ctr/CtrDetail.h"
 #include "game/graphics/ctr/ctr_config_presets.h"
 #include "game/runtime.h"
 #include "game/graphics/ctr/ctr_gpu.h"
@@ -93,19 +93,8 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.shrub_distance = std::max(0.f, f);
     } else if (key == "tie_distance_scale") {
       s.tie_distance_scale = v == "none" ? 0.f : std::max(kMinScale, f);
-    } else if (key == "auto_detail") {
-      s.auto_detail = v == "fixed" || parse_bool(v);
-      s.auto_detail_fixed = v == "fixed";
     } else if (key == "shrub_scale") {
       s.shrub_scale = std::max(kMinScale, f);  // (AI-assisted)
-    } else if (key == "shrub_scale_max") {
-      s.shrub_scale_max = std::max(kMinScale, f);  // (AI-assisted)
-    } else if (key == "shrub_distance_max") {
-      s.shrub_distance_max = std::max(0.f, f);
-    } else if (key == "tie_distance_scale_max") {
-      s.tie_distance_scale_max = std::max(kMinScale, f);
-    } else if (key == "auto_detail_gpu_ms") {
-      s.auto_detail_gpu_ms = std::clamp(f, 10.f, 33.f);
     } else if (key == "merc") {
       s.merc = parse_bool(v);
     } else if (key == "sprites") {
@@ -503,22 +492,27 @@ CtrSettings load() {
 }  // namespace
 
 std::string CtrSettings::summary() const {
-  // (AI-assisted, autodetail) the relief's ranges (CtrAutoDetail.h)
-  auto auto_detail_relief_text = [&]() {
-    ctr_detail::Relief rl;
-    rl.init(tie_lod_px, lod_distance, tie_distance_scale, draw_distance,
-            g_game_version == GameVersion::Jak1, g_game_version == GameVersion::Jak2);
-    std::string r;
-    for (ctr_detail::Knob k : ctr_detail::kOrder) {
-      if (rl.stage[k] < 0) {
-        continue;
-      }
-      r += r.empty() ? (auto_detail_fixed ? "; fixed at " : "; over it toward ") : ", ";
-      r += k == ctr_detail::kTieLodPx       ? fmt::format("tie_lod_px {:.0f}", rl.to[k])
-           : k == ctr_detail::kLodDistance  ? fmt::format("lod {:.0f}m", rl.to[k])
-           : k == ctr_detail::kShrubFar     ? fmt::format("shrub bands x{:.1f}", rl.to[k])
-           : k == ctr_detail::kTieDistance  ? fmt::format("ties x{:.1f}", rl.to[k])
-                                            : fmt::format("tie vista copies from {:.0f}m", rl.to[k]);
+  // the fixed detail floor (CtrDetail.h): what it changes from the config
+  auto floor_text = [&]() {
+    const ctr_detail::Floor fl = ctr_detail::floor_of(
+        tie_lod_px, lod_distance, tie_distance_scale, draw_distance,
+        g_game_version == GameVersion::Jak1, g_game_version == GameVersion::Jak2);
+    if (!fl.on) {
+      return std::string("no floor");
+    }
+    std::string r = fmt::format("fixed floor: shrub bands x{:.1f} beyond {:.0f}m", fl.shrub_far,
+                                ctr_detail::kNearRingMeters);
+    if (fl.tie_far > 0) {
+      r += fmt::format(", tie vista copies from {:.0f}m", fl.tie_far);
+    }
+    if (fl.tie_lod_px != tie_lod_px) {
+      r += fmt::format(", tie_lod_px {:.0f}", fl.tie_lod_px);
+    }
+    if (fl.lod_distance != lod_distance) {
+      r += fmt::format(", lod {:.0f}m", fl.lod_distance);
+    }
+    if (fl.tie_distance_scale != tie_distance_scale) {
+      r += fmt::format(", ties x{:.1f}", fl.tie_distance_scale);
     }
     return r;
   };
@@ -535,20 +529,9 @@ std::string CtrSettings::summary() const {
       "color_stream {}"
       "{}{}{}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale,
-      // (AI-assisted) with auto_detail: the range the distances move in
-      auto_detail_fixed && auto_detail
-          ? fmt::format("{:.0f}m (auto_detail fixed{})", shrub_distance, auto_detail_relief_text())
-      : auto_detail ? fmt::format("{:.0f}-{:.0f}m (auto, GPU under {:.0f} ms{})", shrub_distance,
-                                  std::max(shrub_distance, shrub_distance_max), auto_detail_gpu_ms,
-                                  auto_detail_relief_text())
-                    : fmt::format("{:.0f}m", shrub_distance),
-      auto_detail && !auto_detail_fixed && shrub_scale_max > shrub_scale
-          ? fmt::format("{:.2f}-{:.2f}", shrub_scale, shrub_scale_max)
-          : fmt::format("{:.2f}", shrub_scale),
-      !(tie_distance_scale > 0) ? std::string("none")
-      : auto_detail && !auto_detail_fixed ? fmt::format("{:.1f}-{:.1f}", tie_distance_scale,
-                                  std::max(tie_distance_scale, tie_distance_scale_max))
-                    : fmt::format("{:.1f}", tie_distance_scale),
+      fmt::format("{:.0f}m ({})", shrub_distance, floor_text()),
+      fmt::format("{:.2f}", shrub_scale),
+      !(tie_distance_scale > 0) ? std::string("none") : fmt::format("{:.1f}", tie_distance_scale),
       fog ? "on" : "off",
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, pipeline ? "on" : "off",
       frame_overlap2 == 2 ? "on" : (frame_overlap2 == 1 ? "clean" : "off"), !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),

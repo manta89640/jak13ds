@@ -13,6 +13,8 @@
  * rasterizer on PC for testing: gk --ctr-gfx).
  */
 
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -20,7 +22,6 @@
 #include "common/common_types.h"
 #include "common/dma/dma_chain_read.h"
 
-#include "game/graphics/ctr/CtrAutoDetail.h"
 #include "game/graphics/gfx.h"
 
 /*!
@@ -195,27 +196,7 @@ class CtrRenderer {
 
   // config.ini gpu_profile: modes 1.. leave one kind of renderer out (by name, see kProfileModes)
   void profile_frame(double gpu_draw_ms);
-  // (AI-assisted) config.ini auto_detail: shrub / tie distances from the GPU time per frame
-  void auto_detail_frame(float gpu_busy_ms, float gpu_active_ms, int gpu_busy_frames,
-                         double build_ms, double build_tod_ms);
-  struct AutoDetail {
-    u64 load_frame = 0;        // (AI-assisted, levellod) the last frame of a level load
-    bool init = false;
-    bool area = false;  // a new level is played (note_levels): the controller's ceiling lifts
-    ctr_detail::Relief relief;
-    ctr_detail::Controller ctl;
-    ctr_detail::KnobTime time;
-    double last_ms = 0;
-    double above_ms = 0;  // since the last log: x above the config (the far ring's extra detail)
-    bool title = false;  // the title screen at the last frame (its relief ends with it)
-    // Jak II's relief while x is under 0 (the log's lines): since when, how deep, levers named
-    bool relief_on = false;
-    double relief_t0 = 0;
-    float relief_deep = 0;
-    int relief_logged = 0;
-  } m_auto;
   bool m_menu_page_done = false;  // CtrVram::prewarm_page of the start menu's page
-  bool m_title_loaded = false;  // (AI-assisted, levellod) note_levels: "title" is loaded
   bool profile_skips(const std::string& name) const;
   // (AI-assisted) gpu_profile = ab: the A/B windows (kAbSwitches in CtrRenderer.cpp)
   void ab_frame(float gpu_busy_ms, int gpu_busy_frames, int triangles, int draws);

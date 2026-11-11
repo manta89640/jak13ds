@@ -476,8 +476,9 @@ needed 5.6 MB free to come back and stayed away while two districts were loaded.
 
 **Managed chunks**: shrub and tie chunks of tier 0 with a draw distance, not near chunks
 (`dist_frees`). Each is resident (`chunk_dormant` 0, a mesh), absent (`kDistFreed`) or being read
-(`kDistReading`). Its **reach** is its draw limit at the auto_detail position the memory allows
-(below), times 1.1 (the hysteresis a shrub goes by, the fade band of a tie), plus its radius; its
+(`kDistReading`). Its **reach** is its draw limit with ties x3 and v14 shrubs x1 (older files 120 m;
+`kNeedTieScale` ...: the old auto_detail range's far end, never less than drawn), times 1.1 (the
+hysteresis a shrub goes by, the fade band of a tie), plus its radius; its
 **excess** `e` is how far the nearest position is beyond that reach. The positions: the camera
 now, 1 s and 2 s ahead at its speed, Jak, and while the game is black the continue point's
 camera. A dormant level's ties that the visibility string hides have a reach of at most 45 m; a
@@ -515,12 +516,7 @@ what a continue or a cut needs beyond that is read in 2 MB jobs under the render
 
 **More needed than fits.** When a chunk within its draw distance has no room after step 2 (or
 got it only by freeing within the 45 m margin) for 4 passes in a row, or a claim stays uncovered
-for 16, the auto_detail position is capped an eighth lower (`ctr_level_set_mem_cap`;
-`CtrRenderer::auto_detail_frame` holds the controller's ceiling there). The tie distances come in
-between x3.0 and x1.5 of the PS2's and the shrubs between 1.0 and 0.8 of theirs, by the
-controller's slew and fades; what is in view keeps its distance until it is out of view (the
-held auto_detail position per chunk). The cap goes up a step when 3 MB stays spare for 10 s, not
-within 30 s of its last move. Log: `[ctr] linear memory short: N KB ... auto detail X now`.
+for 16, it is logged (at most every 10 s): `[ctr] linear memory short: N KB ...`.
 
 **Time of day.** A chunk left out of the load keeps room for its groups (one per visibility id:
 `tod_reserve_groups`), made from its mesh's indices when it is first scanned
