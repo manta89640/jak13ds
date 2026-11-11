@@ -662,6 +662,33 @@ bool mod_covers_all(const CtrMercModelData& model) {
   }
   return model.vertex_count && n == model.vertex_count;
 }
+
+// Render thread, per model with rewritten vertices (for the loaded levels' generation): each mod
+// effect's last unpacked vertices (ModV), written again when the game doesn't unpack the effect,
+// so the mesh's buffer taken this frame never keeps an older update of it
+struct VtxModel {
+  const CtrMercModelData* model = nullptr;
+  std::vector<std::vector<u8>> mod_last;
+};
+struct VtxRegistry {
+  u32 gen = ~0u;
+  std::vector<VtxModel> models;
+};
+VtxRegistry g_vtx;
+VtxModel& vtx_model(const CtrMercModelData& model, u32 gen) {
+  if (g_vtx.gen != gen) {
+    g_vtx.models.clear();
+    g_vtx.gen = gen;
+  }
+  for (auto& m : g_vtx.models) {
+    if (m.model == &model) {
+      return m;
+    }
+  }
+  auto& m = g_vtx.models.emplace_back();
+  m.model = &model;
+  return m;
+}
 }  // namespace
 
 void CtrMercRenderer::gather_mod(const u8* ee_mem,
@@ -756,9 +783,25 @@ void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos, float
   if (!verts) {
     return;
   }
+  VtxModel& vm = vtx_model(model, m_levels->set_generation());
+  vm.mod_last.resize(model.mod.size());
   const u8* p = m_mod_bytes.data() + pos;
   const u8* end = m_mod_bytes.data() + m_mod_bytes.size();
   u32 lo = UINT32_MAX, hi = 0;
+  // the effect's vertices to the model's (in vertex order)
+  auto write = [&](const CtrMercModEffect& e, const ModV* src) {
+    for (const auto& d : e.dests) {
+      u8* dst = verts + sizeof(c3l::MercVertex) * d.vertex;
+      const ModV& v = src[d.src];
+      memcpy(dst, v.pos, 6);
+      memcpy(dst + 12, v.st, 4);
+      memcpy(dst + 20, v.nrm, 4);  // normal + pad
+    }
+    if (!e.dests.empty()) {
+      lo = std::min<u32>(lo, e.dests.front().vertex);
+      hi = std::max<u32>(hi, e.dests.back().vertex);
+    }
+  };
   for (const auto& e : model.mod) {
     if (p + 4 > end) {
       return;
@@ -766,12 +809,16 @@ void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos, float
     u32 total;
     memcpy(&total, p, 4);
     p += 4;
+    std::vector<u8>& last = vm.mod_last[&e - model.mod.data()];
     if (total != e.vidx_end) {
-      // not unpacked (or not the fragments we expect): the vertices stay as they are, and the
-      // rest of the copy can't be followed
+      // not unpacked (or not the fragments we expect): its last unpacked vertices again (this
+      // buffer may hold an older update), and the rest of the copy can't be followed
       m_mod_bad++;
       if (total) {
         return;
+      }
+      if (last.size() == (size_t)e.vidx_end * sizeof(ModV)) {
+        write(e, (const ModV*)last.data());
       }
       continue;
     }
@@ -857,17 +904,8 @@ void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos, float
                "normal {} (1/127); ripple y x{}, normal x/z x{}",
                model.name, e.effect, total, e.dests.size(), dxz, dy, model.scale, dst, dn, ys, ns);
     }
-    for (const auto& d : e.dests) {
-      u8* dst = verts + sizeof(c3l::MercVertex) * d.vertex;
-      const ModV& s = src[d.src];
-      memcpy(dst, s.pos, 6);
-      memcpy(dst + 12, s.st, 4);
-      memcpy(dst + 20, s.nrm, 4);  // normal + pad
-    }
-    if (!e.dests.empty()) {
-      lo = std::min<u32>(lo, e.dests.front().vertex);
-      hi = std::max<u32>(hi, e.dests.back().vertex);
-    }
+    last.assign((const u8*)src, (const u8*)(src + total));
+    write(e, src);
     m_mod_effects++;
     m_mod_verts += total;
   }
