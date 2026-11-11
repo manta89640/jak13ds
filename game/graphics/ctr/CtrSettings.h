@@ -149,10 +149,6 @@ struct CtrSettings {
   // Mip levels of the level textures (c3l v8): 0 off, 1 nearest level (default: one texel fetch),
   // 2 trilinear (blends two levels, as the PC).
   int mipmaps = 1;
-  // (AI-assisted) the LOD bias of mipmapped level / model textures (+0.5, +1: the next smaller
-  // level sooner, blurrier, fewer texels read); 0 = none. (AI-assisted, fidelity2) +0.25 by default
-  // (+0.5 looked too blurry to the user in Azahar; safe preset: 0)
-  float mip_bias = 0.0f;  // (AI-assisted) Oct 29: 0 (the user's pick from A/B shots: 0.25 looked softer up close)
   // (AI-assisted) merc bone rows uploaded as float24 instead of float32 (a quarter fewer uniform
   // words; the GPU computes in float24 either way). On: Jak and Daxter identical in Azahar, the
   // float24 uniform path (raw_unif, raw_pack_f24) already draws the level meshes on hardware

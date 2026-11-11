@@ -2864,15 +2864,6 @@ void ctr_gpu_set_tex_cache_clear(int mode) {
   s_tex_clear_mode = mode ? 1 : 0;
 }
 
-/* (AI-assisted) config.ini mip_bias: GPUREG_TEXUNITn_LOD bits 0-12 (fixed 1.4.8) of mipmapped
- * textures, as C3D_TexSetLodBias */
-static u16 s_lod_bias = 0;
-void ctr_gpu_set_mip_bias(float bias) {
-  int b = (int)(bias * 256.0f);
-  b = b < -0x1000 ? -0x1000 : (b > 0xFFF ? 0xFFF : b);
-  s_lod_bias = (u16)(b & 0x1FFF);
-}
-
 /* (AI-assisted) config.ini skin_rows_f24 */
 static int s_skin_f24 = 0;
 /* (AI-assisted) config.ini skin_clip_f24: merc clip matrix and lights as float24 too */
@@ -5564,10 +5555,8 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
       param |= GPU_TEXTURE_MIP_FILTER(GPU_LINEAR);
     }
   }
-  /* (AI-assisted) mip_bias: only with mip levels (0 = what every texture has) */
-  const u16 lod_bias = max_level ? s_lod_bias : 0;
   if (g.bound_tex == tex && g.bound_data == tex->data && g.bound_param == param &&
-      tex->maxLevel == max_level && tex->lodBias == lod_bias) {
+      tex->maxLevel == max_level) {
     return;
   }
   /* (AI-assisted) the same texels as the unit has (only the filter, wrap or mip settings change):
@@ -5575,7 +5564,6 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
   const int same_texels = g.bound_tex == tex && g.bound_data == tex->data;
   tex->param = param;
   tex->maxLevel = max_level;
-  tex->lodBias = lod_bias;
   if (raw) {
     /* (AI-assisted) what C3Di_SetTex and citro3d's texture unit update write: the unit's
      * registers, the unit on, then its cache cleared; the context gets the texture (invariant) */

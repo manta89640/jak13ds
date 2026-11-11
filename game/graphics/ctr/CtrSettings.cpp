@@ -170,8 +170,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       if (v != "auto") {
         s.vram_textures = parse_bool(v);
       }
-    } else if (key == "mip_bias") {
-      s.mip_bias = std::clamp(f, -4.f, 4.f);  // (AI-assisted)
     } else if (key == "envmap_min_px") {
       s.envmap_min_px = std::clamp(f, 0.f, 400.f);  // (AI-assisted, fidelity2)
     } else if (key == "skin_rows_f24") {
@@ -500,7 +498,7 @@ std::string CtrSettings::summary() const {
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
       "merc {} sprites {} ({}) "
-      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} envmap_min_px {:.0f} skin_rows_f24 {} skin_clip_f24 {} "
+      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} envmap_min_px {:.0f} skin_rows_f24 {} skin_clip_f24 {} "
       "compact_textures {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} particle_fill {} "
       "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} fog_alpha {} tex1_gating {} cmd_dedup {} cull_ties {} cull_merc {} merc_fog {} raw_cmds {} opaque_alpha {} tex_cache_clear {} asm_tex {} asm_mem {} "
       "ocean_tex_half {} fast_clock {} "
@@ -533,7 +531,7 @@ std::string CtrSettings::summary() const {
       shadows == ShadowMode::Full ? "full" : shadows == ShadowMode::Blob ? "blob" : "off",
       shadow_casters,
       rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
-      mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), mip_bias,
+      mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"),
       envmap_min_px,
       skin_rows_f24 ? "on" : "off", skin_clip_f24 ? "on" : "off",
       compact_textures ? "on" : "off",

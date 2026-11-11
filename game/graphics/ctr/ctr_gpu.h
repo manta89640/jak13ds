@@ -407,9 +407,6 @@ int ctr_gpu_top_histogram(unsigned int counts[256]);
  * changes its sampling settings doesn't clear it unless a pool was filled or moved since the last
  * clear; every switch to another texture and the first bind of a frame clear). Any time. */
 void ctr_gpu_set_tex_cache_clear(int mode);
-/* (AI-assisted) config.ini mip_bias: the LOD bias of mipmapped textures (levels, + = a smaller
- * level sooner: blurrier, fewer texels read), -4..4 in 1/256 steps. 0 = none. Any time. */
-void ctr_gpu_set_mip_bias(float bias);
 /* (AI-assisted) config.ini skin_rows_f24: merc bone rows uploaded as float24 (3 words per vector,
  * rounded to nearest; the GPU computes in float24 anyway) instead of float32 (4 words): 216
  * instead of 288 data words per 24-bone palette. Raw draws only. Any time. */
