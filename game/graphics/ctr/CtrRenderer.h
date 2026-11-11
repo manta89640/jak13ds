@@ -103,10 +103,6 @@ class CtrDirectBucketRenderer : public CtrBucketRenderer {
  private:
   // (AI-assisted) sky_last: the sky packet, drawn by the GPU code's sky hook (ctr_gpu_set_sky_hook)
   static void deferred_sky(void* self);
-  // the bucket's packets as last read (m_kept_ok: complete), and whether they drew
-  bool same_as_kept(DmaFollower& dma, const CtrRenderState& rs) const;
-  std::vector<u8> m_kept_bytes;
-  bool m_kept_ok = false, m_kept_drew = false;
   std::unique_ptr<CtrDirect> m_direct;
   class CtrSky* m_sky = nullptr;
   bool m_drew = false;

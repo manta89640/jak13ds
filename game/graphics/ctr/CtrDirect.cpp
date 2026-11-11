@@ -632,9 +632,6 @@ void CtrDirect::update_draw_state() {
   m_skip_prims = false;
   if (m_prim.tme()) {
     const CtrTexture* tex = m_vram->get_texture(m_tex0);
-    if (m_keep) {
-      m_kept_lookups.push_back({m_tex0, tex ? tex->handle : -1});
-    }
     if (!tex || tex->handle < 0) {
       const auto psm = GsTex0(m_tex0).psm();
       m_skip_prims = psm == GsTex0::PSM::PSMT4HH || psm == GsTex0::PSM::PSMT4HL ||
@@ -974,55 +971,12 @@ void CtrDirect::flush() {
   } else {
     ctr_gpu_draw(&m_draw_state, m_verts.data(), (int)m_verts.size());
   }
-  if (m_keep) {
-    m_kept.push_back({m_draw_state, m_quads, (u32)m_kept_verts.size(), (u32)m_verts.size()});
-    m_kept_verts.insert(m_kept_verts.end(), m_verts.begin(), m_verts.end());
-  }
   m_stats.flushes++;
   m_verts.clear();
 }
 
-void CtrDirect::begin_keep() {
-  flush();
-  m_kept.clear();
-  m_kept_verts.clear();
-  m_kept_lookups.clear();
-  m_kept_valid = false;
-  // (the minimap, the menu's screen copy and the env map draw from state outside the packets)
-  m_keep = !m_minimap && !m_envmap && !m_record && g_minimap_rt < 0 && g_menu_screen < 0;
-}
-
-void CtrDirect::end_keep() {
-  flush();
-  m_kept_valid = m_keep;
-  m_keep = false;
-}
-
-bool CtrDirect::draw_kept() {
-  if (!m_kept_valid || m_record || g_minimap_rt >= 0 || g_menu_screen >= 0) {
-    return false;
-  }
-  // the textures the packets named still the ones they were drawn with
-  for (const auto& l : m_kept_lookups) {
-    const CtrTexture* tex = m_vram->get_texture(l.tex0);
-    if ((tex ? tex->handle : -1) != l.handle) {
-      return false;
-    }
-  }
-  for (const auto& b : m_kept) {
-    const ctr_vertex* v = m_kept_verts.data() + b.first;
-    if (b.quads) {
-      ctr_gpu_draw_quads(&b.st, v, (int)b.count / 4);
-    } else {
-      ctr_gpu_draw(&b.st, v, (int)b.count);
-    }
-    m_stats.flushes++;
-  }
-  return true;
-}
-
 void CtrDirect::set_record(bool on) {
-  flush();  // what came before is drawn (or kept) in the mode it came in
+  flush();  // what came before is drawn in the mode it came in
   if (on && !m_record) {
     // a recording no hook replayed (a frame that never ended): not drawn a frame late
     m_rec.clear();
