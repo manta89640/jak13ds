@@ -563,8 +563,6 @@ static int g_color16 = 0;
 static int g_steady_pacing;
 static int pres_init(void);
 
-/* (AI-assisted) config.ini depth16: a 16-bit depth buffer (no stencil: only ocean = waves uses it) */
-static int g_depth16 = 0;
 
 #define TOP_W 240
 #define TOP_H 400
@@ -1245,12 +1243,12 @@ static int vram_bank(const void* p) {
 }
 
 /* The top screen's render target: 240x400, RGBA8 / RGB565 color, D24S8
- * (or depth16's D16) depth. citro3d puts the depth buffer in the other VRAM bank when it fits,
+ * depth. citro3d puts the depth buffer in the other VRAM bank when it fits,
  * else silently in the same one: then color and depth traffic share one bank. (AI-assisted) */
 static C3D_RenderTarget* create_top_target(void) {
   const int w = TOP_W, h = TOP_H;
   C3D_RenderTarget* t = C3D_RenderTargetCreate(w, h, g_color16 ? GPU_RB_RGB565 : GPU_RB_RGBA8,
-                                               g_depth16 ? GPU_RB_DEPTH16 : GPU_RB_DEPTH24_STENCIL8);
+                                               GPU_RB_DEPTH24_STENCIL8);
   if (!t) {
     return NULL;
   }
@@ -3438,19 +3436,18 @@ static void pipeline_frame_begin(u32 clear) {
   C3D_FrameBuf* fb = &g.top->frameBuf;
   u32* color = (u32*)fb->colorBuf;
   u32* depth = (u32*)fb->depthBuf;
-  /* D24S8: 4 bytes (D16: 2); color 4 (RGBA8) or 2 (RGB565) */
+  /* D24S8: 4 bytes; color 4 (RGBA8) or 2 (RGB565) */
   const u32 px = (u32)fb->width * fb->height;
   u32* color_end = (u32*)((uint8_t*)color + px * (g_color16 ? 2 : 4));
   if (s_skip_color_clear) {
     /* (AI-assisted) skip_clear: the depth only (VRAM) */
-    GX_MemoryFill(depth, 0, (u32*)((uint8_t*)depth + px * (g_depth16 ? 2 : 4)),
-                  GX_FILL_TRIGGER | (g_depth16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH), NULL,
+    GX_MemoryFill(depth, 0, (u32*)((uint8_t*)depth + px * 4),
+                  GX_FILL_TRIGGER | GX_FILL_32BIT_DEPTH, NULL,
                   0, NULL, 0);
   } else {
     GX_MemoryFill(color, clear, color_end,
                   GX_FILL_TRIGGER | (g_color16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH), depth,
-                  0, (u32*)((uint8_t*)depth + px * (g_depth16 ? 2 : 4)),
-                  GX_FILL_TRIGGER | (g_depth16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH));
+                  0, (u32*)((uint8_t*)depth + px * 4), GX_FILL_TRIGGER | GX_FILL_32BIT_DEPTH);
   }
   if (s_bd.frame) {
     bd_clear_end(!s_skip_color_clear);
@@ -4807,11 +4804,7 @@ int ctr_gpu_top_histogram(unsigned int counts[256]) {
   return idle;
 }
 
-void ctr_gpu_set_framebuffer(int depth16) {
-  if (!g.ready) {
-    g_depth16 = depth16 ? 1 : 0; /* the render target is made in ctr_gpu_init */
-  }
-}
+
 
 void ctr_gpu_set_proctex(int on) {
   g_proctex = on ? 1 : 0;
@@ -6278,7 +6271,7 @@ typedef struct {
   int mesh;
   uint32_t tint;
   u32 kind;     /* textured | alpha_full << 1 (proctex draws never take the short path) */
-  u32 in[12];   /* the settings the full path reads */
+  u32 in[11];   /* the settings the full path reads */
   u32 tex_config_bit1;
   C3D_TexEnv env0, env1;
   /* (AI-assisted, far-fog) stage 2 and g.ocean_stage2 (merc fog draws: the fog stage) */
@@ -6305,12 +6298,11 @@ static inline void state_inputs(u32* in) {
   in[3] = (u32)s_zdef_valid;
   in[4] = s_zscale0;
   in[5] = s_zoffset0;
-  in[6] = (u32)g_depth16;
-  in[7] = (u32)g.fog_tex_valid;
-  in[8] = g.fog_abgr;
-  in[9] = g.clear_abgr;
-  in[10] = (u32)g_tex1_gating;
-  in[11] = (u32)g_proctex;
+  in[6] = (u32)g.fog_tex_valid;
+  in[7] = g.fog_abgr;
+  in[8] = g.clear_abgr;
+  in[9] = (u32)g_tex1_gating;
+  in[10] = (u32)g_proctex;
 }
 
 /* mesh: 0 = immediate draws, 1 = level mesh, 2 = skinned mesh (tint = constant color stage).
@@ -6349,10 +6341,10 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
       !(st->flags & CTR_STATE_PROCTEX) && g.proc_radial < 0 && g.ocean_stage2 == s_sf.stage2 &&
       mesh != 3 && mesh != 6) {
     const u32 kind = textured0 ? 1u | ((u32)g.textures[stex0].alpha_full << 1) : 0u;
-    u32 in[12];
+    u32 in[11];
     state_inputs(in);
     C3Di_Context* fctx = &__C3D_Context;
-    if (kind == s_sf.kind && words_eq(in, s_sf.in, 12) &&
+    if (kind == s_sf.kind && words_eq(in, s_sf.in, 11) &&
         (fctx->texConfig & BIT(1)) == s_sf.tex_config_bit1 &&
         words_eq(&fctx->texEnv[0], &s_sf.env0, sizeof(C3D_TexEnv) / 4) &&
         words_eq(&fctx->texEnv[1], &s_sf.env1, sizeof(C3D_TexEnv) / 4) &&
@@ -6753,8 +6745,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
    * controlled by the write mask only (clearing the enable bit doesn't stop depth writes on the
    * hardware): no color for NO_COLOR, no alpha for CTR_BLEND_MUL */
   const int shadow_pass =
-      (st->flags & (CTR_STATE_STENCIL_INCR | CTR_STATE_STENCIL_DECR | CTR_STATE_STENCIL_CLEAR)) &&
-      !g_depth16;
+      (st->flags & (CTR_STATE_STENCIL_INCR | CTR_STATE_STENCIL_DECR | CTR_STATE_STENCIL_CLEAR));
   u32 wmask = st->zwrite ? GPU_WRITE_ALL : GPU_WRITE_COLOR;
   if (st->flags & CTR_STATE_NO_COLOR) {
     wmask &= ~(u32)GPU_WRITE_COLOR;
@@ -6781,14 +6772,14 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
                    : GPU_CULL_NONE;
   /* (AI-assisted) the stencil marks (CTR_STATE_STENCIL_*): 1 where a STENCIL_SET draw passed the
    * depth test, STENCIL_OUT draws where it isn't 1. Off: only the enable bit changes. */
-  if ((st->flags & CTR_STATE_STENCIL_SET) && !g_depth16) {
+  if ((st->flags & CTR_STATE_STENCIL_SET)) {
     e.stencilMode = 1u | ((u32)GPU_ALWAYS << 4) | (0xFFu << 8) | (1u << 16) | (0xFFu << 24);
     e.stencilOp = (u32)GPU_STENCIL_KEEP | ((u32)GPU_STENCIL_KEEP << 4) |
                   ((u32)GPU_STENCIL_REPLACE << 8);
-  } else if ((st->flags & CTR_STATE_STENCIL_OUT) && !g_depth16) {
+  } else if ((st->flags & CTR_STATE_STENCIL_OUT)) {
     e.stencilMode = 1u | ((u32)GPU_NOTEQUAL << 4) | (1u << 16) | (0xFFu << 24);
     e.stencilOp = 0;
-  } else if ((st->flags & (CTR_STATE_STENCIL_INCR | CTR_STATE_STENCIL_DECR)) && !g_depth16) {
+  } else if ((st->flags & (CTR_STATE_STENCIL_INCR | CTR_STATE_STENCIL_DECR))) {
     /* (AI-assisted) shadow volumes: + / - 1 where the face passes the depth test, saturating like
      * the PC renderer's GL_INCR / GL_DECR (all front faces are drawn before the back faces, so a
      * pixel ends at max(0, front - back): where the near plane cut a front face away, no shadow
@@ -6797,7 +6788,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     e.stencilOp = (u32)GPU_STENCIL_KEEP | ((u32)GPU_STENCIL_KEEP << 4) |
                   ((u32)((st->flags & CTR_STATE_STENCIL_INCR) ? GPU_STENCIL_INCR : GPU_STENCIL_DECR)
                    << 8);
-  } else if ((st->flags & CTR_STATE_STENCIL_CLEAR) && !g_depth16) {
+  } else if ((st->flags & CTR_STATE_STENCIL_CLEAR)) {
     /* (AI-assisted) where the stencil isn't 0 and the depth test passes; set to 0 there (kept
      * where the depth test fails: another face of the draw may pass it there) */
     e.stencilMode = 1u | ((u32)GPU_NOTEQUAL << 4) | (0xFFu << 8) | (0xFFu << 24);
@@ -8838,7 +8829,7 @@ int ctr_gpu_micro_line(char* out, int size) {
 /* ---------------- (AI-assisted) the ocean (config ocean = waves) ---------------- */
 
 int ctr_gpu_has_stencil(void) {
-  return !g_depth16;
+  return 1;
 }
 
 void* ctr_gpu_stream_alloc(int bytes) {
@@ -10374,7 +10365,7 @@ void ctr_gpu_linear_account_get(ctr_gpu_linear_account* out) {
  * pacing: the fence copy is queued at the frame end, after it), then reduced on the CPU to 8x8
  * blocks: the buffer's tile (tx, ty) (8x8 pixels, 64 words) is the screen's block
  * (ty, 29 - tx) (write_screenshot's mapping: screen (x, y) = buffer (239 - y, x)); a D24S8 word's
- * depth is its low 24 bits (0 far, the cleared value; larger = closer). Not with D16 or
+ * depth is its low 24 bits (0 far, the cleared value; larger = closer). Not
  * without the pipeline and steady pacing. One copy at a time. */
 static struct {
   u32* buf;
@@ -10389,7 +10380,7 @@ static struct {
 
 void ctr_gpu_depth_copy(const float user[16]) {
   if (!g.ready || !g.in_frame || s_dr.failed || s_dr.busy || !s_pipeline || !s_pres.on ||
-      g_depth16 || !g.top || s_bd.frame) {
+      !g.top || s_bd.frame) {
     return; /* (a gpu_breakdown frame submits its own parts: no copy of ours in between) */
   }
   const C3D_FrameBuf* fb = &g.top->frameBuf;

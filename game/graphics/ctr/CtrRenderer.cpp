@@ -423,7 +423,7 @@ CtrRenderer::CtrRenderer()
     if (ctr_gpu_has_stencil()) {
       set(BucketId::SHADOW, std::make_unique<CtrShadowRenderer>("shadow", (int)BucketId::SHADOW));
     } else {
-      lg::warn("[ctr] shadows = full needs the stencil buffer (not with depth16): not drawn");
+      lg::warn("[ctr] shadows = full needs the stencil buffer: not drawn");
     }
   }
   // the ocean (after the level and merc, like the PS2's ocean-near)
@@ -1509,7 +1509,6 @@ void wait_render_idle() {
 int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_color16(ctr_settings().color16 ? 1 : 0);  // the render target's format
   ctr_gpu_set_steady_pacing(ctr_settings().steady_pacing ? 1 : 0);
-  ctr_gpu_set_framebuffer(ctr_settings().depth16 ? 1 : 0);
   // (AI-assisted) hardware hang bisect switches (config.ini, CtrSettings.h)
   ctr_gpu_set_shader_basic(ctr_settings().shader_basic);
   ctr_gpu_set_asm_tex(ctr_settings().asm_tex ? 1 : 0);

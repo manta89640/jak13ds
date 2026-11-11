@@ -101,9 +101,8 @@ struct SoftState {
   std::vector<uint8_t> color;  // RGBA8, top row first
   std::vector<float> depth;
   // (AI-assisted) the stencil part of the 3DS's D24S8 depth buffer (CTR_STATE_STENCIL_*), cleared
-  // with the depth at frame begin; none with config.ini depth16 (ctr_gpu_has_stencil)
+  // with the depth at frame begin
   std::vector<uint8_t> stencil;
-  int depth16 = 0;
   std::vector<SoftTex> textures;
   std::vector<SoftMesh> meshes;
   std::vector<SoftPool> pools;
@@ -997,7 +996,7 @@ void shade_pixel(const ctr_draw_state& st,
   if (ss_on) softstats::cur->px_atest++;
   int idx = px + py * s_target.stride;
   // (AI-assisted) the stencil test and operations, as ctr_gpu_citro3d.c sets them
-  uint8_t* sten = g_soft.depth16 || !s_target.stencil ? nullptr : &s_target.stencil[idx];
+  uint8_t* sten = !s_target.stencil ? nullptr : &s_target.stencil[idx];
   if (sten && (st.flags & CTR_STATE_STENCIL_OUT) && *sten == 1) {
     return;
   }
@@ -3064,10 +3063,10 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
 }
 
 // (AI-assisted) the ocean with waves: no second texture layer here. The stencil buffer (its marks,
-// the shadow volumes) as on the 3DS: none with config.ini depth16.
+// the shadow volumes) as on the 3DS.
 
 int ctr_gpu_has_stencil(void) {
-  return !g_soft.depth16;
+  return 1;
 }
 
 void* ctr_gpu_stream_alloc(int bytes) {
@@ -3798,9 +3797,6 @@ int ctr_gpu_skin_rows_f24_on(void) {
 }
 void ctr_gpu_pack_skin_rows_f24(const float*, int, uint32_t*) {}
 void ctr_gpu_set_skin_clip_f24(int) {}  // (AI-assisted)      // (AI-assisted) no uniform formats here
-void ctr_gpu_set_framebuffer(int depth16) {
-  g_soft.depth16 = depth16 ? 1 : 0;  // (AI-assisted) no stencil, like the 3DS's D16 buffer
-}
 int ctr_gpu_describe_target(char*, int) {
   return 0;
 }

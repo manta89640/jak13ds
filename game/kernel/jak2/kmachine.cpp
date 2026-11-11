@@ -777,8 +777,7 @@ void InitMachine_PCPort() {
   });
 #endif
   // config.ini shadows: only full draws Jak II's shadow volumes (CtrShadowJak2;
-  // Jak II has no blob shadow, so blob is off), and only with the stencil buffer (not depth16 =
-  // on). Otherwise the game doesn't make them either (drawable.gc, TARGET_3DS: no
+  // Jak II has no blob shadow, so blob is off). Otherwise the game doesn't make them either (drawable.gc, TARGET_3DS: no
   // shadow-execute-all). Other builds: always.
   // shadows = all: every caster at any distance (the PC port's extended shadows); full: the
   // PS2's distances (foreground.gc, citizen.gc, vehicle.gc, mountain-obs.gc)
@@ -792,9 +791,6 @@ void InitMachine_PCPort() {
       volumes = !(sh == "blob" || sh == "off" || sh == "0" || sh == "no" || sh == "false" ||
                   sh == "none");
       all = sh == "all";
-    }
-    if (volumes && ctr_config_bool("depth16", 0)) {
-      volumes = false;
     }
 #endif
     intern_from_c("*pc-3ds-shadow-volumes?*")->value() =

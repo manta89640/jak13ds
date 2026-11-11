@@ -766,8 +766,7 @@ void InitMachine_PCPort() {
   }
   // (AI-assisted) config.ini shadows = full (default, also on) | blob | off: the shadow volumes
   // (shadow-execute-all fills the shadow bucket, which the 3DS renderer draws with the stencil
-  // buffer), only the blob shadow under Jak, or none (drawable.gc, TARGET_3DS). The volumes need
-  // the stencil buffer, which depth16 = on doesn't have: full is blob then. Other builds: full
+  // buffer), only the blob shadow under Jak, or none (drawable.gc, TARGET_3DS). Other builds: full
   // (host runs of the 3DS GOAL code make the shadow DMA like the 3DS).
   {
     std::string shadows = "full";
@@ -783,13 +782,7 @@ void InitMachine_PCPort() {
         lg::warn("config.ini shadows = {}: not full, blob or off, using full", s);
       }
     }
-    if (shadows == "full" && ctr_config_bool("depth16", 0)) {
-      shadows = "blob";
-      lg::info("shadows blob (config.ini shadows: the volumes need the stencil buffer, which "
-               "depth16 = on doesn't have)");
-    } else {
-      lg::info("shadows {} (config.ini shadows)", shadows);
-    }
+    lg::info("shadows {} (config.ini shadows)", shadows);
 #endif
     intern_from_c("*pc-3ds-shadows*")->value = intern_from_c(shadows.c_str()).offset;
   }

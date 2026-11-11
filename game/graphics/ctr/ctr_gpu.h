@@ -138,7 +138,7 @@ void ctr_gpu_set_tex1_gating(int on);
 int ctr_gpu_fog_alpha_ready(void);
 void ctr_gpu_set_cull(int enable, int flip);
 void ctr_gpu_cull_reset(void);
-/* (AI-assisted) 1 if the depth buffer has a stencil part (not config.ini depth16) */
+/* (AI-assisted) 1 if the depth buffer has a stencil part (always: D24S8) */
 int ctr_gpu_has_stencil(void);
 
 /* Lifetime. ctr_gpu_init returns 0 on success. */
@@ -435,9 +435,6 @@ void ctr_gpu_set_skin_rows_f24(int on);
  * and lights (21 instead of 28) as float24 too. Not bit-identical (rounded to nearest where the GPU
  * converts f32 its own way): edge pixels of models can flip. Each frame. */
 void ctr_gpu_set_skin_clip_f24(int on);
-/* (AI-assisted) the top render target, set before ctr_gpu_init (config.ini): depth16 = a 16-bit
- * depth buffer instead of 24-bit + stencil. */
-void ctr_gpu_set_framebuffer(int depth16);
 /* (AI-assisted) one line about the top render target (size, formats, VRAM addresses and banks)
  * for the log; returns its length (0 before ctr_gpu_init) */
 int ctr_gpu_describe_target(char* out, int size);

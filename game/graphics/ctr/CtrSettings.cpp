@@ -42,16 +42,6 @@ bool parse_bool(const std::string& v) {
   return v == "1" || v == "true" || v == "on" || v == "yes";
 }
 
-// (AI-assisted) settings that depend on others
-void apply_rules(CtrSettings& s) {
-  // the shadow volumes need the stencil buffer, which the 16-bit depth buffer doesn't have
-  // (kmachine.cpp's choice of what the game builds follows the same rule)
-  if (s.shadows == CtrSettings::ShadowMode::Full && s.depth16) {
-    s.shadows = CtrSettings::ShadowMode::Blob;
-    s.shadows_full_wanted = true;
-  }
-}
-
 // (AI-assisted) config.ini's lines: each key's last value and its line number, the keys in file order
 struct FileLines {
   std::vector<std::string> keys;
@@ -208,8 +198,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.vram_vertices = parse_bool(v);  // (AI-assisted, vramvtx)
     } else if (key == "color16") {
       s.color16 = parse_bool(v);
-    } else if (key == "depth16") {
-      s.depth16 = parse_bool(v);
     } else if (key == "compact_textures") {
       s.compact_textures = parse_bool(v);
     } else if (key == "proctex_glows") {
@@ -457,12 +445,9 @@ CtrSettings load() {
   }
   const CtrSettings base = resolve_settings(s, fl, path, false);
   s = resolve_settings(s, fl, path, true);
-  apply_rules(s);
   // (AI-assisted) the lines whose value differs from what the preset (and the defaults) give
   std::string diffs;
-  CtrSettings ruled_base = base;
-  apply_rules(ruled_base);
-  const std::string base_summary = ruled_base.summary();
+  const std::string base_summary = base.summary();
   auto differs = [&](const std::string& k, const char* v) {
     const char* pv = ctr_cfg_resolve(k.c_str(), file_get, &fl, 0);
     if (pv) {
@@ -472,7 +457,6 @@ CtrSettings load() {
     s_quiet = true;
     apply_setting(t, k, v, path, 0);
     s_quiet = false;
-    apply_rules(t);
     return t.summary() != base_summary;
   };
   for (const auto& k : fl.keys) {
@@ -540,7 +524,7 @@ std::string CtrSettings::summary() const {
       "fog_start {:.2f} overlap {} frame_pacing {} fps_cap {} ocean_texture_rate {} ocean_near_alpha {:.2f} "
       "shader_basic {} defer_flush {} render_watchdog {} stats_period {:.0f}s "
       "color_stream {}"
-      "{}{}{}{}{}{}{}",
+      "{}{}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale,
       // (AI-assisted) with auto_detail: the range the distances move in
       auto_detail_fixed && auto_detail
@@ -563,11 +547,7 @@ std::string CtrSettings::summary() const {
       skip_clear ? "on" : "off", distort ? "on" : "off", distort_copy_rows ? "rows" : "full",
       envmap ? "on" : "off", envmap_batch ? "on" : "off", merc_tex_sort ? "on" : "off",
       merc_gen_lod ? "on" : "off", merc_lod_scale,
-      // (AI-assisted) with depth16, full falls back to blob (no stencil)
-      shadows == ShadowMode::Full   ? "full"
-      : shadows == ShadowMode::Blob ? (shadows_full_wanted ? "blob (full needs the stencil: depth16)"
-                                                           : "blob")
-                                    : "off",
+      shadows == ShadowMode::Full ? "full" : shadows == ShadowMode::Blob ? "blob" : "off",
       shadow_casters,
       rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), mip_bias,
@@ -596,7 +576,6 @@ std::string CtrSettings::summary() const {
       gpu_perflog ? " gpu_perflog" : "",
       pica_bench ? " pica_bench" : "",
       gpu_breakdown ? " gpu_breakdown" : "",
-      depth16 ? " depth16" : "",
       emulator ? " (emulator)" : "");
 }
 

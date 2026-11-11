@@ -102,10 +102,8 @@ struct CtrSettings {
   // (AI-assisted) config shadows = full | blob | off (on = full). full: the game's shadow volumes
   // (Jak, enemies, objects; the game runs shadow-execute-all, CtrShadow draws them with the stencil
   // buffer); blob: a dark spot under Jak only (the game's fake shadow, no volumes); off: none.
-  // full needs the stencil buffer: with depth16 it is blob (the game applies the same rule).
   enum class ShadowMode { Off, Blob, Full };
   ShadowMode shadows = ShadowMode::Full;
-  bool shadows_full_wanted = false;  // full in config.ini, blob because of depth16 (for the log)
   // (AI-assisted) shadows = full: at most this many objects' shadows per frame, the ones that look
   // biggest from the camera (bounding sphere over distance: Jak's normally is one); 0 = all
   // (AI-assisted) default 0 since Oct 12 (all casters, like the PS2); 6 was the 30 fps era cut
@@ -200,10 +198,6 @@ struct CtrSettings {
   // blended and cleared. Off by default: without dithering, faint blended layers (waterfall mist,
   // smoke) add less than one color step each and vanish, and gradients band.
   bool color16 = false;
-  // (AI-assisted) 16-bit depth buffer instead of 24-bit + stencil: half the depth traffic, but
-  // 256x coarser depth (z-fighting far away) and no stencil (shadows = full becomes blob, the
-  // ocean = waves marks are left out). Off by default.
-  bool depth16 = false;
   // sprite and HUD textures in the smallest 3DS format that holds them (8 / 16 bits per texel),
   // and in reserved VRAM (with vram_textures)
   bool compact_textures = true;

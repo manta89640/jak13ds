@@ -155,7 +155,6 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"vfp_vector", "on"},    /* (AI-assisted, vfpvec) bone matrices as VFP short vectors */
     {"ocean", "full"},
     {"shadows", "full"},
-    {"depth16", "off"},
     {"text_scale", "1"},
     {"text_min_height", "9"},
     {"button_art", "off"},
@@ -183,7 +182,7 @@ static const char* const ctr_cfg_removed[] = {
     "impostors", "impostor_distance", "impostor_error", "impostor_budget", "impostor_atlas",
     "fine_vis", "fine_vis_kb", "occ_cull", "occ_cull_tris", "occ_cull_dist", "vista_untextured",
     /* renderer strip: removed with their code */
-    "top_block32", "early_depth_clear", "early_depth_func", "early_depth", "vram_probe", "gpu_micro_ident", "cmd_dump", "cpu_bench",
+    "depth16", "top_block32", "early_depth_clear", "early_depth_func", "early_depth", "vram_probe", "gpu_micro_ident", "cmd_dump", "cpu_bench",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */
