@@ -230,11 +230,6 @@ static inline int words_equal(const void* a, const void* b, unsigned n) {
   (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |        \
    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
-/* (AI-assisted) config.ini color16: RGB565 color buffer to an RGB565 top screen (no conversion) */
-#define DISPLAY_TRANSFER_FLAGS_565                                                          \
-  (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |        \
-   GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) |                                          \
-   GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) | GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
 /* (AI-assisted) The frame's immediate vertices (sprites, HUD, sky, shadow volumes, the ocean),
  * two of them with the pipeline. 512 KB since Oct 17 (was 1536 KB): the largest frame measured
@@ -558,7 +553,6 @@ static struct {
   int screenshot_state;  /* 0 none, 1 requested, 2 frame rendered: write at next frame begin */
 } g;
 
-static int g_color16 = 0;
 /* (AI-assisted) steady frame pacing, see pres_vblank */
 static int g_steady_pacing;
 static int pres_init(void);
@@ -609,15 +603,6 @@ static void write_screenshot(void) {
       uint32_t tile = (uint32_t)((fy / 8) * tiles_x + (fx / 8));
       uint32_t px = tile * 64 + (((fx & 1)) | ((fy & 1) << 1) | ((fx & 2) << 1) | ((fy & 2) << 2) |
                                  ((fx & 4) << 2) | ((fy & 4) << 3));
-      if (g_color16) {
-        /* RGB565, R in the high bits */
-        const uint32_t v = (uint32_t)src[2 * px] | ((uint32_t)src[2 * px + 1] << 8);
-        const uint32_t r = (v >> 11) & 31, gr = (v >> 5) & 63, b = v & 31;
-        line[3 * x + 0] = (uint8_t)((b << 3) | (b >> 2));
-        line[3 * x + 1] = (uint8_t)((gr << 2) | (gr >> 4));
-        line[3 * x + 2] = (uint8_t)((r << 3) | (r >> 2));
-        continue;
-      }
       uint32_t o = px * 4;
       /* stored A, B, G, R; BMP wants B, G, R */
       line[3 * x + 0] = src[o + 1];
@@ -1247,7 +1232,7 @@ static int vram_bank(const void* p) {
  * else silently in the same one: then color and depth traffic share one bank. (AI-assisted) */
 static C3D_RenderTarget* create_top_target(void) {
   const int w = TOP_W, h = TOP_H;
-  C3D_RenderTarget* t = C3D_RenderTargetCreate(w, h, g_color16 ? GPU_RB_RGB565 : GPU_RB_RGBA8,
+  C3D_RenderTarget* t = C3D_RenderTargetCreate(w, h, GPU_RB_RGBA8,
                                                GPU_RB_DEPTH24_STENCIL8);
   if (!t) {
     return NULL;
@@ -1274,7 +1259,7 @@ int ctr_gpu_describe_target(char* out, int size) {
   return snprintf(out, (size_t)size,
                   "%dx%d, color %s at 0x%08lx (VRAM %c), depth %s at 0x%08lx (VRAM %c)%s",
                   fb->width, fb->height,
-                  g_color16 ? "RGB565" : "RGBA8", (unsigned long)c, vram_bank(fb->colorBuf) ? 'B' : 'A',
+                  "RGBA8", (unsigned long)c, vram_bank(fb->colorBuf) ? 'B' : 'A',
                   fb->depthFmt == GPU_RB_DEPTH16 ? "D16" : "D24S8", (unsigned long)d,
                   vram_bank(fb->depthBuf) ? 'B' : 'A',
                   vram_bank(fb->colorBuf) == vram_bank(fb->depthBuf) ? " SAME BANK" : "");
@@ -1838,12 +1823,6 @@ int ctr_gpu_init(void) {
   }
   apt_gate_install(); /* (AI-assisted, gpu-home) after C3D_Init: its hook runs before citro3d's */
   gx_queue_enlarge();  /* (AI-assisted, gpu-home) */
-  if (g_color16) {
-    /* (AI-assisted) config.ini color16: every pixel the GPU writes, blends or clears is half the
-     * memory traffic, and so is the display transfer. No destination alpha (CTR_BLEND_ADD_DST_A
-     * then adds fully); no dithering (gradients band slightly). */
-    gfxSetScreenFormat(GFX_TOP, GSP_RGB565_OES);
-  }
   g.top = create_top_target();
   if (!g.top) {
     return -2;
@@ -3056,7 +3035,7 @@ static void pres_queue_frame(u32* fence_id) {
     const C3D_FrameBuf* fb = &g.top->frameBuf;
     const u32 dim = GX_BUFFER_DIM(fb->width, fb->height);
     GX_DisplayTransfer((u32*)fb->colorBuf, dim, (u32*)s_pres.buf[b], dim,
-                       g_color16 ? DISPLAY_TRANSFER_FLAGS_565 : DISPLAY_TRANSFER_FLAGS);
+                       DISPLAY_TRANSFER_FLAGS);
     s_pres.last_buf = b;
   }
   /* the fence: a 16 byte texture copy of this frame's number, after the transfer. Not a memory
@@ -3372,10 +3351,6 @@ static void frame_state_reset(void) {
 
 /* (AI-assisted) the clear color as the color buffer stores it (memory fill value) */
 static u32 color_fill_value(uint8_t r, uint8_t gr, uint8_t b) {
-  if (g_color16) {
-    /* (AI-assisted, gpu-home) rounded, as the textures (CtrTexConv.h ctr_pack16) */
-    return ctr_pack16((u32)r | ((u32)gr << 8) | ((u32)b << 16), CTR_CONV_RGB565);
-  }
   return ((u32)r << 24) | ((u32)gr << 16) | ((u32)b << 8) | 0xff;
 }
 
@@ -3436,9 +3411,9 @@ static void pipeline_frame_begin(u32 clear) {
   C3D_FrameBuf* fb = &g.top->frameBuf;
   u32* color = (u32*)fb->colorBuf;
   u32* depth = (u32*)fb->depthBuf;
-  /* D24S8: 4 bytes; color 4 (RGBA8) or 2 (RGB565) */
+  /* D24S8: 4 bytes; RGBA8: 4 */
   const u32 px = (u32)fb->width * fb->height;
-  u32* color_end = (u32*)((uint8_t*)color + px * (g_color16 ? 2 : 4));
+  u32* color_end = (u32*)((uint8_t*)color + px * 4);
   if (s_skip_color_clear) {
     /* (AI-assisted) skip_clear: the depth only (VRAM) */
     GX_MemoryFill(depth, 0, (u32*)((uint8_t*)depth + px * 4),
@@ -3446,7 +3421,7 @@ static void pipeline_frame_begin(u32 clear) {
                   0, NULL, 0);
   } else {
     GX_MemoryFill(color, clear, color_end,
-                  GX_FILL_TRIGGER | (g_color16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH), depth,
+                  GX_FILL_TRIGGER | GX_FILL_32BIT_DEPTH, depth,
                   0, (u32*)((uint8_t*)depth + px * 4), GX_FILL_TRIGGER | GX_FILL_32BIT_DEPTH);
   }
   if (s_bd.frame) {
@@ -4480,7 +4455,7 @@ static void update_pool_residency(void) {
          * most of the screen, the copy for a few distort pixels. Only for a pool at least as big
          * (its linear memory freed pays for the copy's, made there at the next distort sprite);
          * the copy's VRAM is free after the next frame begin's deletes (this pool's retry). */
-        const u32 screen_bytes = 256u * 512u * (g_color16 ? 2u : 4u);
+        const u32 screen_bytes = 256u * 512u * 4u;
         if (g.screen_tex >= 0 && g.screen_tex_vram && !g.screen_tex_pinned &&
             p->bytes >= screen_bytes) {
           ctr_linear_unlock();
@@ -4737,12 +4712,6 @@ void ctr_gpu_cull_reset(void) {
 static int g_proctex = 1;
 static int g_compact = 1;
 
-void ctr_gpu_set_color16(int on) {
-  if (!g.ready) {
-    g_color16 = on ? 1 : 0; /* the render target is made in ctr_gpu_init */
-  }
-}
-
 /* the GPU's queue run to its end (nothing left waiting for a run) */
 static void gpu_drain(void) {
   gxCmdQueue_s* q = &__C3D_Context.gxQueue;
@@ -4764,7 +4733,7 @@ static int top_target_setup(void) {
   const int pres_on = g_steady_pacing && pres_init();
   if (!pres_on) {
     C3D_RenderTargetSetOutput(g.top, GFX_TOP, GFX_LEFT,
-                              g_color16 ? DISPLAY_TRANSFER_FLAGS_565 : DISPLAY_TRANSFER_FLAGS);
+                              DISPLAY_TRANSFER_FLAGS);
   }
   return 0;
 }
@@ -4785,7 +4754,7 @@ void ctr_gpu_submit_now(void) {
 
 int ctr_gpu_top_histogram(unsigned int counts[256]) {
   memset(counts, 0, 256 * sizeof(counts[0]));
-  if (!g.ready || g.in_frame || g_color16 || envIsHomebrew()) {
+  if (!g.ready || g.in_frame || envIsHomebrew()) {
     return 0;
   }
   apt_gate_enter();
@@ -7503,15 +7472,15 @@ static int copy_screen_body(float x0, float x1, int part) {
     return -1;
   }
   if (g.screen_tex < 0) {
-    /* 256x512 RGBA8 (or RGB565 with color16) in linear memory (512 / 256 KB, made once): the
+    /* 256x512 RGBA8 in linear memory (512 KB, made once): the
      * 240x400 color buffer fits, with the same tiled layout (see write_screenshot) */
     const int slot = reserve_tex_slot();
     if (slot < 0) {
       return -1;
     }
     TexSlot* t = &g.textures[slot];
-    const GPU_TEXCOLOR fmt = g_color16 ? GPU_RGB565 : GPU_RGBA8;
-    const u32 bytes = 256u * 512u * (g_color16 ? 2u : 4u);
+    const GPU_TEXCOLOR fmt = GPU_RGBA8;
+    const u32 bytes = 256u * 512u * 4u;
     ctr_linear_lock();
     /* (AI-assisted) distort_copy = rows: in VRAM if there's room now (the copy and the distort
      * draws then stay in VRAM), leaving the reserve free (C3D_TexInitVRAM calls libctru's
@@ -7554,7 +7523,7 @@ static int copy_screen_body(float x0, float x1, int part) {
    * the framebuffer): 50 rows of 8x8 tiles, 30 tiles (7680 bytes; 3840 in RGB565) each in the
    * color buffer, 32 in the texture (a 512 / 256 byte gap). In 16 byte units. */
   {
-    const u32 row = g_color16 ? 3840 : 7680, gap = g_color16 ? 256 : 512;
+    const u32 row = 7680, gap = 512;
     /* (AI-assisted) distort_copy = rows: tile row k holds screen columns 8k..8k+7 (the color
      * buffer is 240 wide, x along its rows); a texel of margin each side for the filter */
     int r0 = 0, r1 = 49;

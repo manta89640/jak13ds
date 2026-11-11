@@ -1507,7 +1507,6 @@ void wait_render_idle() {
 }
 
 int ctr_init(GfxGlobalSettings& /*settings*/) {
-  ctr_gpu_set_color16(ctr_settings().color16 ? 1 : 0);  // the render target's format
   ctr_gpu_set_steady_pacing(ctr_settings().steady_pacing ? 1 : 0);
   // (AI-assisted) hardware hang bisect switches (config.ini, CtrSettings.h)
   ctr_gpu_set_shader_basic(ctr_settings().shader_basic);

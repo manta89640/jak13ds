@@ -194,10 +194,6 @@ struct CtrSettings {
   // render times with it on and off say so
   bool vram_vertices = true;
   // (AI-assisted) 3DS hardware features (docs/3ds-port/config_ini.md):
-  // 16-bit (RGB565) color buffer and top screen: half the memory traffic of every pixel drawn,
-  // blended and cleared. Off by default: without dithering, faint blended layers (waterfall mist,
-  // smoke) add less than one color step each and vanish, and gradients band.
-  bool color16 = false;
   // sprite and HUD textures in the smallest 3DS format that holds them (8 / 16 bits per texel),
   // and in reserved VRAM (with vram_textures)
   bool compact_textures = true;

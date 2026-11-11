@@ -192,7 +192,6 @@ vram_textures = auto       # copies of the level textures (and the small HUD / f
 rgba4_as_rgba8 = auto      # 16-bit textures with alpha stored as 32-bit. auto: on in Azahar, off on the 3DS
 
 # ---- 3DS hardware features (AI-assisted) ----
-color16 = off              # on: 16-bit (RGB565) color buffer and top screen (half the memory traffic per pixel); faint blended layers like waterfall mist vanish and gradients band
 compact_textures = on      # sprite, HUD and font textures in 8 / 16-bit formats (L8, LA8, RGB565, RGBA5551, RGBA4), and in 384 KB of reserved VRAM with vram_textures
 proctex_glows = on         # glows (round gradient textures) from the procedural texture unit: no texels read. Only a texture whose bilinear samples (texel centers and midpoints) all lie within 2 of its radius table (color, and the 3DS's doubled alpha) is taken; any other stays a texture
 sprite_max_size = 0        # world particles and glows at most this fraction of the screen height across (0 = no limit, the default since Oct 12, as the PS2; 0.5 was the 30 fps era cut)

@@ -408,11 +408,9 @@ void ctr_gpu_set_vram_textures(int on);
 /* Mip levels: 0 = off (always the first level), 1 = nearest level (default), 2 = blend two levels
  * (trilinear, slower) (config.ini mipmaps). */
 void ctr_gpu_set_mip_mode(int mode);
-/* (AI-assisted) 3DS hardware features (config.ini). color16: a 16-bit (RGB565) color buffer and
- * top screen, set before ctr_gpu_init. proctex: radial textures drawn with the procedural texture
- * unit. compact: ctr_gpu_tex_create_compact picks small formats (off: RGBA8 like
- * ctr_gpu_tex_create). */
-void ctr_gpu_set_color16(int on);
+/* (AI-assisted) 3DS hardware features (config.ini). proctex: radial textures drawn with the
+ * procedural texture unit. compact: ctr_gpu_tex_create_compact picks small formats (off: RGBA8
+ * like ctr_gpu_tex_create). */
 /* For the shadow self-test (CtrShadow.cpp). ctr_gpu_submit_now: in a frame, what is built so
  * far goes to the GPU as a command list of its own. ctr_gpu_top_histogram: outside a frame, once
  * the GPU has drawn all it was sent, the top screen's pixels by their blue value; 0: can't be

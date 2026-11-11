@@ -3779,7 +3779,6 @@ int ctr_gpu_rgba4_as_rgba8(void) {
 }
 
 void ctr_gpu_set_vram_textures(int) {}
-void ctr_gpu_set_color16(int) {}
 void ctr_gpu_submit_now() {}
 int ctr_gpu_top_histogram(unsigned int counts[256]) {
   memset(counts, 0, 256 * sizeof(counts[0]));
