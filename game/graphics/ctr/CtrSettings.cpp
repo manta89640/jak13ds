@@ -122,8 +122,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.merc_tex_sort = parse_bool(v);  // (AI-assisted)
     } else if (key == "envmap_batch") {
       s.envmap_batch = parse_bool(v);  // (AI-assisted)
-    } else if (key == "distort_copy") {
-      s.distort_copy_rows = v != "full";  // (AI-assisted) rows | full
     } else if (key == "shadows") {
       // (AI-assisted) full | blob | off (on = full)
       if (v == "full" || v == "all" || parse_bool(v)) {
@@ -498,7 +496,7 @@ std::string CtrSettings::summary() const {
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
       "merc {} sprites {} ({}) "
-      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} envmap_min_px {:.0f} skin_rows_f24 {} skin_clip_f24 {} "
+      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} envmap_min_px {:.0f} skin_rows_f24 {} skin_clip_f24 {} "
       "compact_textures {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} particle_fill {} "
       "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} fog_alpha {} tex1_gating {} cmd_dedup {} cull_ties {} cull_merc {} merc_fog {} raw_cmds {} opaque_alpha {} tex_cache_clear {} asm_tex {} asm_mem {} "
       "ocean_tex_half {} fast_clock {} "
@@ -525,7 +523,7 @@ std::string CtrSettings::summary() const {
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, pipeline ? "on" : "off",
       frame_overlap2 == 2 ? "on" : (frame_overlap2 == 1 ? "clean" : "off"), !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
       sky ? "on" : "off", clouds ? "on" : "off", sky_last ? "on" : "off",
-      skip_clear ? "on" : "off", distort ? "on" : "off", distort_copy_rows ? "rows" : "full",
+      skip_clear ? "on" : "off", distort ? "on" : "off",
       envmap ? "on" : "off", envmap_batch ? "on" : "off", merc_tex_sort ? "on" : "off",
       merc_gen_lod ? "on" : "off", merc_lod_scale,
       shadows == ShadowMode::Full ? "full" : shadows == ShadowMode::Blob ? "blob" : "off",

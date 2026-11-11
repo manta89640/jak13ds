@@ -749,9 +749,6 @@ void CtrSpriteRenderer::draw_distorter() {
     return v;
   };
   ctr_vertex strip[5 * 11];
-  // distort_copy = rows: the screen columns the sprites read (x of the GS frame texture coordinates)
-  const bool rows = ctr_settings().distort_copy_rows;
-  float read_x0 = 1.f, read_x1 = -1.f;
   // (AI-assisted) each fan is a triangle strip (the VU program's): all of them go in one strip
   // draw, joined by repeating the last vertex of one and the first of the next (the triangles in
   // between have no area). As a triangle list it was 3 (n - 2) vertices per fan instead of n + 2:
@@ -785,20 +782,6 @@ void CtrSpriteRenderer::draw_distorter() {
       strip[n++] = vert(v08 * sp.rgba.y() + sp.xyz, v09 * sp.rgba.z() + sp.st);
       strip[n++] = center;
     }
-    if (rows) {
-      float sx0 = sp.st.x(), sx1 = sx0;
-      int e2 = (int)m_distort_tables.ientry[slices - 3].x() - 352;
-      // the screen columns read: x of the texture coordinates of the strip's vertices
-      for (u32 k = 0; k < slices; k++, e2 += 2) {
-        const float a = m_distort_tables.entry[e2 + 1].x(), b = m_distort_tables.entry[e2 + 3].x();
-        for (float o : {a * sp.rgba.x(), b * sp.rgba.x(), a * sp.rgba.z(), b * sp.rgba.z()}) {
-          sx0 = std::min(sx0, sp.st.x() + o);
-          sx1 = std::max(sx1, sp.st.x() + o);
-        }
-      }
-      read_x0 = std::min(read_x0, sx0 * 2.f - 1.f);
-      read_x1 = std::max(read_x1, sx1 * 2.f - 1.f);
-    }
     if (!m_distort_verts.empty()) {
       const ctr_vertex last = m_distort_verts.back();
       m_distort_verts.push_back(last);
@@ -812,7 +795,7 @@ void CtrSpriteRenderer::draw_distorter() {
   }
   ctr_draw_state st;
   memset(&st, 0, sizeof(st));
-  st.tex = rows ? ctr_gpu_copy_screen_part(read_x0, read_x1) : ctr_gpu_copy_screen();
+  st.tex = ctr_gpu_copy_screen();
   if (st.tex < 0) {
     return;
   }

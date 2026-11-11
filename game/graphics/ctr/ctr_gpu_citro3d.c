@@ -487,10 +487,7 @@ static struct {
   int vram_textures;
   int vram_copy_failures;
   int screen_tex; /* texture slot of ctr_gpu_copy_screen (-1: not made yet), 256x512 RGBA8 */
-  int screen_tex_vram; /* (AI-assisted) it is in VRAM (distort_copy = rows) */
-  /* (AI-assisted, gpu-home) a texture pool wanted its VRAM (update_pool_residency): made in linear
-   * memory from then on (for the session) */
-  int screen_tex_no_vram;
+  int screen_tex_vram; /* (AI-assisted) it is in VRAM (a kept copy that found no linear memory) */
   int screen_tex_pinned; /* ctr_gpu_screen_copy_pin */
   char screenshot_path[256];
   int screenshot_state;  /* 0 none, 1 requested, 2 frame rendered: write at next frame begin */
@@ -4066,7 +4063,6 @@ static void update_pool_residency(void) {
           ctr_linear_unlock();
           ctr_gpu_screen_copy_release();
           ctr_linear_lock();
-          g.screen_tex_no_vram = 1;
           s_copy_released_frame = g.frame_no;
           printf("[ctr] distorter screen copy: VRAM given to a texture pool (%u KB)\n",
                  p->bytes / 1024);
@@ -6808,7 +6804,7 @@ void ctr_gpu_clip_draw_ranges_mtx(const float matrix[16], int n_mtx, const ctr_d
 
 /* ---------------- the screen as a texture ---------------- */
 
-static int copy_screen_body(float x0, float x1, int part);
+static int copy_screen_body(int keep);
 
 /* (AI-assisted) measurement only: the CPU time of the screen copies (the command list sent so
  * far, the copy queued or, without the pipeline, waited for), ctr_gpu_take_screen_copy_ms */
@@ -6819,41 +6815,22 @@ double ctr_gpu_take_screen_copy_ms(void) {
   return ms;
 }
 
-static int copy_screen(float x0, float x1, int part) {
+static int copy_screen(int keep) {
   if (g.screen_tex_pinned == 2) {
     return -1;
   }
   SKY_HOOK_ANY(); /* (AI-assisted) sky_last: the copy shows what's drawn so far */
   const u64 t0 = svcGetSystemTick();
-  const int tex = copy_screen_body(x0, x1, part);
+  const int tex = copy_screen_body(keep);
   s_copy_ticks += svcGetSystemTick() - t0;
   return tex;
 }
 
 int ctr_gpu_copy_screen(void) {
-  return copy_screen(-1.0f, 1.0f, 0);
+  return copy_screen(0);
 }
 
-int ctr_gpu_copy_screen_part(float x0, float x1) {
-  return copy_screen(x0, x1, 1);
-}
-
-/* distort_copy = rows: the texture's tile rows (screen columns 8k..8k+7) x0..x1 reads, with a
- * texel of margin each side for the filter */
-static void screen_rows(float x0, float x1, int* r0, int* r1) {
-  const float c0 = x0 < -1.0f ? -1.0f : (x0 > 1.0f ? 1.0f : x0);
-  const float c1 = x1 < -1.0f ? -1.0f : (x1 > 1.0f ? 1.0f : x1);
-  int p0 = (int)((c0 + 1.0f) * 0.5f * 399.0f) - 1, p1 = (int)((c1 + 1.0f) * 0.5f * 399.0f) + 2;
-  p0 = p0 < 0 ? 0 : (p0 > 399 ? 399 : p0);
-  p1 = p1 < 0 ? 0 : (p1 > 399 ? 399 : p1);
-  if (p1 < p0) {
-    p1 = p0;
-  }
-  *r0 = p0 >> 3;
-  *r1 = p1 >> 3;
-}
-
-static int copy_screen_body(float x0, float x1, int part) {
+static int copy_screen_body(int keep) {
   if (!g.ready || !g.in_frame) {
     return -1;
   }
@@ -6868,14 +6845,9 @@ static int copy_screen_body(float x0, float x1, int part) {
     const GPU_TEXCOLOR fmt = GPU_RGBA8;
     const u32 bytes = 256u * 512u * 4u;
     ctr_linear_lock();
-    /* (AI-assisted) distort_copy = rows: in VRAM if there's room now (the copy and the distort
-     * draws then stay in VRAM), leaving the reserve free (C3D_TexInitVRAM calls libctru's
-     * vramAlloc, not safe_vram_alloc). */
-    bool in_vram = part == 1 && !g.screen_tex_no_vram &&
-                   (u32)vramSpaceFree() >= bytes + VRAM_RESERVE &&
-                   C3D_TexInitVRAM(&t->tex, 256, 512, fmt);
-    bool ok = in_vram || (linear_room_for_tex(256, 512, 0) && C3D_TexInit(&t->tex, 256, 512, fmt));
-    if (!ok && part == 2) {
+    bool in_vram = false;
+    bool ok = linear_room_for_tex(256, 512, 0) && C3D_TexInit(&t->tex, 256, 512, fmt);
+    if (!ok && keep) {
       /* a kept copy: linear memory first, VRAM rather than none */
       in_vram = (u32)vramSpaceFree() >= bytes + VRAM_RESERVE &&
                 C3D_TexInitVRAM(&t->tex, 256, 512, fmt);
@@ -6910,16 +6882,9 @@ static int copy_screen_body(float x0, float x1, int part) {
    * color buffer, 32 in the texture (a 512 / 256 byte gap). In 16 byte units. */
   {
     const u32 row = 7680, gap = 512;
-    /* (AI-assisted) distort_copy = rows: tile row k holds screen columns 8k..8k+7 (the color
-     * buffer is 240 wide, x along its rows); a texel of margin each side for the filter */
-    int r0 = 0, r1 = 49;
-    if (part) {
-      screen_rows(x0, x1, &r0, &r1);
-    }
-    sync_texture_copy((u32*)((u8*)g.top->frameBuf.colorBuf + (u32)r0 * row),
-                      GX_BUFFER_DIM(row / 16, 0),
-                      (u32*)((u8*)g.textures[g.screen_tex].tex.data + (u32)r0 * (row + gap)),
-                      GX_BUFFER_DIM(row / 16, gap / 16), row * (u32)(r1 - r0 + 1), 8);
+    sync_texture_copy((u32*)g.top->frameBuf.colorBuf, GX_BUFFER_DIM(row / 16, 0),
+                      (u32*)g.textures[g.screen_tex].tex.data, GX_BUFFER_DIM(row / 16, gap / 16),
+                      row * 50u, 8);
   }
   /* the GPU's texture cache may hold the old texels */
   g.bound_tex = NULL;
@@ -6947,7 +6912,7 @@ int ctr_gpu_copy_screen_keep(void) {
   if (g.screen_tex >= 0 && g.screen_tex_vram) {
     ctr_gpu_screen_copy_release();
   }
-  const int tex = copy_screen(-1.0f, 1.0f, 2);
+  const int tex = copy_screen(1);
   g.screen_tex_pinned = tex >= 0 ? 2 : 0;
   return tex;
 }

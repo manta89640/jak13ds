@@ -94,11 +94,6 @@ struct CtrSettings {
   // config merc_lod_scale (also read by kmachine.cpp for the game's own LOD distances).
   // (AI-assisted) default 1 (the PS2's distances; was 0.5)
   float merc_lod_scale = 1.f;
-  // (AI-assisted) config distort_copy = rows | full. rows: the distorter's screen copy covers only
-  // the 8-pixel columns of tile rows its sprites read, the copy texture goes to VRAM when there is
-  // room, and distort sprites under 8 pixels are left out (no copy at all when none is left).
-  // full: every frame with distort sprites copies the whole screen into linear memory (as before)
-  bool distort_copy_rows = true;
   // (AI-assisted) config shadows = full | blob | off (on = full). full: the game's shadow volumes
   // (Jak, enemies, objects; the game runs shadow-execute-all, CtrShadow draws them with the stencil
   // buffer); blob: a dark spot under Jak only (the game's fake shadow, no volumes); off: none.

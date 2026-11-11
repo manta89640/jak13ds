@@ -2138,16 +2138,6 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state,
 static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], const SoftVerts& verts,
                            const uint16_t* indices, int first_index, int index_count);
 
-int ctr_gpu_copy_screen_part(float x0, float x1) {
-  // (AI-assisted) the whole screen as well (no tiles here); counted like ctr_gpu_citro3d.c's rows
-  const auto clampf = [](float v) { return std::clamp(v, -1.f, 1.f); };
-  const int p0 = std::clamp((int)((clampf(x0) + 1.f) * 0.5f * 399.f) - 1, 0, 399);
-  const int p1 = std::max(p0, std::clamp((int)((clampf(x1) + 1.f) * 0.5f * 399.f) + 2, 0, 399));
-  const int h = ctr_gpu_copy_screen();
-  if (softstats::enabled()) softstats::cur->copy_rows += (p1 >> 3) - (p0 >> 3) + 1 - 50;
-  return h;
-}
-
 static int s_screen_copy = -1;  // (AI-assisted) ctr_gpu_copy_screen's texture
 static int s_screen_copy_pinned = 0;
 
