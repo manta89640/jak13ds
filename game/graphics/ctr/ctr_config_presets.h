@@ -41,7 +41,7 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"streaming", "off"}, /* (AI-assisted, streaming) */
     {"particle_fill", "off"}, /* (AI-assisted, perfv2) */
     /* (AI-assisted, fidelity2) the full texture and shine detail */
-    {"mip_bias", "0"},   {"envmap_min_px", "0"},
+    {"mip_bias", "0"},
     /* the Nov 11 options, on by default */
     {"occluders", "off"},     {"horizon", "off"},       {"title_vis", "off"},
     {"cell_vis", "off"},      {"ps2_lod_scale", "1"},   {"min_run_px", "0"},
@@ -184,7 +184,7 @@ static const char* const ctr_cfg_removed[] = {
     "impostors", "impostor_distance", "impostor_error", "impostor_budget", "impostor_atlas",
     "fine_vis", "fine_vis_kb", "occ_cull", "occ_cull_tris", "occ_cull_dist", "vista_untextured",
     /* models / effects strip: removed with their code */
-    "ocean_near_alpha", "envmap_batch", "merc_tex_sort",
+    "ocean_near_alpha", "envmap_batch", "merc_tex_sort", "envmap_min_px",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

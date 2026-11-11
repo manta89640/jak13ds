@@ -421,11 +421,11 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
   if (rs.log_now && m_stats.models) {
     lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones, {} with the generated low LOD), "
-              "{} draws ({} shine draws left out: envmap_min_px; {} drawn, {} "
+              "{} draws ({} shine draws, {} "
               "over their opaque base draw's triangles: foldable), {} with back faces culled "
               "({} not: mirroring bone), {} palette bones not sent, {} draws with fog",
               m_name, m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.gen_lod,
-              m_stats.draws, m_stats.env_small, m_stats.env_drawn,
+              m_stats.draws, m_stats.env_drawn,
               m_stats.env_foldable, m_stats.culled,
               m_stats.mirrored, m_stats.unsent_bones, m_stats.fogged);
     m_stats = Stats();
@@ -460,7 +460,7 @@ u32 CtrMercRenderer::inst_state(const void* model, const math::Vector4f& t) {
     s.pos[1] = t.y();
     s.pos[2] = t.z();
   }
-  s.low = s.env_small = kInstUnknown;
+  s.low = kInstUnknown;
   s.used = 0;
   auto it = std::lower_bound(m_inst_prev.begin(), m_inst_prev.end(), model,
                              [](const InstState& a, const void* m) {
@@ -482,7 +482,6 @@ u32 CtrMercRenderer::inst_state(const void* model, const math::Vector4f& t) {
   if (best) {
     best->used = 1;
     s.low = best->low;
-    s.env_small = best->env_small;
   }
   m_inst_cur.push_back(s);
   return (u32)(m_inst_cur.size() - 1);
@@ -1433,43 +1432,6 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
 #endif
     }
   }
-  // (AI-assisted, fidelity2) envmap_min_px: the model's size on the top screen (its bounding
-  // sphere's diameter: 2 x the quantization range x the largest scale of its sent bones, over the
-  // nearest of their origins' w, as x/w spans the 400 pixels), worked out at its first envmap draw;
-  // below the limit no shine pass. (AI-assisted) The largest and nearest bone, as hud_depth_spread
-  // (was the first bone only: a tiny or hidden root, the power cell's, lost its shine at any size);
-  // per instance (inst_state) it is left out below 0.8 x the limit and back above it, so a shiny
-  // model near the limit doesn't flicker between shiny and dull
-  int env_small = -1;  // -1: not worked out yet
-  auto env_too_small = [&]() -> bool {
-    if (env_small < 0) {
-      env_small = 0;
-      if (cs.envmap_min_px > 0.f && !hud_model && i > 0 && slots[0] < 128) {
-        const float* cw = m_clip + 12;
-        float w = INFINITY;
-        float col = 0;
-        for (int b = 0; b < i; b++) {
-          if (slots[b] >= 128) {
-            continue;
-          }
-          const math::Vector4f* t = bones[slots[b]]->tmat;
-          w = std::min(w, -(cw[0] * t[3].x() + cw[1] * t[3].y() + cw[2] * t[3].z()) + cw[3]);
-          for (int c = 0; c < 3; c++) {
-            col = std::max(col, t[c].x() * t[c].x() + t[c].y() * t[c].y() + t[c].z() * t[c].z());
-          }
-        }
-        const float sx = std::sqrt(m_clip[0] * m_clip[0] + m_clip[1] * m_clip[1] +
-                                   m_clip[2] * m_clip[2]);
-        const float px = 2.f * model->scale * 32767.f * std::sqrt(col) * sx * 200.f;
-        InstState& s = inst_now();
-        const float limit = cs.envmap_min_px * (s.env_small == 0 ? 0.8f : 1.f);
-        // behind the camera or nearer than its size: keep it
-        env_small = w > 0.f && px < limit * w ? 1 : 0;
-        s.env_small = (u8)env_small;
-      }
-    }
-    return env_small == 1;
-  };
   // (AI-assisted, shinefold) this model's opaque base draws' triangle ranges (first, count)
   u64 base_ranges[32];
   int n_base_ranges = 0;
@@ -1481,10 +1443,6 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     float fade[4] = {0, 0, 0, 0};
     if (envmap) {
       if (draw.effect >= effect_count || !cs.envmap || no_envmap) {
-        continue;
-      }
-      if (env_too_small()) {
-        m_stats.env_small++;
         continue;
       }
       const u8* f = fades + 4 * draw.effect;

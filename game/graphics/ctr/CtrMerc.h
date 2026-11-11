@@ -65,7 +65,6 @@ class CtrMercRenderer : public CtrBucketRenderer {
     int missing = 0;
     int draws = 0;
     int bad_bones = 0;
-    int env_small = 0;    // (AI-assisted, fidelity2) envmap_min_px: shine draws left out
     // (AI-assisted, shinefold) shine draws over the same triangles as the opaque base draw just
     // before them: the ones a one-pass base + shine draw could replace (performance.md "11.")
     int env_foldable = 0;
@@ -127,7 +126,7 @@ class CtrMercRenderer : public CtrBucketRenderer {
   static constexpr int kFindSlots = 64;
   FindSlot m_find[kFindSlots];
 
-  // (AI-assisted) merc_gen_lod / envmap_min_px hysteresis: per drawn instance its model, its first
+  // (AI-assisted) merc_gen_lod hysteresis: per drawn instance its model, its first
   // bone's place (world, from the frame's level camera; else camera space) and its decisions
   // (kInstUnknown: none yet). An instance takes over the decisions of the nearest unclaimed one of
   // the same model in the bucket's previous frame (within kInstMatch). Was keyed by the bone
@@ -139,7 +138,6 @@ class CtrMercRenderer : public CtrBucketRenderer {
     float pos[3];
     u8 world;      // pos is in world space
     u8 low;        // merc_gen_lod: drawn with the generated low LOD
-    u8 env_small;  // envmap_min_px: shine left out
     u8 used;       // (previous frame) taken over already
   };
   std::vector<InstState> m_inst_prev, m_inst_cur;  // prev: sorted by model

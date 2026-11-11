@@ -172,8 +172,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       }
     } else if (key == "mip_bias") {
       s.mip_bias = std::clamp(f, -4.f, 4.f);  // (AI-assisted)
-    } else if (key == "envmap_min_px") {
-      s.envmap_min_px = std::clamp(f, 0.f, 400.f);  // (AI-assisted, fidelity2)
     } else if (key == "skin_rows_f24") {
       s.skin_rows_f24 = parse_bool(v);  // (AI-assisted)
     } else if (key == "mipmaps") {
@@ -411,7 +409,6 @@ CtrSettings load() {
     s.vista_distance = 3000.f;
     s.shrub_scale = 0.8f;
     s.mipmaps = 1;
-    s.envmap_min_px = 16.f;
   }
   const auto dir = file_util::get_jak_project_dir();
   // (AI-assisted) config.ini, the one settings file (the sound and system keys in it are read by
@@ -541,7 +538,7 @@ std::string CtrSettings::summary() const {
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
       "merc {} sprites {} ({}) "
-      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} envmap_min_px {:.0f} skin_rows_f24 {} skin_clip_f24 {} "
+      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} skin_rows_f24 {} skin_clip_f24 {} "
       "color16 {} early_depth {}{} top_block32 {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} particle_fill {} "
       "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} fog_alpha {} tex1_gating {} shader_opt {} cmd_dedup {} cull_ties {} cull_merc {} merc_fog {} raw_cmds {} opaque_alpha {} tex_cache_clear {} asm_tex {} asm_mem {} "
       "ocean_tex_half {} fast_clock {} "
@@ -580,7 +577,6 @@ std::string CtrSettings::summary() const {
       shadow_casters,
       rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), mip_bias,
-      envmap_min_px,
       skin_rows_f24 ? "on" : "off", skin_clip_f24 ? "on" : "off", color16 ? "on" : "off",
       early_depth ? "on" : (early_depth_sky ? "sky" : "off"),
       early_depth_func || early_depth_clear

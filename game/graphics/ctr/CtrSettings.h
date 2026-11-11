@@ -70,9 +70,6 @@ struct CtrSettings {
   bool distort = true;  // (AI-assisted) on (Oct 16 config cleanup; was off: square sprites on hardware, fixed)
   // the envmap shine of merc models (power cells, precursor metal): a second pass over their draws
   bool envmap = true;
-  // (AI-assisted, fidelity2) envmap_min_px: no shine pass for models smaller than this on the top
-  // screen (their bounding sphere's diameter in pixels; 0 = every model). HUD models always keep it
-  float envmap_min_px = 0.f;
   // (AI-assisted) models with only lod0 (the yeti, ...) switch to the converter's generated low LOD
   // (c3l::kMercGenLodSuffix: same vertices, ~40-60% of the triangles) beyond max(25 m, 12.5 x the
   // model's size) x merc_lod_scale. Needs .c3l files from a converter with --gen-lod
