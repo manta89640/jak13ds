@@ -1754,3 +1754,17 @@ a few iterations for the checksums; `test/ctr_render/arm/run.sh` builds them as 
 code and runs them under qemu-arm's ARM11 MPCore with the 3DS's flush-to-zero / default NaN
 FPSCR (times mean nothing under qemu).
 
+
+### 1. Visibility tests without a branch per float compare (signbits)
+
+The level renderer's per-run plane test (`run_loop`), the chunks' `sphere_in_view`, the
+streaming look-ahead's view test and the occluder shadows' `classify` / `hidden` (CtrCull.h)
+evaluated each plane and branched on its compare (`vcmp`, `vmrs`, a conditional branch), leaving
+at the first plane that failed. Now every plane is evaluated (the planes' multiply-add chains are
+independent, so the VFP overlaps them) and the sign bits of `t - a` are ANDed (`a > t`) or of
+`d - x` ORed (`d < x`) in core registers: one branch at the end (CtrSimd.h `ctr_float_bits`).
+Same results, equality and NaN included: `x - x` is +0, flush-to-zero keeps the sign, and with
+the 3DS's default NaN a NaN fails as the compare did. ARM code (GCC 13, `-O2`, the bench's copy):
+no `vcmp` / `vmrs` left in the loop, 41 instructions against 39. Bench pair
+`cull.planes3_branch` / `cull.planes3_signs` (3 planes, spheres exactly on a plane and a NaN
+among them): the same checksum on the host and as ARMv6K code under qemu.

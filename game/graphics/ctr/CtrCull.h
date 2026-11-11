@@ -13,6 +13,8 @@
  * region it hides; a sphere is hidden when it lies inside all of them.
  */
 
+#include "game/graphics/ctr/CtrSimd.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -123,30 +125,27 @@ inline bool make_shadow(const Box& b, const float* eye, float margin, Shadow* ou
 }
 
 //! A sphere (center c, radius r) against a shadow: 2 all of it hidden, 0 none of it, 1 partly.
+//! (AI-assisted, signbits) every plane, then branches on the OR of sign bits (CtrSimd.h): d < x
+//! exactly when d - x has its sign bit set (d == x gives +0), as the compares were.
 inline int classify(const Shadow& sh, const float* c, float r) {
   const float rel[3] = {c[0] - sh.eye[0], c[1] - sh.eye[1], c[2] - sh.eye[2]};
-  int res = 2;
+  uint32_t out = 0, part = 0;
   for (int i = 0; i < sh.n; i++) {
     const float d = dot3(sh.pl[i], rel) - sh.pl[i][3];
-    if (d < -r) {
-      return 0;
-    }
-    if (d < r) {
-      res = 1;
-    }
+    out |= ctr_float_bits(d - (-r));  // sign set: d < -r
+    part |= ctr_float_bits(d - r);    // sign set: d < r
   }
-  return res;
+  return (out >> 31) ? 0 : ((part >> 31) ? 1 : 2);
 }
 
-//! classify(...) == 2, with an early out at the first plane that fails it
+//! classify(...) == 2
 inline bool hidden(const Shadow& sh, const float* c, float r) {
   const float rel[3] = {c[0] - sh.eye[0], c[1] - sh.eye[1], c[2] - sh.eye[2]};
+  uint32_t part = 0;
   for (int i = 0; i < sh.n; i++) {
-    if (dot3(sh.pl[i], rel) - sh.pl[i][3] < r) {
-      return false;
-    }
+    part |= ctr_float_bits(dot3(sh.pl[i], rel) - sh.pl[i][3] - r);  // sign set: d < r
   }
-  return true;
+  return (part >> 31) == 0;
 }
 
 //! Does the segment from p0 to p1 pass through the box (slab test)? Tests use it to check shadows.

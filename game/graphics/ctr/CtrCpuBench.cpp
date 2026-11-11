@@ -236,6 +236,71 @@ uint32_t mem_line(uint32_t n) {
   return s;
 }
 
+// ---- (AI-assisted, signbits) the run loop's sphere against 3 planes: a vcmp / vmrs and an early
+// out per plane (before) against one branch on the AND of sign bits (CtrLevel.cpp run_loop) ----
+
+constexpr int kSph = 512;
+float g_sph[kSph][4];  // x, y, z, -radius
+float g_pl[3][4];      // po, k0, k1, k2
+void fill_spheres() {
+  uint32_t s = 777;
+  auto rnd = [&]() {
+    s = s * 1664525u + 1013904223u;
+    return (float)(s >> 8) * (1.f / 16777216.f) * 2.f - 1.f;
+  };
+  // plane 0: z >= -r exactly representable (po 0, k = 0, 0, 1); planes 1, 2 general
+  const float pl[3][4] = {{0.f, 0.f, 0.f, 1.f}, {0.25f, 0.6f, -0.8f, 0.f}, {0.1f, -0.36f, 0.f, 0.93f}};
+  memcpy(g_pl, pl, sizeof(pl));
+  for (int i = 0; i < kSph; i++) {
+    g_sph[i][0] = rnd();
+    g_sph[i][1] = rnd();
+    g_sph[i][2] = rnd();
+    g_sph[i][3] = -0.25f * (rnd() + 1.f);
+    if (i % 16 == 3) {
+      g_sph[i][2] = g_sph[i][3];  // exactly on plane 0: neither in view by `> rad`
+    }
+  }
+  uint32_t nan_bits = 0x7fc00000u;  // a positive quiet NaN: not in view by `> rad`
+  memcpy(&g_sph[kSph - 1][0], &nan_bits, 4);
+}
+
+}  // namespace
+}  // namespace ctr_cpu_bench
+#include "game/graphics/ctr/CtrSimd.h"
+namespace ctr_cpu_bench {
+namespace {
+
+uint32_t planes3_branch(uint32_t n) {
+  uint32_t seen = 0;
+  for (uint32_t k = 0; k < n; k++) {
+    const float* sp = g_sph[k & (kSph - 1)];
+    const float x = sp[0], y = sp[1], z = sp[2], rad = sp[3];
+    bool s = true;
+    for (int i = 0; i < 3; i++) {
+      if (!(g_pl[i][0] + g_pl[i][1] * x + g_pl[i][2] * y + g_pl[i][3] * z > rad)) {
+        s = false;
+        break;
+      }
+    }
+    seen += s ? (k & 7) + 1 : 0;
+  }
+  return seen;
+}
+
+uint32_t planes3_signs(uint32_t n) {
+  uint32_t seen = 0;
+  for (uint32_t k = 0; k < n; k++) {
+    const float* sp = g_sph[k & (kSph - 1)];
+    const float x = sp[0], y = sp[1], z = sp[2], rad = sp[3];
+    uint32_t all = ~0u;
+    for (int i = 0; i < 3; i++) {
+      all &= ctr_float_bits(rad - (g_pl[i][0] + g_pl[i][1] * x + g_pl[i][2] * y + g_pl[i][3] * z));
+    }
+    seen += (all >> 31) ? (k & 7) + 1 : 0;
+  }
+  return seen;
+}
+
 const Case kCases[] = {
     // name, kernel, iterations on the console, pair
     {"vfp.chain8", vfp_chain, 200000, nullptr},
@@ -252,6 +317,8 @@ const Case kCases[] = {
     {"mem.seq256k", mem_seq, 20, nullptr},
     {"mem.seq256k_pld", mem_seq_pld, 20, "mem.seq256k"},
     {"mem.line256k", mem_line, 20, nullptr},
+    {"cull.planes3_branch", planes3_branch, 1000000, nullptr},
+    {"cull.planes3_signs", planes3_signs, 1000000, "cull.planes3_branch"},
 };
 
 }  // namespace
@@ -263,6 +330,7 @@ const Case* cases(int* count) {
 
 int run(double scale, void (*line)(const char* text, void* ctx), void* ctx) {
   fill_tables();
+  fill_spheres();
   for (uint32_t i = 0; i < kMemWords; i++) {
     g_mem[i] = i * 2654435761u;
   }

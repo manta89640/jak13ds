@@ -11,6 +11,7 @@
 #include "game/graphics/ctr/CtrHaze.h"
 #include "game/graphics/ctr/CtrKeiraRig.h"
 #include "game/graphics/ctr/CtrSettings.h"
+#include "game/graphics/ctr/CtrSimd.h"
 #include "game/graphics/ctr/CtrStream.h"
 #include "game/graphics/ctr/CtrVram.h"
 
@@ -9261,14 +9262,13 @@ void CtrLevels::stream_update(u64 frame) {
   m_have.clear();
   m_idle.clear();
   auto in_view = [&](const float* c) {
+    uint32_t all = ~0u;  // (AI-assisted, signbits) as sphere_in_view
     for (int i = 0; i < 4; i++) {
       const float a = m_planes[0][i] * c[0] + m_planes[1][i] * c[1] + m_planes[2][i] * c[2] -
                       m_planes[3][i];
-      if (!(a > -c[3])) {
-        return false;
-      }
+      all &= ctr_float_bits(-c[3] - a);
     }
-    return true;
+    return (all >> 31) != 0;
   };
   float p[kLeadSteps + 4][3];
   for (int i = 0; i < kLeadSteps; i++) {
@@ -10650,14 +10650,14 @@ float ctr_ps2_lod_scale() {
 
 // (AI-assisted, title-popin) a sphere against the view's four planes (the chunk test of emit_chunk)
 bool sphere_in_view(const CtrBackgroundCamera& cam, const float* s) {
+  // (AI-assisted, signbits) all four planes, one branch on their sign bits (CtrSimd.h)
+  uint32_t all = ~0u;
   for (int i = 0; i < 4; i++) {
     const float a = cam.planes[0][i] * s[0] + cam.planes[1][i] * s[1] + cam.planes[2][i] * s[2] -
                     cam.planes[3][i];
-    if (!(a > -s[3])) {
-      return false;
-    }
+    all &= ctr_float_bits(-s[3] - a);
   }
-  return true;
+  return (all >> 31) != 0;
 }
 
 // (AI-assisted, occluders) per occluder the ordinary tie chunks (not near chunks, not the vista
@@ -10832,13 +10832,14 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
       const auto& rs = spheres[r];
       if (rs.r != 0xffff) {
         const float x = rs.c[0], y = rs.c[1], z = rs.c[2], rad = -(float)rs.r * scale;
+        // (AI-assisted, signbits) every plane, then one branch on their sign bits (CtrSimd.h
+        // ctr_gt_bit: the same result as `> rad` per plane), not a vcmp / vmrs and a branch each
+        uint32_t all = ~0u;
 #pragma GCC unroll 4
         for (int i = 0; i < NP; i++) {
-          if (!(po[i] + pk0[i] * x + pk1[i] * y + pk2[i] * z > rad)) {
-            s = false;
-            break;
-          }
+          all &= ctr_float_bits(rad - (po[i] + pk0[i] * x + pk1[i] * y + pk2[i] * z));
         }
+        s = (all >> 31) != 0;
         if (!s) {
           view_hidden++;
           view_tris += run.index_count / 3;

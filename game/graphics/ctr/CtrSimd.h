@@ -9,6 +9,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #if defined(__ARM_FEATURE_SIMD32)
 #include <arm_acle.h>
@@ -68,3 +69,20 @@ static inline void ctr_premultiply_texels(uint8_t* out, const uint8_t* in, size_
     o[i] = rb | g | (w & 0xff000000u);
   }
 }
+
+/* (AI-assisted, signbits) Float tests without a branch on a float compare. On the ARM11 a branch
+ * on `vcmp` reads the flags with `vmrs APSR_nzcv`, which waits for the VFP pipeline (results come
+ * ~8 cycles after issue); a `vmov` of a value's bits to a core register waits only for that
+ * value. a > t exactly when t - a has its sign bit set: t - a is never -0 for a == t (x - x is +0
+ * when rounding to nearest or toward zero), a flush-to-zero result keeps its sign, and with
+ * default NaN (the 3DS's FPSCR) a NaN is positive, so a NaN fails the test as `a > t` does. */
+static inline uint32_t ctr_float_bits(float f) {
+  uint32_t u;
+  memcpy(&u, &f, 4);
+  return u;
+}
+/* 1 when a > t, else 0 (see above) */
+static inline uint32_t ctr_gt_bit(float a, float t) {
+  return ctr_float_bits(t - a) >> 31;
+}
+
