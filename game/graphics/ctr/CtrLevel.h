@@ -730,6 +730,12 @@ struct CtrLevelData {
     std::vector<ctr_vis_bake::Interval> iv;
   };
   std::unique_ptr<VisBake> vis_bake;
+  // (AI-assisted, cellvis) cells (the .c3c, read while config.ini cell_vis is on): the runs seen
+  // from the camera's cell this way (a bit per run), for the cells and bins of key cell_key
+  std::unique_ptr<VisBake> cell_bake;
+  std::vector<u8> cell_bits;
+  u64 cell_key = ~0ull;
+  bool cell_ok = false;
   // (AI-assisted, depthreuse) per chunk and per run: the depth copy it was last found hidden in and
   // in how many copies in a row (depth_reuse hides it from the second on)
   std::vector<u16> dr_chunk_seq, dr_run_seq;
@@ -1630,6 +1636,9 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // (AI-assisted, depthreuse) this level draw may use the recent depth (the frame's g_dr), and
   // statistics: level draws, of them with it, chunks and runs hidden, the runs' triangles
   bool m_dr_ok = false;
+  // (AI-assisted, cellvis) cell_vis this level draw, and statistics
+  bool m_cv_on = false;
+  u64 m_cv_frames = 0, m_cv_ok = 0, m_cv_chunks = 0, m_cv_runs = 0, m_cv_tris = 0;
   u64 m_dr_frames = 0, m_dr_on = 0, m_dr_chunks = 0, m_dr_runs = 0, m_dr_tris = 0;
   void choose_occluders(CtrLevelData& lev, const CtrBackgroundCamera& cam, u64 frame,
                         float draw_dist);

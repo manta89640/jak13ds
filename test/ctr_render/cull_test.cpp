@@ -477,6 +477,47 @@ void test_depth_reuse() {
   fmt::print("  depth reuse: blocks, partial and near-limit cases\n");
 }
 
+// (AI-assisted, cellvis) every direction within a view's half angle is in a bin the view's lookup
+// takes (view_bins), for random views
+void test_cell_bins() {
+  std::mt19937 rng(5);
+  std::uniform_real_distribution<float> u(-1.f, 1.f);
+  int checked = 0;
+  for (int iter = 0; iter < 2000; iter++) {
+    const float yaw = u(rng) * 3.14159f, pitch = u(rng) * 1.3f, h = 0.3f + 0.4f * (u(rng) + 1.f) * 0.5f;
+    uint32_t ym, pm;
+    ctr_vis_bake::view_bins(yaw, pitch, h, &ym, &pm);
+    const float f[3] = {std::cos(pitch) * std::sin(yaw), std::sin(pitch), std::cos(pitch) * std::cos(yaw)};
+    for (int k = 0; k < 50; k++) {
+      float d[3] = {f[0] + u(rng), f[1] + u(rng), f[2] + u(rng)};
+      const float l = std::sqrt(ctr_cull::dot3(d, d));
+      for (float& c : d) {
+        c /= l;
+      }
+      if (std::acos(std::fmin(1.f, ctr_cull::dot3(d, f))) > h) {
+        continue;
+      }
+      checked++;
+      const int yb = ctr_vis_bake::yaw_bin(ctr_vis_bake::yaw_of(d));
+      const int pb = ctr_vis_bake::pitch_bin(ctr_vis_bake::pitch_of(d));
+      check((ym >> yb) & 1, "a direction in the view is in one of its yaw bins");
+      check((pm >> pb) & 1, "... and one of its pitch bins");
+    }
+  }
+  // the view's direction and half angle from four planes 30 degrees off its axis
+  float n[4][3] = {};
+  const float a = 30.f * kPi10;
+  const float base[4][3] = {{std::cos(a), 0, std::sin(a)}, {-std::cos(a), 0, std::sin(a)},
+                            {0, std::cos(a), std::sin(a)}, {0, -std::cos(a), std::sin(a)}};
+  memcpy(n, base, sizeof(n));
+  float d[3];
+  check(ctr_vis_bake::view_dir(n, d) && d[2] > 0.999f, "the view looks along the planes' sum");
+  // the frustum's corner direction (tan a, tan a, 1) is within the half angle
+  const float corner = std::atan(std::sqrt(2.f) * std::tan(a));
+  check(ctr_vis_bake::view_half_angle(n, d) >= corner - 1e-4f, "its half angle reaches its corners");
+  fmt::print("  cell visibility: {} directions in the bins of their views\n", checked);
+}
+
 }  // namespace
 
 void run_cull_tests() {
@@ -489,4 +530,5 @@ void run_cull_tests() {
   test_horizon();
   test_vis_bake_intervals();
   test_depth_reuse();
+  test_cell_bins();
 }

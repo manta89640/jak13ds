@@ -16,6 +16,7 @@ ones with converter data need the levels converted again.
 | 2 | `horizon` | runs and chunks behind hills | reconverted levels |
 | 3 | `title_vis` | on the title flight, every run the camera there never shows | a host bake (`.c3b`) |
 | 4 | `depth_reuse` | runs and chunks a recent frame's depth hid, while the camera holds still | nothing |
+| 5 | `cell_vis` | runs never seen from the camera's cell looking that way | a host bake (`.c3c`) |
 
 ## 1. Occluders: boxes inside closed tie surfaces
 
@@ -211,3 +212,44 @@ per chunk in view a projection of 9 points, per run of chunks partly behind the 
 **To check on a console:** `depth_reuse = on`, stand in village1 and the jungle and turn slowly;
 look for things missing or blinking behind hills and walls when you start moving, and when Jak or
 an enemy walks in front of the scenery.
+
+## 5. Visibility by camera cell and direction
+
+The removed `fine_vis` kept one set per cell for every direction, and cut 0-4% in caves where the
+PS2's own visibility already works. This one keeps a set per cell and view direction, from what a
+bake actually drew.
+
+**Baking** (host, `CTR_VIS_BAKE=DIR:cells`, the same tagging as section 3). Every frame outside the
+title with the camera inside a drawn level's box files the runs seen under the camera's cell (8 m
+cubes of the world) and its view direction's bin: 12 yaw bins of 30 degrees x 3 pitch bins (below
+-20, level, above +20 degrees). Written to `DIR/<level>.c3c` every 900 recorded frames and when
+recording stops: the samples (cell, yaw bin, pitch bin, frames recorded) sorted by cell, the grid
+around the recorded cells, per run its samples as intervals, grown by the runs whose spheres touch
+(section 3). Play (or run pad scripts) through the places to be covered, looking around in each:
+a cell counts only for the directions it was recorded looking at.
+
+**At runtime** (`cell_vis = on`, `cell_vis_select`): the view's direction (its four planes'
+normals' sum), a half angle that holds its corners (`atan(sqrt(2) tan(the largest plane angle))`),
+and the bins that reaches into (`view_bins`: pitch bins it overlaps; the yaw bins within its half
+angle widened for its pitch, + 5 degrees, all twelve once it reaches 60 degrees up or down). The
+camera's cell must have every one of those bins recorded in 4 frames or more, else nothing is
+hidden. Then the runs seen from that cell and the 7 cells next to it on the camera's side, in those
+bins, are the ones drawn: a bit per run (`lev.cell_bits`), made again only when the cell, the side
+or the bins change. Runs seen in none are not drawn.
+
+**Why it can still miss something:** the bake saw the cell from the places and angles it was in;
+something visible only from another corner of the cell, or at a moment the bake didn't see (a door
+opened later, a platform elsewhere), is missing. The 8 cells, the bins' margins and the grown runs
+are the safety; the bake's coverage is the rest.
+
+The test (`cull_test.cpp`): for 2000 random views (yaw, pitch, half angle), every direction within
+the half angle falls in a bin the view takes; the view's direction and a half angle reaching its
+corners from four planes.
+
+**Cost:** on a change of cell, side or bins, a pass over the level's runs (each run's intervals for
+the samples taken: up to ~50); per run of the chunks in view a bit. Memory: the .c3c (samples 64
+bytes, 4 bytes per run, 4 per interval) and a bit per run.
+
+**To check on a console:** bake by playing a level on the host, copy the .c3c, `cell_vis = on`,
+play the same places and look for missing things, most of all in directions the bake looked at
+only briefly; compare the triangle counts.

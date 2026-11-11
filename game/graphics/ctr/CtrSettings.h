@@ -258,6 +258,10 @@ struct CtrSettings {
   // after the camera's level is drawn) hid in two copies in a row are not drawn, while the camera
   // stands nearly still (0.25 m, 1 degree) and nothing nearer than depth_reuse_min meters covers
   // them (docs/3ds-port/culling.md). Off: not yet seen on a console
+  // (AI-assisted, cellvis) level runs that a bake (<level>.c3c, CTR_VIS_BAKE=dir:cells on the host)
+  // never saw from the camera's cell (8 m) looking the ways the view reaches are not drawn
+  // (docs/3ds-port/culling.md). Off: not yet seen on a console
+  bool cell_vis = false;
   bool depth_reuse = false;
   float depth_reuse_min = 20.f;
   // (AI-assisted) c3l v17 tie levels of detail: the instance groups that have a near version

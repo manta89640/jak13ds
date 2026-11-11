@@ -103,4 +103,82 @@ inline float view_match(const float a[4][3], const float b[4][3]) {
   return m;
 }
 
+/*
+ * (AI-assisted, cellvis) kind 2 (`<level>.c3c`, config.ini `cell_vis`): a sample is a cell of the
+ * camera's space (kCellSize cubes, Header::grid) and a view direction bin (kYawBins x kPitchBins:
+ * Sample::n[0] = yaw bin, pitch bin, frames recorded), holding every run seen in the frames the bake
+ * recorded with the camera in that cell looking that way. Samples are sorted by cell, yaw, pitch.
+ */
+constexpr float kCellSize = 8.f * 4096.f;
+constexpr int kYawBins = 12, kPitchBins = 3;
+constexpr float kPitchSplit = 0.3490659f;  // 20 degrees: below -20 bin 0, above +20 bin 2
+constexpr float kBinPi = 3.14159265358979323846f;
+
+//! The view's direction: its four (inward) plane normals' sum, unit length.
+inline bool view_dir(const float n[4][3], float* d) {
+  float l = 0;
+  for (int c = 0; c < 3; c++) {
+    d[c] = n[0][c] + n[1][c] + n[2][c] + n[3][c];
+    l += d[c] * d[c];
+  }
+  if (!(l > 1e-12f)) {
+    return false;
+  }
+  l = 1.f / std::sqrt(l);
+  for (int c = 0; c < 3; c++) {
+    d[c] *= l;
+  }
+  return true;
+}
+//! A half angle (radians) around the view's direction that holds all of the view, its corners too:
+//! a plane's half angle is asin(n . d); the corners are within atan(sqrt(2) tan(the largest)).
+inline float view_half_angle(const float n[4][3], const float* d) {
+  float m = 0;
+  for (int i = 0; i < 4; i++) {
+    const float s = n[i][0] * d[0] + n[i][1] * d[1] + n[i][2] * d[2];
+    m = std::max(m, std::asin(std::min(1.f, std::max(-1.f, s))));
+  }
+  return std::atan(1.41421356f * std::tan(std::min(m, 1.5f)));
+}
+inline float yaw_of(const float* d) {
+  return std::atan2(d[0], d[2]);
+}
+inline float pitch_of(const float* d) {
+  return std::asin(std::min(1.f, std::max(-1.f, d[1])));
+}
+inline int yaw_bin(float yaw) {
+  int b = (int)std::floor((yaw + kBinPi) * (kYawBins / (2.f * kBinPi)));
+  b %= kYawBins;
+  return b < 0 ? b + kYawBins : b;
+}
+inline int pitch_bin(float pitch) {
+  return pitch < -kPitchSplit ? 0 : (pitch > kPitchSplit ? 2 : 1);
+}
+//! The bins a view of half angle h around (yaw, pitch) reaches into: yaw (bit per bin), pitch.
+inline void view_bins(float yaw, float pitch, float h, uint32_t* yaw_mask, uint32_t* pitch_mask) {
+  *pitch_mask = 0;
+  for (int b = 0; b < kPitchBins; b++) {
+    const float lo = b == 0 ? -kBinPi : (b == 1 ? -kPitchSplit : kPitchSplit);
+    const float hi = b == 0 ? -kPitchSplit : (b == 1 ? kPitchSplit : kBinPi);
+    if (pitch + h >= lo && pitch - h <= hi) {
+      *pitch_mask |= 1u << b;
+    }
+  }
+  // looking steeply up or down the view reaches round in yaw
+  const float reach = std::fabs(pitch) + h;
+  if (reach >= 1.0472f) {  // 60 degrees
+    *yaw_mask = (1u << kYawBins) - 1;
+    return;
+  }
+  const float yh = h / std::max(0.2f, std::cos(reach)) + 0.0873f;  // + 5 degrees
+  *yaw_mask = 0;
+  const float w = 2.f * kBinPi / kYawBins;
+  const int b0 = (int)std::floor((yaw - yh + kBinPi) / w), b1 = (int)std::floor((yaw + yh + kBinPi) / w);
+  for (int b = b0; b <= b1 && b < b0 + kYawBins; b++) {
+    int k = b % kYawBins;
+    k = k < 0 ? k + kYawBins : k;
+    *yaw_mask |= 1u << k;
+  }
+}
+
 }  // namespace ctr_vis_bake
