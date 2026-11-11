@@ -6238,10 +6238,6 @@ void build_draw_order(CtrLevelData* out) {
     if ((d.kind & c3l::kDrawCullBack) && !cond_only) {
       st.tcc |= CTR_TCC_CULL_BACK;
     }
-    // (AI-assisted, terraincull) the terrain whose underside the camera can't get to
-    if ((d.kind & c3l::kDrawCullTerrain) && ctr_settings().cull_terrain && !cond_only) {
-      st.tcc |= CTR_TCC_CULL_BACK;
-    }
     // (AI-assisted) c3l v15: an atlas's texture coordinates (1/32768)
     if (d.kind & c3l::kDrawAtlasUV) {
       st.tcc |= CTR_TCC_ST_ATLAS;

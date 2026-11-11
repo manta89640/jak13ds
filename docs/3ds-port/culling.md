@@ -13,7 +13,6 @@ ones with converter data need the levels converted again.
 | # | key | removes | needs |
 |---|---|---|---|
 | 6 | `ps2_lod_scale` | detail the 240-line screen can't show (coarse versions nearer) | nothing |
-| 9 | `cull_terrain` | back faces of ground the camera can't get under | levels converted with `--terrain-cull` |
 
 ## 6. The PS2's detail distances for a 240-line screen
 
@@ -38,40 +37,3 @@ No unit test: it is a factor on existing distances (the host build checks the pl
 **To check on a console:** `ps2_lod_scale = auto`; village1, the beach and the title flight: look
 at rocks, huts and cliffs as they come nearer (shape and shading changes), compare the triangle
 counts and `render ms/frame` with 1.
-
-## 9. Back faces of the ground
-
-Tfrag is drawn double-sided (the PS2 draws it so); at the title ~43% of the level triangles were
-back faces of draws without culling. The GPU's back face culling saves their setup and pixels, not
-their vertices.
-
-**Which ground** (`Converter::mark_terrain_cull`, `--terrain-cull`; off by default because the
-marked triangles' draws split from the others): opaque tfrag (`key_cullable`: no blending that
-stays, an alpha test that never fails) of tiers 0-2, floor-like (|normal y| >= 0.7), that is
-- walkable ground itself: the level's collision has ground within 1 m of the triangle's center
-  height there (not an overhang, a roof or a bridge over a gap), and
-- not near lower ground: no collision column (4 m) within 20 m has ground more than 2 m below the
-  triangle's plane there (a ledge, a pit's rim, the top of a cliff are left alone: from below them
-  the camera could look up at the back).
-
-The camera stays above the ground near it, so it stays above such a plane and never sees the back;
-seen from further away, the ground's own mass (the cliffs, the slopes) is in front of it. The
-triangle is turned to face up (the culled side is the underside) and its draw gets
-`kDrawCullTerrain`. Levels without collision in their .fr3: none. The vista tier's copies drop the
-mark (they are seen from far away, maybe from below). `cull_fixup` takes it back from draws whose
-blending stays, as the tie marks.
-
-**Runtime:** `cull_terrain = on` gives those draws `CTR_TCC_CULL_BACK` at level load, culled with
-`cull_ties`' winding (so `cull_ties` must be on). Off: both sides, as before.
-
-The test (`converter_test.cpp test_terrain_cull`): ground at 0 m with a 10 m deep pit: a floor
-triangle far from the pit is marked and turned to face up; one at the pit's edge, one floating
-10 m over walkable ground and a wall are not.
-
-**What can go wrong:** the camera dropping under the ground (a cutscene camera, a fall through the
-floor) sees through the marked ground; ground drawn as tfrag but walked on as something else
-(collision of a moving platform) is left alone by the collision test.
-
-**To check on a console:** convert with `--terrain-cull`, `cull_terrain = on`; walk the beach, the
-jungle and village1 looking for holes in the ground (most likely by ledges the test missed and in
-cutscenes); compare triangles and `render ms/frame`.

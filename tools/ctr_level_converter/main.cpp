@@ -191,9 +191,6 @@ struct Options {
   // (AI-assisted) v13: tie strips wound consistently (odd strip triangles flipped), closed tie
   // surfaces oriented outward and marked for back face culling (c3l::kDrawCullBack)
   bool tie_winding = true;
-  // (AI-assisted, terraincull) c3l::kDrawCullTerrain on the terrain whose back can't be seen (off:
-  // the marked triangles' draws split from the others cost draws)
-  bool terrain_cull = false;
   // (AI-assisted) v13 vista tier (c3l::CHUNK_KIND_VISTA): the far content (low resolution tfrag,
   // the ties (small and medium ones too), the coarse tfrag of levels without low resolution tfrag; of a
   // "spanning" level's the far cells too: VistaSpan)
@@ -1588,7 +1585,7 @@ struct Converter {
     std::unordered_map<u32, u32> to;
     for (auto& t : tris) {
       const DrawKey& dk = draw_keys[t.draw_key];
-      if (!(dk.kind & (c3l::kDrawCullBack | c3l::kDrawCullCond | c3l::kDrawCullTerrain))) {
+      if (!(dk.kind & (c3l::kDrawCullBack | c3l::kDrawCullCond))) {
         continue;
       }
       DrawMode mode;
@@ -1599,7 +1596,7 @@ struct Converter {
       auto it = to.find(t.draw_key);
       if (it == to.end()) {
         DrawKey nk = dk;
-        nk.kind &= (u16)~(c3l::kDrawCullBack | c3l::kDrawCullCond | c3l::kDrawCullTerrain);
+        nk.kind &= (u16)~(c3l::kDrawCullBack | c3l::kDrawCullCond);
         nk.cond_bin = 0;
         const u32 id = key_id(nk);
         rank_merge(id, t.draw_key);
@@ -1757,84 +1754,6 @@ struct Converter {
       }
     }
     return true;
-  }
-  // (AI-assisted, terraincull) Options::terrain_cull: c3l::kDrawCullTerrain on opaque floor-like
-  // tfrag (|normal y| >= kFloorNy) that is the ground itself (collision within 1 m at its center)
-  // and has no collision ground more than kDrop below its plane within kReach horizontally (the
-  // camera, above the ground near it, stays above the plane: it can't see the back), turned to face
-  // up. Levels without collision in their .fr3: none.
-  size_t terrain_floor = 0, terrain_marked = 0, terrain_flipped = 0;
-  void mark_terrain_cull() {
-    constexpr float kFloorNy = 0.7f, kM = 4096.f;
-    constexpr float kReach = 20.f * kM, kDrop = 2.f * kM, kWalk = 1.f * kM;
-    if (!has_ground()) {
-      return;
-    }
-    // the lowest collision height of each kGroundCell column
-    std::unordered_map<u64, float> col_min;
-    for (const auto& [k, ids] : ground_cells) {
-      float m = 1e30f;
-      for (u32 id : ids) {
-        const auto& g = ground_tris[id];
-        m = std::min({m, g.y[0], g.y[1], g.y[2]});
-      }
-      col_min[k] = m;
-    }
-    std::unordered_map<u32, u32> marked_key;
-    for (auto& t : tris) {
-      const auto& dk = draw_keys[t.draw_key];
-      if ((dk.kind & 0xff) != 0 || t.tier > 2 || (dk.kind & c3l::kDrawCullTerrain) ||
-          !key_cullable(t.draw_key)) {
-        continue;
-      }
-      const auto& a = verts[t.v[0]];
-      const auto& b = verts[t.v[1]];
-      const auto& c = verts[t.v[2]];
-      const double e1[3] = {(double)b.x - a.x, (double)b.y - a.y, (double)b.z - a.z};
-      const double e2[3] = {(double)c.x - a.x, (double)c.y - a.y, (double)c.z - a.z};
-      const double n[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
-                           e1[0] * e2[1] - e1[1] * e2[0]};
-      const double len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-      if (!(len > 0) || std::abs(n[1]) < kFloorNy * len) {
-        continue;
-      }
-      terrain_floor++;
-      const float cx = (a.x + b.x + c.x) / 3, cy = (a.y + b.y + c.y) / 3, cz = (a.z + b.z + c.z) / 3;
-      if (!ground_between(cx, cz, cy - kWalk, cy + kWalk)) {
-        continue;  // not walkable ground: an overhang, a roof, a bridge over a gap
-      }
-      // the plane's height at (x, z), and how much it changes over half a column's diagonal
-      const double sx = -n[0] / n[1], sz = -n[2] / n[1];
-      const double slack = (std::abs(sx) + std::abs(sz)) * kGroundCell * 0.5;
-      bool ok = true;
-      const int x0 = (int)std::floor((cx - kReach) / kGroundCell), x1 = (int)std::floor((cx + kReach) / kGroundCell);
-      const int z0 = (int)std::floor((cz - kReach) / kGroundCell), z1 = (int)std::floor((cz + kReach) / kGroundCell);
-      for (int gx = x0; gx <= x1 && ok; gx++) {
-        for (int gz = z0; gz <= z1 && ok; gz++) {
-          auto it = col_min.find(ground_key(gx, gz));
-          if (it == col_min.end()) {
-            continue;
-          }
-          const double px = (gx + 0.5) * kGroundCell, pz = (gz + 0.5) * kGroundCell;
-          const double h = cy + sx * (px - cx) + sz * (pz - cz);
-          ok = it->second >= h - kDrop - slack;
-        }
-      }
-      if (!ok) {
-        continue;  // lower ground near it: a camera there may look up at its back
-      }
-      if (n[1] < 0) {
-        std::swap(t.v[1], t.v[2]);  // face up: the culled side is the underside
-        terrain_flipped++;
-      }
-      auto it = marked_key.find(t.draw_key);
-      if (it == marked_key.end()) {
-        const u32 id = key_id(key_like(dk, dk.mode, dk.texture, (u16)(dk.kind | c3l::kDrawCullTerrain)));
-        it = marked_key.emplace(t.draw_key, id).first;
-      }
-      t.draw_key = it->second;
-      terrain_marked++;
-    }
   }
   /*!
    * (AI-assisted) The tie triangles [first, end): per visibility group (up to 8 instances), the
@@ -5385,13 +5304,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   }
 
   cv.tod_alpha_bounds();
-  // (AI-assisted, terraincull) the terrain whose underside can't be seen (c3l::kDrawCullTerrain)
-  if (opt.terrain_cull && !opt.merc_only) {
-    cv.mark_terrain_cull();
-    lg::info("{}: terrain culling: {} of {} floor-like opaque tfrag triangles marked ({} turned to "
-             "face up)",
-             in.stem().string(), cv.terrain_marked, cv.terrain_floor, cv.terrain_flipped);
-  }
   // ---- textures (in parallel: ETC1 encoding is slow) ----
   // (AI-assisted) before the chunks: the v15 draw optimisations look at the encoded texels
   std::vector<c3l::Texture> tex_descs(cv.tex_order.size());
@@ -6034,12 +5946,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           // (AI-assisted, j2water2) the vista draws no envmap shine (it needs the normals)
           DrawKey nk = cv.draw_keys[src_key_id];
           nk.env = 0xffff;
-          src_key_id = cv.key_id(nk);
-        }
-        if (cv.draw_keys[src_key_id].kind & c3l::kDrawCullTerrain) {
-          // (AI-assisted, terraincull) seen from far away, maybe from below: both sides drawn
-          DrawKey nk = cv.draw_keys[src_key_id];
-          nk.kind &= (u16)~c3l::kDrawCullTerrain;
           src_key_id = cv.key_id(nk);
         }
         if (cv.draw_keys[src_key_id].kind & c3l::kDrawCullCond) {
@@ -8747,9 +8653,6 @@ int main(int argc, char** argv) {
   app.add_flag("--no-tie-winding", no_tie_winding,
                "keep the strips' triangle order (no flipping, no back face culling marks)");
   app.add_flag("--no-vista", no_vista, "no vista tier (far scenery cells)");
-  app.add_flag("--terrain-cull", opt.terrain_cull,
-               "mark the terrain whose underside can't be seen for back face culling "
-               "(c3l::kDrawCullTerrain)");
   app.add_option("--vista-cell", opt.vista_cell, "vista tier cell size (meters)");
   app.add_option("--merc-cull-agree", opt.merc_cull_agree,
                  "merc back face culling marks: share of a draw's triangles agreeing with their "

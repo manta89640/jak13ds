@@ -262,10 +262,6 @@ struct CtrSettings {
   // 240-line top screen as it did of the PS2's picture (docs/3ds-port/culling.md). 1: the PS2's
   float ps2_lod_scale = 1.f;
   bool ps2_lod_scale_auto = false;
-  // (AI-assisted, terraincull) back faces of the terrain the converter marked (c3l::kDrawCullTerrain,
-  // --terrain-cull: ground whose underside the camera can't get to) are culled, with cull_ties'
-  // winding (needs cull_ties on). Read at level load. Off: both sides (docs/3ds-port/culling.md)
-  bool cull_terrain = true;
   // (AI-assisted) c3l v17 tie levels of detail: the instance groups that have a near version
   // (geometry 0) are drawn with it within their PS2 distance, else with the far one (geometry 3).
   // off: the far versions only (as before v17)
