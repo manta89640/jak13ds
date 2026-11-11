@@ -32,6 +32,7 @@
 #include "c3l_pack.h"
 #include "ctr_texture.h"
 #include "keira_model.h"
+#include "horizon.h"
 #include "occluders.h"
 #include "c3l_compare.h"
 #include "texshare.h"
@@ -194,6 +195,8 @@ struct Options {
   bool tie_winding = true;
   // (AI-assisted, occluders) c3l::ExtOcc: boxes inside the closed tie surfaces (needs tie_winding)
   bool occluders = true;
+  // (AI-assisted, horizon) c3l::ExtHorizon: the terrain grid for horizon culling
+  bool horizon = true;
   // (AI-assisted) v13 vista tier (c3l::CHUNK_KIND_VISTA): the far content (low resolution tfrag,
   // the ties (small and medium ones too), the coarse tfrag of levels without low resolution tfrag; of a
   // "spanning" level's the far cells too: VistaSpan)
@@ -7594,7 +7597,39 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   const std::vector<c3l::Occluder> out_occ =
       ext_out && opt.occluders ? cv.occluder_table() : std::vector<c3l::Occluder>{};
   const bool occ_out = !out_occ.empty();
+  // (AI-assisted, horizon) c3l::ExtHorizon: the opaque tfrag a camera in the level may see drawn
+  // (tiers 0-2, not the low resolution or vista tiers), each tier and geomorph version a version
+  horizon::Grid hz_grid;
+  if (ext_out && opt.horizon) {
+    std::vector<horizon::TerrainTri> tt;
+    for (const auto& t : cv.tris) {
+      const auto& dk = cv.draw_keys[t.draw_key];
+      if ((dk.kind & 0xff) != 0 || t.tier > 2 || !cv.key_cullable(t.draw_key)) {
+        continue;
+      }
+      horizon::TerrainTri x{};
+      x.ymin = 1e30f;
+      x.ymax = -1e30f;
+      for (int c = 0; c < 3; c++) {
+        const auto& v = cv.verts[t.v[c]];
+        x.p[c][0] = v.x;
+        x.p[c][1] = v.y;
+        x.p[c][2] = v.z;
+        const float ys[4] = {v.y, v.y + v.tband0[1], v.y + v.tband1[1],
+                             v.y + v.tband0[1] + v.tband1[1]};
+        for (int k = 0; k < (v.tkind ? 4 : 1); k++) {
+          x.ymin = std::min(x.ymin, ys[k]);
+          x.ymax = std::max(x.ymax, ys[k]);
+        }
+      }
+      x.cls = t.tier * 8 + t.tlod;
+      tt.push_back(x);
+    }
+    hz_grid = horizon::build(tt);
+  }
+  const bool hz_out = hz_grid.covered > 0;
   const u32 eh_size = !ext_out                           ? 0
+                      : hz_out                           ? c3l::kExtHeaderHorizonSize
                       : occ_out                          ? c3l::kExtHeaderOccSize
                       : tfrag_out                        ? c3l::kExtHeaderTfragSize
                       : morph_out                        ? c3l::kExtHeaderMorphSize
@@ -8020,6 +8055,22 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     lg::info("{}: occluders: {} boxes (of {} surfaces big enough, {} found), largest faces {:.0f} "
              "m^2 in all",
              level.level_name, out_occ.size(), cv.occ_tried, cv.occ_cands.size(), area);
+  }
+  if (hz_out) {
+    // (AI-assisted, horizon) the terrain grid (load_horizon)
+    c3l::ExtHorizon ex{};
+    ex.x0 = hz_grid.x0;
+    ex.z0 = hz_grid.z0;
+    ex.cell = hz_grid.cell;
+    ex.base_y = hz_grid.base_y;
+    ex.nx = (u32)hz_grid.nx;
+    ex.nz = (u32)hz_grid.nz;
+    ex.minh_offset = append(buf, hz_grid.minh.data(), hz_grid.minh.size());
+    ex.span_offset = append(buf, hz_grid.span.data(), hz_grid.span.size());
+    ext_put(c3l::kExtHeaderOccSize, &ex, sizeof(ex));
+    lg::info("{}: terrain grid: {} x {} cells of {:.1f} m, {} covered ({} KB)", level.level_name,
+             hz_grid.nx, hz_grid.nz, hz_grid.cell / 4096.f, hz_grid.covered,
+             hz_grid.minh.size() * 3 / 1024);
   }
   if (morph_out) {
     ext_put(c3l::kExtHeaderV24Size, &em, sizeof(em));
@@ -8790,6 +8841,8 @@ int main(int argc, char** argv) {
   app.add_flag("--no-vista", no_vista, "no vista tier (far scenery cells)");
   bool no_occluders = false;  // (AI-assisted, occluders)
   app.add_flag("--no-occluders", no_occluders, "no occluders (boxes inside closed tie surfaces)");
+  bool no_horizon = false;  // (AI-assisted, horizon)
+  app.add_flag("--no-horizon", no_horizon, "no terrain grid for horizon culling");
   app.add_option("--vista-cell", opt.vista_cell, "vista tier cell size (meters)");
   app.add_option("--merc-cull-agree", opt.merc_cull_agree,
                  "merc back face culling marks: share of a draw's triangles agreeing with their "
@@ -8812,6 +8865,7 @@ int main(int argc, char** argv) {
   opt.opaque_alpha = !no_opaque_alpha;
   opt.tie_winding = !no_tie_winding;
   opt.occluders = !no_occluders;
+  opt.horizon = !no_horizon;
   opt.tie_far_near_colors = !tie_far_own_colors;
   opt.tie_lod = !no_tie_lod;
   opt.tie_morph = !no_tie_morph;

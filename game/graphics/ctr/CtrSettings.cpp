@@ -243,6 +243,10 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.occluders = parse_bool(v);  // (AI-assisted, occluders)
     } else if (key == "occluder_count") {
       s.occluder_count = std::clamp(std::atoi(v.c_str()), 1, 16);
+    } else if (key == "horizon") {
+      s.horizon = parse_bool(v);  // (AI-assisted, horizon)
+    } else if (key == "horizon_radius") {
+      s.horizon_radius = std::clamp(f, 16.f, 400.f);
     } else if (key == "tie_lod") {
       s.tie_lod = parse_bool(v);  // (AI-assisted) c3l v17
     } else if (key == "color_stream") {

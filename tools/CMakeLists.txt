@@ -41,6 +41,7 @@ add_executable(ctr_level_converter
         ctr_level_converter/tfrag_lod.cpp
         ctr_level_converter/keira_model.cpp
         ctr_level_converter/occluders.cpp
+        ctr_level_converter/horizon.cpp
         ctr_level_converter/texshare.cpp
         ctr_level_converter/c3l_compare.cpp
         ${CMAKE_SOURCE_DIR}/game/graphics/ctr/c3l_reader.cpp

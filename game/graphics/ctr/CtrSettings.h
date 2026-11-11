@@ -245,6 +245,11 @@ struct CtrSettings {
   // ctr_level_converter) is not drawn (docs/3ds-port/culling.md). Off: not yet seen on a console
   bool occluders = false;
   int occluder_count = 6;
+  // (AI-assisted, horizon) level geometry entirely beyond horizon_radius meters and below the
+  // terrain's horizon (c3l::ExtHorizon: the hills of the level the camera is over) is not drawn
+  // (docs/3ds-port/culling.md). Off: not yet seen on a console
+  bool horizon = false;
+  float horizon_radius = 64.f;
   // (AI-assisted) c3l v17 tie levels of detail: the instance groups that have a near version
   // (geometry 0) are drawn with it within their PS2 distance, else with the far one (geometry 3).
   // off: the far versions only (as before v17)

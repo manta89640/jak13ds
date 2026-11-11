@@ -979,3 +979,11 @@ sections before a present one are zero when the level has none).
   each: center, half extents, two unit axes (the third is their cross product), the tie node
   (`vis`) whose closed surface holds the box. Written by default (`--no-occluders`: none), read
   only while config.ini `occluders` is on.
+- `ExtHorizon` (size >= `kExtHeaderHorizonSize` 256, at ext_offset + 224): the terrain grid for
+  horizon culling: the corner of cell (0, 0), the cell size (8 m, larger for levels wider than 192
+  cells), a base height, then `u16 minh[nz][nx]` (quarter meters above the base, 0xffff: not
+  covered) and `u8 span[nz][nx]` (maxh - minh, half meters rounded up, 255: or more). A cell is
+  covered when 5 x 5 samples in it are each covered by the opaque tfrag (tiers 0-2) of every
+  version (tier, geomorph version) present in it, with the non-steep surfaces of one version within
+  2 m of each other; minh / maxh are the lowest and highest point of the triangles that reach it,
+  morph offsets included. `--no-horizon`: none.

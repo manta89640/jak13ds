@@ -5826,6 +5826,47 @@ void load_occluders(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   lg::info("[ctr] {}: occluders: {} of {}", lev->name, lev->occluders.size(), eo.count);
 }
 
+// (AI-assisted, horizon) c3l::ExtHorizon: the terrain grid (read only while config.ini horizon is
+// on; 3 bytes per cell, at most 192 x 192)
+void load_horizon(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
+  lev->hz_nx = lev->hz_nz = 0;
+  lev->hz_minh.clear();
+  lev->hz_span.clear();
+  lev->hz_drawn_frame = 0;
+  if (!ctr_settings().horizon) {
+    return;
+  }
+  c3l::ExtHeader eh;
+  if (!hdr.ext_offset || !read_ext_header(f, hdr, &eh) || eh.size < c3l::kExtHeaderHorizonSize) {
+    return;
+  }
+  c3l::ExtHorizon ex{};
+  if (!f.read(hdr.ext_offset + c3l::kExtHeaderOccSize, &ex, sizeof(ex)) || !ex.nx || !ex.nz ||
+      ex.nx > 1024 || ex.nz > 1024 || !(ex.cell > 0)) {
+    return;
+  }
+  const u32 n = ex.nx * ex.nz;
+  if (!f.read_array(ex.minh_offset, n, &lev->hz_minh) ||
+      !f.read_array(ex.span_offset, n, &lev->hz_span)) {
+    lev->hz_minh.clear();
+    lev->hz_span.clear();
+    lg::warn("[ctr] {}: bad terrain grid, no horizon", lev->name);
+    return;
+  }
+  lev->hz_x0 = ex.x0;
+  lev->hz_z0 = ex.z0;
+  lev->hz_cell = ex.cell;
+  lev->hz_base_y = ex.base_y;
+  lev->hz_nx = (int)ex.nx;
+  lev->hz_nz = (int)ex.nz;
+  u32 covered = 0;
+  for (const u16 m : lev->hz_minh) {
+    covered += m != ctr_cull::kHorizonUncovered;
+  }
+  lg::info("[ctr] {}: terrain grid {} x {} cells of {:.1f} m, {} covered", lev->name, ex.nx, ex.nz,
+           ex.cell / 4096.f, covered);
+}
+
 // a cond box in world game units
 void cond_box(const CtrLevelData& lev, u32 i, float* lo, float* hi) {
   const auto& b = lev.cond_boxes[i];
@@ -7715,6 +7756,7 @@ bool CtrLevels::load_file(const fs::path& path,
   load_wind_ties(f, hdr, out);
   load_cull_cond(f, hdr, out);
   load_occluders(f, hdr, out);  // (AI-assisted, occluders)
+  load_horizon(f, hdr, out);    // (AI-assisted, horizon)
   // merc models: one skinned mesh per model
   if (hdr.num_merc_models) {
     std::vector<c3l::MercModel> models;
@@ -11496,6 +11538,14 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              m_name, m_occ_used / n, m_occ_chunks / n, m_occ_runs / n, m_occ_tris / n, m_occ_frames);
     m_occ_frames = m_occ_used = m_occ_chunks = m_occ_runs = m_occ_tris = 0;
   }
+  if (rs.log_now && m_hz_frames) {
+    // (AI-assisted, horizon)
+    const double n = (double)m_hz_frames;
+    lg::info("[ctr] {}: horizon in {:.0f}% of level draws, hid {:.1f} chunks and {:.1f} runs ({:.0f} "
+             "tris) per level draw ({} level draws)",
+             m_name, 100.0 * m_hz_on / n, m_hz_chunks / n, m_hz_runs / n, m_hz_tris / n, m_hz_frames);
+    m_hz_frames = m_hz_on = m_hz_chunks = m_hz_runs = m_hz_tris = 0;
+  }
   if (rs.log_now && m_vista_frames) {
     lg::info("[ctr] {}: vista {:.1f} chunks {:.0f} tris, low resolution chunks in near mode {:.1f} "
              "per level draw ({} level draws)",
@@ -11598,6 +11648,48 @@ void CtrTfragRenderer::flush_calls(int /*pass*/) {
 }
 
 CtrTfragRenderer::~CtrTfragRenderer() = default;
+
+// (AI-assisted, horizon) the frame's horizon: from the terrain grid of the first loaded level that
+// was drawn in near mode the frame before and has the camera over a covered cell, once per frame
+// for all level draws (the hills of the level the camera is in hide the other level's far parts
+// too)
+bool frame_horizon(const std::vector<const CtrLevelData*>& levels,
+                   const CtrBackgroundCamera& cam,
+                   u64 frame,
+                   ctr_cull::Horizon* out) {
+  static u64 s_frame = ~0ull;
+  static bool s_ok = false;
+  static ctr_cull::Horizon s_hz;
+  if (s_frame != frame) {
+    s_frame = frame;
+    s_ok = false;
+    const auto& st = ctr_settings();
+    const float eye[3] = {cam.trans[0], cam.trans[1], cam.trans[2]};
+    const u32 now = (u32)frame + 1;
+    for (const CtrLevelData* l : levels) {
+      if (!l || !l->hz_nx || !l->hz_drawn_frame || now - l->hz_drawn_frame > 1) {
+        continue;
+      }
+      ctr_cull::HorizonGridView v;
+      v.x0 = l->hz_x0;
+      v.z0 = l->hz_z0;
+      v.cell = l->hz_cell;
+      v.base_y = l->hz_base_y;
+      v.nx = l->hz_nx;
+      v.nz = l->hz_nz;
+      v.minh = l->hz_minh.data();
+      v.span = l->hz_span.data();
+      if (ctr_cull::build_horizon(v, eye, st.horizon_radius * 4096.f, 0.5f * 4096.f, &s_hz)) {
+        s_ok = true;
+        break;
+      }
+    }
+  }
+  if (s_ok) {
+    *out = s_hz;
+  }
+  return s_ok;
+}
 
 // (AI-assisted, occluders) the occluders for this level draw (m_occ_shadow): of those whose node
 // the game's string shows, whose surface was drawn opaque the frame before, in view and within
@@ -13097,6 +13189,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // source chunks, then its matrix. vista: drawn in the vista pass.
   // (AI-assisted, occluders) this level draw's occluders (m_occ_shadow)
   choose_occluders(lev, cam, rs.frame_idx, draw_dist);
+  // (AI-assisted, horizon) the frame's horizon (m_hz), and this level's terrain as standing there
+  m_hz_ok = false;
+  if (settings.horizon) {
+    if (!far_level) {
+      lev.hz_drawn_frame = (u32)rs.frame_idx + 1;
+    }
+    m_hz_ok = frame_horizon(m_loaded, cam, rs.frame_idx, &m_hz);
+    m_hz_frames++;
+    m_hz_on += m_hz_ok;
+  }
   // the run loop's inputs that are the same for every chunk (filled before the chunk loop)
   RunLoopIn run_in;
   float run_po[4], run_pk[4][3];
@@ -13157,6 +13259,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           return;
         }
         occ_mask |= c ? 1u << i : 0u;
+      }
+      // (AI-assisted, horizon) a chunk below the horizon is hidden whole; one partly below it has
+      // its runs tested (below)
+      bool hz_runs = false;
+      if (m_hz_ok) {
+        const int c = ctr_cull::horizon_classify(m_hz, ch.bsphere, ch.bsphere[3]);
+        if (c == 2) {
+          m_hz_chunks++;
+          return;
+        }
+        hz_runs = c == 1;
       }
       const bool straddles = cross != 0;
       bool partly = false;
@@ -13257,7 +13370,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       // (AI-assisted, occluders) the runs inside an occluder's shadow (the occluders the chunk
       // reaches into); hidden runs may still be drawn along with their neighbours (the small-gap
       // merge), as the view test's
-      if (occ_mask && lev.run_spheres.size() >= lev.vis_runs.size()) {
+      if ((occ_mask || hz_runs) && lev.run_spheres.size() >= lev.vis_runs.size()) {
         const u32 r0 = lev.chunk_first_run[ci];
         const u32 nr = vis_test || vista_tier
                            ? ch.vis_run_count
@@ -13284,11 +13397,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                 break;
               }
             }
+            if (hz_runs && m_run_shown[r] && ctr_cull::horizon_classify(m_hz, c, rr) == 2) {
+              m_run_shown[r] = 0;
+              m_hz_runs++;
+              m_hz_tris += lev.vis_runs[r].index_count / 3;
+            }
           }
           shown += m_run_shown[r];
         }
         if (!shown) {
-          m_occ_chunks++;
+          (occ_mask ? m_occ_chunks : m_hz_chunks)++;
           return;
         }
         partly = partly || shown < nr;

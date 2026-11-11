@@ -618,6 +618,25 @@ struct Occluder {
 static_assert(sizeof(Occluder) == 64);
 
 /*!
+ * (AI-assisted, horizon) The terrain grid for horizon culling (tools/ctr_level_converter
+ * horizon.cpp, config.ini `horizon`, docs/3ds-port/culling.md "2."): per cell of `cell` game units,
+ * u16 minh (quarter meters above base_y; 0xffff: not covered) and u8 span (maxh - minh, half meters
+ * rounded up; 255: or more). A covered cell is covered by the level's opaque tfrag in one layer in
+ * every version present there, none of which goes below minh or above maxh in it (morph included).
+ * ExtHeader::size >= kExtHeaderHorizonSize, then this at ext_offset + kExtHeaderOccSize.
+ */
+constexpr uint32_t kExtHeaderHorizonSize = 256;
+struct ExtHorizon {
+  float x0, z0;  // the corner of cell (0, 0) (game units)
+  float cell;
+  float base_y;
+  uint32_t nx, nz;
+  uint32_t minh_offset;  // u16[nz][nx], absolute
+  uint32_t span_offset;  // u8[nz][nx], absolute
+};
+static_assert(sizeof(ExtHorizon) == kExtHeaderHorizonSize - kExtHeaderOccSize);
+
+/*!
  * (AI-assisted, streaming) v19: a run's bounding sphere in its chunk's quantized units (world =
  * origin + c * scale, radius r * scale): the center of the box of the run's vertices (rounded down)
  * and the length of the larger half of the box per axis, ceil + 1 (as the runtime made them from the

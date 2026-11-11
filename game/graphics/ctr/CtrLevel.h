@@ -713,6 +713,13 @@ struct CtrLevelData {
   std::vector<u8> occ_support_n;
   std::vector<u32> chunk_opaque_frame;
   bool occ_made = false;
+  // (AI-assisted, horizon) the terrain grid (c3l::ExtHorizon; hz_nx 0: none, read only while
+  // config.ini horizon is on), and the frame + 1 the level was last drawn in near mode
+  float hz_x0 = 0, hz_z0 = 0, hz_cell = 0, hz_base_y = 0;
+  int hz_nx = 0, hz_nz = 0;
+  std::vector<u16> hz_minh;
+  std::vector<u8> hz_span;
+  u32 hz_drawn_frame = 0;
   bool tf_morph(size_t ci) const {
     return ci < chunk_tf.size() && chunk_tf[ci] >= 0 && tf_chunks[chunk_tf[ci]].records_offset;
   }
@@ -1596,6 +1603,11 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   std::array<ctr_cull::Shadow, kMaxOccluders> m_occ_shadow;
   int m_occ_n = 0;
   u64 m_occ_frames = 0, m_occ_used = 0, m_occ_chunks = 0, m_occ_runs = 0, m_occ_tris = 0;
+  // (AI-assisted, horizon) this level draw's horizon (frame_horizon) and statistics: level draws,
+  // of them with a horizon, chunks and runs it hid, the runs' triangles
+  ctr_cull::Horizon m_hz;
+  bool m_hz_ok = false;
+  u64 m_hz_frames = 0, m_hz_on = 0, m_hz_chunks = 0, m_hz_runs = 0, m_hz_tris = 0;
   void choose_occluders(CtrLevelData& lev, const CtrBackgroundCamera& cam, u64 frame,
                         float draw_dist);
   // kDrawCullCond draws of visible chunks, and of them culled (camera inside)

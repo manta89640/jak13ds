@@ -9,6 +9,7 @@
 #include "check.h"
 
 #include "game/graphics/ctr/CtrCull.h"
+#include "tools/ctr_level_converter/horizon.h"
 #include "tools/ctr_level_converter/occluders.h"
 
 #include "fmt/format.h"
@@ -205,6 +206,180 @@ void test_tri_box() {
   check(occluders::tri_box_overlap(b, corner, 0.2), "... that touches it grown");
 }
 
+// (AI-assisted, horizon) a terrain of quads of `q` meters from -100 m to 200 m (x and z), a ridge
+// 20 m high around x = 40 m; quads whose center is in the hole box are left out
+struct Terrain {
+  std::vector<horizon::TerrainTri> tris;
+};
+float ridge(float x) {
+  const float d = std::fabs(x - 40.f * kM) / (12.f * kM);
+  return d >= 1.f ? 0.f : 20.f * kM * (1.f - d * d);
+}
+Terrain make_terrain(float q, const float* hole) {
+  Terrain t;
+  const float lo = -100.f * kM, hi = 200.f * kM, step = q * kM;
+  for (float z = lo; z < hi; z += step) {
+    for (float x = lo; x < hi; x += step) {
+      const float cx = x + step / 2, cz = z + step / 2;
+      if (hole && cx > hole[0] && cx < hole[1] && cz > hole[2] && cz < hole[3]) {
+        continue;
+      }
+      const float p[4][3] = {{x, ridge(x), z},
+                             {x + step, ridge(x + step), z},
+                             {x + step, ridge(x + step), z + step},
+                             {x, ridge(x), z + step}};
+      const int f[2][3] = {{0, 1, 2}, {0, 2, 3}};
+      for (const auto& tri : f) {
+        horizon::TerrainTri tt{};
+        tt.ymin = 1e30f;
+        tt.ymax = -1e30f;
+        for (int c = 0; c < 3; c++) {
+          for (int k = 0; k < 3; k++) {
+            tt.p[c][k] = p[tri[c]][k];
+          }
+          tt.ymin = std::fmin(tt.ymin, tt.p[c][1]);
+          tt.ymax = std::fmax(tt.ymax, tt.p[c][1]);
+        }
+        t.tris.push_back(tt);
+      }
+    }
+  }
+  return t;
+}
+// does the segment a -> b cross a terrain triangle before b
+bool segment_blocked(const Terrain& t, const float* a, const float* b) {
+  const double d[3] = {(double)b[0] - a[0], (double)b[1] - a[1], (double)b[2] - a[2]};
+  for (const auto& tri : t.tris) {
+    const double e1[3] = {(double)tri.p[1][0] - tri.p[0][0], (double)tri.p[1][1] - tri.p[0][1],
+                          (double)tri.p[1][2] - tri.p[0][2]};
+    const double e2[3] = {(double)tri.p[2][0] - tri.p[0][0], (double)tri.p[2][1] - tri.p[0][1],
+                          (double)tri.p[2][2] - tri.p[0][2]};
+    const double pv[3] = {d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2],
+                          d[0] * e2[1] - d[1] * e2[0]};
+    const double det = e1[0] * pv[0] + e1[1] * pv[1] + e1[2] * pv[2];
+    if (std::abs(det) < 1e-9) {
+      continue;
+    }
+    const double tv[3] = {(double)a[0] - tri.p[0][0], (double)a[1] - tri.p[0][1],
+                          (double)a[2] - tri.p[0][2]};
+    const double u = (tv[0] * pv[0] + tv[1] * pv[1] + tv[2] * pv[2]) / det;
+    if (u < 0 || u > 1) {
+      continue;
+    }
+    const double qv[3] = {tv[1] * e1[2] - tv[2] * e1[1], tv[2] * e1[0] - tv[0] * e1[2],
+                          tv[0] * e1[1] - tv[1] * e1[0]};
+    const double v = (d[0] * qv[0] + d[1] * qv[1] + d[2] * qv[2]) / det;
+    if (v < 0 || u + v > 1) {
+      continue;
+    }
+    const double s = (e2[0] * qv[0] + e2[1] * qv[1] + e2[2] * qv[2]) / det;
+    if (s > 0 && s < 1) {
+      return true;
+    }
+  }
+  return false;
+}
+ctr_cull::HorizonGridView view_of(const horizon::Grid& g) {
+  ctr_cull::HorizonGridView v;
+  v.x0 = g.x0;
+  v.z0 = g.z0;
+  v.cell = g.cell;
+  v.base_y = g.base_y;
+  v.nx = g.nx;
+  v.nz = g.nz;
+  v.minh = g.minh.data();
+  v.span = g.span.data();
+  return v;
+}
+
+int horizon_trial(const float* hole, int* tested) {
+  const Terrain t = make_terrain(4.f, hole);
+  const horizon::Grid g = horizon::build(t.tris);
+  check(g.covered > 0, "the terrain grid covers the terrain");
+  ctr_cull::Horizon h;
+  const float eye[3] = {0.f, 2.f * kM, 0.f};
+  check(ctr_cull::build_horizon(view_of(g), eye, 64.f * kM, 0.5f * kM, &h),
+        "a horizon from a camera over the terrain");
+  std::mt19937 rng(77);
+  std::uniform_real_distribution<float> u(0.f, 1.f);
+  int hidden = 0;
+  for (int i = 0; i < 300; i++) {
+    const float c[3] = {(70.f + 120.f * u(rng)) * kM, 40.f * u(rng) * kM, (-60.f + 120.f * u(rng)) * kM};
+    const float r = (0.5f + 4.5f * u(rng)) * kM;
+    (*tested)++;
+    if (ctr_cull::horizon_classify(h, c, r) != 2) {
+      continue;
+    }
+    hidden++;
+    for (int sidx = 0; sidx < 12; sidx++) {
+      float d[3] = {u(rng) - 0.5f, u(rng) - 0.5f, u(rng) - 0.5f};
+      const float l = std::sqrt(ctr_cull::dot3(d, d));
+      const float p[3] = {c[0] + d[0] / l * r, c[1] + d[1] / l * r, c[2] + d[2] / l * r};
+      check(segment_blocked(t, eye, p), "a sphere below the horizon is behind the terrain");
+    }
+  }
+  return hidden;
+}
+
+void test_horizon() {
+  int tested = 0;
+  const int hidden = horizon_trial(nullptr, &tested);
+  check(hidden > tested / 10, "the ridge hides some of what is behind it");
+  // a hole in the ground in front of the ridge: nothing in its directions counts as hidden
+  const float hole[4] = {20.f * kM, 26.f * kM, -6.f * kM, 6.f * kM};
+  int tested2 = 0;
+  const int hidden2 = horizon_trial(hole, &tested2);
+  check(hidden2 < hidden, "a hole in the terrain hides less");
+  {
+    const Terrain t = make_terrain(4.f, hole);
+    const horizon::Grid g = horizon::build(t.tris);
+    ctr_cull::Horizon h;
+    const float eye[3] = {0.f, 2.f * kM, 0.f};
+    ctr_cull::build_horizon(view_of(g), eye, 64.f * kM, 0.5f * kM, &h);
+    const float behind[3] = {120.f * kM, 1.f * kM, 0.f};
+    check(ctr_cull::horizon_classify(h, behind, 1.f * kM) != 2,
+          "nothing straight beyond the hole is hidden");
+    const float aside[3] = {120.f * kM, 1.f * kM, -40.f * kM};
+    check(ctr_cull::horizon_classify(h, aside, 1.f * kM) == 2, "but beside it, still");
+  }
+  // a camera under the terrain's top (a cave, an overhang) or off the grid: no horizon
+  {
+    const Terrain t = make_terrain(4.f, nullptr);
+    const horizon::Grid g = horizon::build(t.tris);
+    ctr_cull::Horizon h;
+    const float low[3] = {40.f * kM, 5.f * kM, 0.f};
+    check(!ctr_cull::build_horizon(view_of(g), low, 64.f * kM, 0.5f * kM, &h),
+          "no horizon from under the ridge's top");
+    const float off[3] = {-500.f * kM, 5.f * kM, 0.f};
+    check(!ctr_cull::build_horizon(view_of(g), off, 64.f * kM, 0.5f * kM, &h),
+          "no horizon off the grid");
+  }
+  // two layers (an overhang 8 m over the ground): those cells are not covered
+  {
+    Terrain t = make_terrain(4.f, nullptr);
+    const size_t n0 = t.tris.size();
+    for (size_t i = 0; i < n0; i++) {
+      auto tt = t.tris[i];
+      bool in = true;
+      for (int c = 0; c < 3; c++) {
+        in = in && tt.p[c][0] >= 100.f * kM && tt.p[c][0] <= 120.f * kM && tt.p[c][2] >= 0.f &&
+             tt.p[c][2] <= 20.f * kM;
+        tt.p[c][1] += 8.f * kM;
+      }
+      if (in) {
+        tt.ymin += 8.f * kM;
+        tt.ymax += 8.f * kM;
+        t.tris.push_back(tt);
+      }
+    }
+    const horizon::Grid g = horizon::build(t.tris);
+    const int i = (int)((110.f * kM - g.x0) / g.cell), k = (int)((10.f * kM - g.z0) / g.cell);
+    check(g.minh[k * g.nx + i] == ctr_cull::kHorizonUncovered, "an overhang's cells are not covered");
+  }
+  fmt::print("  horizon: {} of {} spheres hidden behind the ridge ({} with a hole in front of it)\n",
+             hidden, tested, hidden2);
+}
+
 }  // namespace
 
 void run_cull_tests() {
@@ -214,4 +389,5 @@ void run_cull_tests() {
   test_inscribed_cube();
   test_inscribed_l_shape();
   test_no_box_in_thin_plate();
+  test_horizon();
 }
