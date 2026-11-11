@@ -593,24 +593,8 @@ static_assert(sizeof(TfragMorphColor) == 16);
 // ext header bytes kExtHeaderTfragSize..kExtHeaderOccSize: a retired section (occluders), ignored
 constexpr uint32_t kExtHeaderOccSize = 224;
 
-/*!
- * (AI-assisted, horizon) The terrain grid for horizon culling (tools/ctr_level_converter
- * horizon.cpp, config.ini `horizon`, docs/3ds-port/culling.md "2."): per cell of `cell` game units,
- * u16 minh (quarter meters above base_y; 0xffff: not covered) and u8 span (maxh - minh, half meters
- * rounded up; 255: or more). A covered cell is covered by the level's opaque tfrag in one layer in
- * every version present there, none of which goes below minh or above maxh in it (morph included).
- * ExtHeader::size >= kExtHeaderHorizonSize, then this at ext_offset + kExtHeaderOccSize.
- */
+// ext header bytes kExtHeaderOccSize..kExtHeaderHorizonSize: a retired section (horizon), ignored
 constexpr uint32_t kExtHeaderHorizonSize = 256;
-struct ExtHorizon {
-  float x0, z0;  // the corner of cell (0, 0) (game units)
-  float cell;
-  float base_y;
-  uint32_t nx, nz;
-  uint32_t minh_offset;  // u16[nz][nx], absolute
-  uint32_t span_offset;  // u8[nz][nx], absolute
-};
-static_assert(sizeof(ExtHorizon) == kExtHeaderHorizonSize - kExtHeaderOccSize);
 
 /*!
  * (AI-assisted, farcopy) Far copies (ctr_level_converter --far-copies, config.ini `far_copy`,

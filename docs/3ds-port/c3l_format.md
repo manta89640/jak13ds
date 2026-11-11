@@ -975,14 +975,6 @@ the wall is broken, the sewer hover door, the strip's vents).
 the extension header (no version change: an older reader stops at its own `ExtHeader::size`, the
 sections before a present one are zero when the level has none).
 
-- `ExtHorizon` (size >= `kExtHeaderHorizonSize` 256, at ext_offset + 224): the terrain grid for
-  horizon culling: the corner of cell (0, 0), the cell size (8 m, larger for levels wider than 192
-  cells), a base height, then `u16 minh[nz][nx]` (quarter meters above the base, 0xffff: not
-  covered) and `u8 span[nz][nx]` (maxh - minh, half meters rounded up, 255: or more). A cell is
-  covered when 5 x 5 samples in it are each covered by the opaque tfrag (tiers 0-2) of every
-  version (tier, geomorph version) present in it, with the non-steep surfaces of one version within
-  2 m of each other; minh / maxh are the lowest and highest point of the triangles that reach it,
-  morph offsets included. `--no-horizon`: none.
 - `ExtFarCopy` (size >= `kExtHeaderFarCopySize` 272, at ext_offset + 256), only with
   `--far-copies`: a role per chunk (u8: 1 the sources of a cell's far copies, 2 the copies, 0
   neither) and the copies' error. Sources and copies are ordinary tie chunks (lod_tier 0) of the

@@ -705,13 +705,6 @@ struct CtrLevelData {
   // per group its near chunks (stream_units holding its near or mid version) and the frame it was
   // first held coarser in view for want of them
   std::vector<u32> tf_unit_first, tf_unit_count, tf_units, tf_hold_since;
-  // (AI-assisted, horizon) the terrain grid (c3l::ExtHorizon; hz_nx 0: none, read only while
-  // config.ini horizon is on), and the frame + 1 the level was last drawn in near mode
-  float hz_x0 = 0, hz_z0 = 0, hz_cell = 0, hz_base_y = 0;
-  int hz_nx = 0, hz_nz = 0;
-  std::vector<u16> hz_minh;
-  std::vector<u8> hz_span;
-  u32 hz_drawn_frame = 0;
   // (AI-assisted, visbake) baked visibility (CtrVisBake.h: the .c3b next to the .c3l, read while
   // config.ini title_vis is on): its header and samples, per run its intervals of samples
   struct VisBake {
@@ -1615,11 +1608,6 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_fade_runs = 0;
   u64 m_lod_groups_near = 0, m_lod_frames = 0, m_lod_tris[2] = {0, 0};
   u64 m_cull_runs = 0, m_cull_tris = 0, m_cull_chunks = 0, m_cull_frames = 0;
-  // (AI-assisted, horizon) this level draw's horizon (frame_horizon) and statistics: level draws,
-  // of them with a horizon, chunks and runs it hid, the runs' triangles
-  ctr_cull::Horizon m_hz;
-  bool m_hz_ok = false;
-  u64 m_hz_frames = 0, m_hz_on = 0, m_hz_chunks = 0, m_hz_runs = 0, m_hz_tris = 0;
   // (AI-assisted, visbake) title_vis: the baked samples this level draw uses (m_vb_n of them) and
   // statistics: level draws with the title on, of them with samples, chunks and runs hidden
   u32 m_vb_s[2] = {0, 0};

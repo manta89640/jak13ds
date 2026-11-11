@@ -5802,47 +5802,6 @@ void load_cull_cond(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
            lev->cond_boxes.empty() ? " (an older file: both sides drawn)" : "");
 }
 
-// (AI-assisted, horizon) c3l::ExtHorizon: the terrain grid (read only while config.ini horizon is
-// on; 3 bytes per cell, at most 192 x 192)
-void load_horizon(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
-  lev->hz_nx = lev->hz_nz = 0;
-  lev->hz_minh.clear();
-  lev->hz_span.clear();
-  lev->hz_drawn_frame = 0;
-  if (!ctr_settings().horizon) {
-    return;
-  }
-  c3l::ExtHeader eh;
-  if (!hdr.ext_offset || !read_ext_header(f, hdr, &eh) || eh.size < c3l::kExtHeaderHorizonSize) {
-    return;
-  }
-  c3l::ExtHorizon ex{};
-  if (!f.read(hdr.ext_offset + c3l::kExtHeaderOccSize, &ex, sizeof(ex)) || !ex.nx || !ex.nz ||
-      ex.nx > 1024 || ex.nz > 1024 || !(ex.cell > 0)) {
-    return;
-  }
-  const u32 n = ex.nx * ex.nz;
-  if (!f.read_array(ex.minh_offset, n, &lev->hz_minh) ||
-      !f.read_array(ex.span_offset, n, &lev->hz_span)) {
-    lev->hz_minh.clear();
-    lev->hz_span.clear();
-    lg::warn("[ctr] {}: bad terrain grid, no horizon", lev->name);
-    return;
-  }
-  lev->hz_x0 = ex.x0;
-  lev->hz_z0 = ex.z0;
-  lev->hz_cell = ex.cell;
-  lev->hz_base_y = ex.base_y;
-  lev->hz_nx = (int)ex.nx;
-  lev->hz_nz = (int)ex.nz;
-  u32 covered = 0;
-  for (const u16 m : lev->hz_minh) {
-    covered += m != ctr_cull::kHorizonUncovered;
-  }
-  lg::info("[ctr] {}: terrain grid {} x {} cells of {:.1f} m, {} covered", lev->name, ex.nx, ex.nz,
-           ex.cell / 4096.f, covered);
-}
-
 // (AI-assisted, visbake) a baked visibility sidecar next to the .c3l (CtrVisBake.h): `ext` .c3b
 // (the title's path, kind 1) or .c3c (cells, kind 2); one made for another version of the level
 // file (other run, chunk or draw counts) is not used
@@ -7864,7 +7823,6 @@ bool CtrLevels::load_file(const fs::path& path,
   load_env_ties(f, hdr, out);  // (AI-assisted, j2water2) c3l v21 (after the textures, draw order)
   load_wind_ties(f, hdr, out);
   load_cull_cond(f, hdr, out);
-  load_horizon(f, hdr, out);    // (AI-assisted, horizon)
   load_vis_bake(out);           // (AI-assisted, visbake)
   load_far_copy(f, hdr, out);   // (AI-assisted, farcopy)
   load_cones(f, hdr, runs_lo, file_runs, out);  // (AI-assisted, facecull)
@@ -11591,14 +11549,6 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              (double)m_cull_tris / m_cull_frames, m_cull_frames);
     m_cull_runs = m_cull_tris = m_cull_chunks = m_cull_frames = 0;
   }
-  if (rs.log_now && m_hz_frames) {
-    // (AI-assisted, horizon)
-    const double n = (double)m_hz_frames;
-    lg::info("[ctr] {}: horizon in {:.0f}% of level draws, hid {:.1f} chunks and {:.1f} runs ({:.0f} "
-             "tris) per level draw ({} level draws)",
-             m_name, 100.0 * m_hz_on / n, m_hz_chunks / n, m_hz_runs / n, m_hz_tris / n, m_hz_frames);
-    m_hz_frames = m_hz_on = m_hz_chunks = m_hz_runs = m_hz_tris = 0;
-  }
   if (rs.log_now && m_vb_frames) {
     // (AI-assisted, visbake)
     const double n = (double)m_vb_frames;
@@ -12426,48 +12376,6 @@ bool cell_vis_select(CtrLevelData& lev, const CtrBackgroundCamera& cam) {
   }
   lev.cell_ok = true;
   return true;
-}
-
-// (AI-assisted, horizon) the frame's horizon: from the terrain grid of the first loaded level that
-// was drawn in near mode the frame before and has the camera over a covered cell, once per frame
-// for all level draws (the hills of the level the camera is in hide the other level's far parts
-// too)
-bool frame_horizon(const std::vector<const CtrLevelData*>& levels,
-                   const CtrBackgroundCamera& cam,
-                   u64 frame,
-                   ctr_cull::Horizon* out) {
-  static u64 s_frame = ~0ull;
-  static bool s_ok = false;
-  static ctr_cull::Horizon s_hz;
-  if (s_frame != frame) {
-    s_frame = frame;
-    s_ok = false;
-    const auto& st = ctr_settings();
-    const float eye[3] = {cam.trans[0], cam.trans[1], cam.trans[2]};
-    const u32 now = (u32)frame + 1;
-    for (const CtrLevelData* l : levels) {
-      if (!l || !l->hz_nx || !l->hz_drawn_frame || now - l->hz_drawn_frame > 1) {
-        continue;
-      }
-      ctr_cull::HorizonGridView v;
-      v.x0 = l->hz_x0;
-      v.z0 = l->hz_z0;
-      v.cell = l->hz_cell;
-      v.base_y = l->hz_base_y;
-      v.nx = l->hz_nx;
-      v.nz = l->hz_nz;
-      v.minh = l->hz_minh.data();
-      v.span = l->hz_span.data();
-      if (ctr_cull::build_horizon(v, eye, st.horizon_radius * 4096.f, 0.5f * 4096.f, &s_hz)) {
-        s_ok = true;
-        break;
-      }
-    }
-  }
-  if (s_ok) {
-    *out = s_hz;
-  }
-  return s_ok;
 }
 
 void CtrTfragRenderer::draw_level(CtrLevelData& lev,
@@ -13891,16 +13799,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
 #else
   const bool baking = false;
 #endif
-  // (AI-assisted, horizon) the frame's horizon (m_hz), and this level's terrain as standing there
-  m_hz_ok = false;
-  if (settings.horizon && !baking) {
-    if (!far_level) {
-      lev.hz_drawn_frame = (u32)rs.frame_idx + 1;
-    }
-    m_hz_ok = frame_horizon(m_loaded, cam, rs.frame_idx, &m_hz);
-    m_hz_frames++;
-    m_hz_on += m_hz_ok;
-  }
   // (AI-assisted, visbake) title_vis: this level draw's samples of the level's bake (m_vb_s)
   m_vb_n = 0;
   // (AI-assisted, facecull) cone_cull: runs facing away (only where the GPU would cull them)
@@ -14033,17 +13931,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           }
         }
       }
-      // (AI-assisted, horizon) a chunk below the horizon is hidden whole; one partly below it has
-      // its runs tested (below)
-      bool hz_runs = false;
-      if (m_hz_ok) {
-        const int c = ctr_cull::horizon_classify(m_hz, ch.bsphere, ch.bsphere[3]);
-        if (c == 2) {
-          m_hz_chunks++;
-          return;
-        }
-        hz_runs = c == 1;
-      }
       // (AI-assisted, depthreuse) a chunk the recent depth hid (twice in a row) is not drawn; one
       // partly behind it has its runs tested (below). Not the vista pass's.
       bool dr_runs = false;
@@ -14173,7 +14060,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                            ? ch.vis_run_count
                            : (lev.chunk_run_count[ci] ? lev.chunk_run_count[ci] : ch.vis_run_count);
       const bool cone_runs = m_cone_on && run_sph && !vista_tier;  // (AI-assisted, facecull)
-      if ((((hz_runs || dr_runs || sz_runs || cone_runs) && run_sph) || m_vb_n || m_cv_on) &&
+      if ((((dr_runs || sz_runs || cone_runs) && run_sph) || m_vb_n || m_cv_on) &&
           x_nr) {
         const u32 r0 = lev.chunk_first_run[ci];
         const u32 nr = x_nr;
@@ -14209,11 +14096,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             const float c[3] = {ch.origin[0] + sp.c[0] * ch.scale, ch.origin[1] + sp.c[1] * ch.scale,
                                 ch.origin[2] + sp.c[2] * ch.scale};
             const float rr = (float)sp.r * ch.scale;
-            if (hz_runs && m_run_shown[r] && ctr_cull::horizon_classify(m_hz, c, rr) == 2) {
-              m_run_shown[r] = 0;
-              m_hz_runs++; hid_by = &m_hz_chunks;
-              m_hz_tris += lev.vis_runs[r].index_count / 3;
-            }
             if (cone_runs && m_run_shown[r] && lev.run_cone[r] != ctr_cull::kNoCone &&
                 (lev.draw_states[ch.first_draw + lev.vis_runs[r].draw].tcc & CTR_TCC_CULL_BACK)) {
               // (AI-assisted, facecull) every triangle faces away: the GPU would cull all of them

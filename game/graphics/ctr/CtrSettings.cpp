@@ -247,10 +247,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.vis_culling = parse_bool(v);
     } else if (key == "run_culling") {
       s.run_culling = parse_bool(v);  // (AI-assisted)
-    } else if (key == "horizon") {
-      s.horizon = parse_bool(v);  // (AI-assisted, horizon)
-    } else if (key == "horizon_radius") {
-      s.horizon_radius = std::clamp(f, 16.f, 400.f);
     } else if (key == "title_vis") {
       s.title_vis = parse_bool(v);  // (AI-assisted, visbake)
     } else if (key == "cone_cull") {

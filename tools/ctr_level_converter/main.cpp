@@ -32,7 +32,6 @@
 #include "c3l_pack.h"
 #include "ctr_texture.h"
 #include "keira_model.h"
-#include "horizon.h"
 #include "c3l_compare.h"
 #include "texshare.h"
 #include "tfrag_lod.h"
@@ -193,8 +192,6 @@ struct Options {
   // (AI-assisted) v13: tie strips wound consistently (odd strip triangles flipped), closed tie
   // surfaces oriented outward and marked for back face culling (c3l::kDrawCullBack)
   bool tie_winding = true;
-  // (AI-assisted, horizon) c3l::ExtHorizon: the terrain grid for horizon culling
-  bool horizon = true;
   // (AI-assisted, farcopy) c3l::ExtFarCopy: simplified copies of the plain tie geometry (off: the
   // sources' chunks split from the others cost draws)
   bool far_copies = false;
@@ -7760,44 +7757,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   const bool env_out = ext_out && !out_env_draws.empty();
   const bool wind_out = ext_out && !wind_chunk_verts.empty();
   const bool cond_out = ext_out && !out_cond_sets.empty();
-  // (AI-assisted, horizon) c3l::ExtHorizon: the opaque tfrag a camera in the level may see drawn
-  // (tiers 0-2, not the low resolution or vista tiers), each tier and geomorph version a version
-  horizon::Grid hz_grid;
-  if (ext_out && opt.horizon) {
-    std::vector<horizon::TerrainTri> tt;
-    for (const auto& t : cv.tris) {
-      const auto& dk = cv.draw_keys[t.draw_key];
-      if ((dk.kind & 0xff) != 0 || t.tier > 2 || !cv.key_cullable(t.draw_key)) {
-        continue;
-      }
-      // (key_cullable takes Cs As + Cd (1 - As) blending that the draw optimisations may drop;
-      // a draw that still blends here is see-through: not terrain that hides anything)
-      DrawMode hz_mode;
-      hz_mode.as_int() = dk.mode;
-      if (hz_mode.get_ab_enable()) {
-        continue;
-      }
-      horizon::TerrainTri x{};
-      x.ymin = 1e30f;
-      x.ymax = -1e30f;
-      for (int c = 0; c < 3; c++) {
-        const auto& v = cv.verts[t.v[c]];
-        x.p[c][0] = v.x;
-        x.p[c][1] = v.y;
-        x.p[c][2] = v.z;
-        const float ys[4] = {v.y, v.y + v.tband0[1], v.y + v.tband1[1],
-                             v.y + v.tband0[1] + v.tband1[1]};
-        for (int k = 0; k < (v.tkind ? 4 : 1); k++) {
-          x.ymin = std::min(x.ymin, ys[k]);
-          x.ymax = std::max(x.ymax, ys[k]);
-        }
-      }
-      x.cls = t.tier * 8 + t.tlod;
-      tt.push_back(x);
-    }
-    hz_grid = horizon::build(tt);
-  }
-  const bool hz_out = hz_grid.covered > 0;
   // (AI-assisted, farcopy) c3l::ExtFarCopy
   const bool far_out = ext_out && opt.far_copies &&
                        std::any_of(chunk_far_role.begin(), chunk_far_role.end(),
@@ -7809,7 +7768,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   const u32 eh_size = !ext_out                           ? 0
                       : cone_out                         ? c3l::kExtHeaderConeSize
                       : far_out                          ? c3l::kExtHeaderFarCopySize
-                      : hz_out                           ? c3l::kExtHeaderHorizonSize
                       : tfrag_out                        ? c3l::kExtHeaderTfragSize
                       : morph_out                        ? c3l::kExtHeaderMorphSize
                       : cond_out                         ? c3l::kExtHeaderV24Size
@@ -8220,22 +8178,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     ext_put(c3l::kExtHeaderTexKeySize, &ec, sizeof(ec));
     lg::info("{}: culling by opening planes: {} draws, {} planes", level.level_name, cds.size(),
              planes);
-  }
-  if (hz_out) {
-    // (AI-assisted, horizon) the terrain grid (load_horizon)
-    c3l::ExtHorizon ex{};
-    ex.x0 = hz_grid.x0;
-    ex.z0 = hz_grid.z0;
-    ex.cell = hz_grid.cell;
-    ex.base_y = hz_grid.base_y;
-    ex.nx = (u32)hz_grid.nx;
-    ex.nz = (u32)hz_grid.nz;
-    ex.minh_offset = append(buf, hz_grid.minh.data(), hz_grid.minh.size());
-    ex.span_offset = append(buf, hz_grid.span.data(), hz_grid.span.size());
-    ext_put(c3l::kExtHeaderOccSize, &ex, sizeof(ex));
-    lg::info("{}: terrain grid: {} x {} cells of {:.1f} m, {} covered ({} KB)", level.level_name,
-             hz_grid.nx, hz_grid.nz, hz_grid.cell / 4096.f, hz_grid.covered,
-             hz_grid.minh.size() * 3 / 1024);
   }
   if (far_out) {
     // (AI-assisted, farcopy) per chunk its role (load_far_copy)
@@ -9030,7 +8972,6 @@ int main(int argc, char** argv) {
   app.add_flag("--no-tie-winding", no_tie_winding,
                "keep the strips' triangle order (no flipping, no back face culling marks)");
   app.add_flag("--no-vista", no_vista, "no vista tier (far scenery cells)");
-  bool no_horizon = false;  // (AI-assisted, horizon)
   app.add_flag("--face-runs", opt.face_runs,
                "back face culled triangles in runs by facing, with normal cones (c3l::ExtCones)");
   app.add_flag("--terrain-cull", opt.terrain_cull,
@@ -9040,7 +8981,6 @@ int main(int argc, char** argv) {
                "simplified far copies of the plain tie geometry (c3l::ExtFarCopy)");
   app.add_option("--far-copy-error", opt.far_copy_error,
                  "far copies: simplification error (meters)");
-  app.add_flag("--no-horizon", no_horizon, "no terrain grid for horizon culling");
   app.add_option("--vista-cell", opt.vista_cell, "vista tier cell size (meters)");
   app.add_option("--merc-cull-agree", opt.merc_cull_agree,
                  "merc back face culling marks: share of a draw's triangles agreeing with their "
@@ -9062,7 +9002,6 @@ int main(int argc, char** argv) {
   opt.atlas = !no_atlas;
   opt.opaque_alpha = !no_opaque_alpha;
   opt.tie_winding = !no_tie_winding;
-  opt.horizon = !no_horizon;
   opt.tie_far_near_colors = !tie_far_own_colors;
   opt.tie_lod = !no_tie_lod;
   opt.tie_morph = !no_tie_morph;

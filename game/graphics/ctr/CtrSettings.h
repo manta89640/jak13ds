@@ -256,11 +256,6 @@ struct CtrSettings {
   // pieces of ~96 triangles made at load) tested against the view on their own: only the ones on
   // screen are drawn (bounding spheres made at load, 8 bytes per piece)
   bool run_culling = true;
-  // (AI-assisted, horizon) level geometry entirely beyond horizon_radius meters and below the
-  // terrain's horizon (c3l::ExtHorizon: the hills of the level the camera is over) is not drawn
-  // (docs/3ds-port/culling.md). Off: not yet seen on a console
-  bool horizon = false;
-  float horizon_radius = 64.f;
   // (AI-assisted, visbake) the title screen's flight: the level runs a bake (<level>.c3b next to the
   // .c3l, made on the host with CTR_VIS_BAKE=dir:title) never saw from the nearest cameras of its
   // path are not drawn (docs/3ds-port/culling.md). Off: not yet seen on a console
