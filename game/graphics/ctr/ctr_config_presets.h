@@ -10,7 +10,8 @@
  * A key's value, first match wins:
  *   1. its own line in config.ini (the last one),
  *   2. a user key's line that stands for it (ctr_cfg_aliases: particles, text_size),
- *   3. the preset (config.ini preset = normal | safe | bench | breakdown; normal sets nothing),
+ *   3. the preset (config.ini preset = normal | full | fast | safe | bench | breakdown; normal sets
+ *      nothing),
  *   4. ctr_cfg_defaults (the keys ctr_config_get serves), else the reader's own default
  *      (CtrSettings.h's initializers for the renderer).
  * docs/3ds-port/config_ini.md (the user keys), docs/3ds-port/config_dev.md (the rest).
@@ -53,6 +54,17 @@ static const ctr_cfg_kv ctr_cfg_preset_full[] = {
     {"auto_detail", "off"},    {"traffic_density", "1"},
     {"particle_density", "1"}, {"shadows", "all"},
 };
+/* (AI-assisted, j2cuts) fast: normal plus Jak II's behaviour-changing cuts of the game thread
+ * (jak2_perf.md "Behaviour-changing cuts"): far citizens' joint math at 15 / 10 Hz, lower detail
+ * models at 0.58 of the distances, the 4 nearest shadows, fewer civilians and particles. Jak 1: as
+ * normal (anim_lod on is its default). Not yet run on a console. */
+static const ctr_cfg_kv ctr_cfg_preset_fast[] = {
+    {"anim_lod", "on"},
+#if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
+    {"anim_lod_far", "on"},      {"merc_lod_scale", "0.58"}, {"shadow_count", "4"},
+    {"traffic_density", "0.35"}, {"particle_density", "0.5"},
+#endif
+};
 /* breakdown: normal plus the per-part GPU times every 4th frame (config-breakdown.ini) */
 static const ctr_cfg_kv ctr_cfg_preset_breakdown[] = {
     {"gpu_breakdown", "on"},
@@ -71,6 +83,7 @@ static const ctr_cfg_preset ctr_cfg_presets[] = {
     {"bench", ctr_cfg_preset_bench, CTR_CFG_N(ctr_cfg_preset_bench)},
     {"breakdown", ctr_cfg_preset_breakdown, CTR_CFG_N(ctr_cfg_preset_breakdown)},
     {"full", ctr_cfg_preset_full, CTR_CFG_N(ctr_cfg_preset_full)},
+    {"fast", ctr_cfg_preset_fast, CTR_CFG_N(ctr_cfg_preset_fast)},
 };
 
 /* A user key's line stands for these keys. user_value NULL: any value, passed on as it is. */

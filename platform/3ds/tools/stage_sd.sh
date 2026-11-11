@@ -18,7 +18,7 @@
 # written from platform/3ds/tools/config_template.ini (the 8 user keys); the options below set keys
 # in it (the testing keys of docs/3ds-port/config_dev.md go at its end). Old flag files are removed.
 #
-#   --preset P  preset = P: normal (default) | safe | bench | breakdown
+#   --preset P  preset = P: normal (default) | full | fast | safe | bench | breakdown
 #   --keep-config  start from the card's config.ini instead of the template (the old behaviour)
 #   --config FILE  the config.ini to start from (--render-ini FILE: the same)
 #   --args   args = ... (gk's default: "-boot -cbackend")
@@ -110,8 +110,8 @@ if [ -z "$GK" ]; then
   [ "$GAME" = jak2 ] && GK="$ROOT/build-3ds-jak2/gk.3dsx"
 fi
 case "${PRESET:-normal}" in
-  normal|safe|bench|breakdown) ;;
-  *) echo "--preset: normal, safe, bench or breakdown" >&2; exit 1 ;;
+  normal|full|fast|safe|bench|breakdown) ;;
+  *) echo "--preset: normal, full, fast, safe, bench or breakdown" >&2; exit 1 ;;
 esac
 if [ "$GAME" = jak1 ]; then "$(dirname "$0")/check_fresh.sh" proj "$PROJ" || exit 1; fi
 "$(dirname "$0")/check_fresh.sh" gk "$GK" || exit 1

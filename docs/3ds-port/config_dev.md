@@ -25,7 +25,7 @@ A key's value is, first match wins (one table for every reader:
    `sprite_max_size = 0`, `sprite_min_alpha = 2`) or `reduced` (1000, 0.5, 6, and
    `particle_density = 0.7`); `text_size = X`
    (`text_scale = X`);
-3. the preset (`preset = normal | safe | bench | breakdown`; presets set only these keys, never
+3. the preset (`preset = normal | full | fast | safe | bench | breakdown`; presets set only these keys, never
    the user keys):
    - `normal`: nothing (the defaults);
    - `safe`: the Oct 11 behaviour (3ds-sdcard-oct12d config-safe.ini; its particle limits are the

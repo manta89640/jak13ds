@@ -540,6 +540,49 @@ this round took leaf-like GOAL code that a per-call check can compare.
   "MISMATCH"). One sp-launch-particles-var mismatch in 3462 calls came at the CITY1.MUS bank load.
   Neither involves this round's natives; use sparse full checks.
 
+## Behaviour-changing cuts of the game thread (AI-assisted, j2cuts, Nov 11)
+
+(AI-assisted.) Plan section 5 ("presentation options"): what the game does for far and off-screen
+models, behind config.ini keys. Compiled for the 3DS (C mode, small memory: all 841 files, no new
+warnings) and the host runtime; **not run**: this container has no Jak II game files, so there is
+no host verify run, Azahar A/B or hardware number yet.
+
+| key | default | what changes | lever (city, from the profile above) |
+|---|---|---|---|
+| `anim_lod` | on | Jak 1's rule: a model not on screen last frame and 30 m or more from the camera and Jak gets its joint math on one frame in 4 | joints / anim decompression (10.6 ms as is) for the models behind the camera |
+| `anim_lod_far` | off | citizens on screen 40 m or more away: joint math every 2nd frame (70 m: 3rd); between, the bones move with the root | the same, for the far half of the street |
+| `merc_lod_scale` | 1 | lower detail models at this fraction of the distances (not Jak's); 0.58 = 240 / 416 lines | joint math of the lower models' joints, merc requests and vertices (render thread merc 3.8-5 ms, GPU) |
+| `shadow_count` | 0 (all) | only the N casters nearest the camera, and Jak, get a shadow volume | shadow volumes (11.4 ms as is, 4.9 natively, at shadows = all) |
+
+`anim_lod` and `merc_lod_scale` are Jak 1's keys (config_dev.md); Jak II now reads them too.
+`anim_lod` is on by default as in Jak 1, where it has run on hardware since Oct; Jak II's riders
+keep their own late joint math (`pc-late-math`), which runs first.
+
+**anim_lod_far, in detail** (process-drawable.gc). citizen-init-by-other sets
+`joint-control-status pc-anim-lod`; joint math records the LOD it made the bones at (two status
+bits) and that they are valid (cleared by citizen-init! when a citizen comes back from the pool,
+and while it is not drawn). A frame without joint math adds the root's move since then to every
+bone and the draw origin, so the model, its shadow and its view test stay where the citizen is;
+its pose and facing hold for a frame or two. Full joint math whenever the LOD changed, the root
+jumped 1.5 m or more, or the model has joint callbacks (look-at). Collision prims on joints move
+with the bones; within 30-40 m of Jak nothing changes.
+
+**shadow_count, in detail** (foreground.gc). Every caster goes through `foreground-shadow`; it
+records its distance, and at the first call of a frame the limit becomes the N-th nearest distance
+of the frame before + 1 m (insertion sort of up to 64). With fewer than N casters then, all draw.
+
+**Estimates** (from the profile's categories, as is; not measured): `anim_lod` on its own ~1-3 ms
+in the city (the models behind the camera, more while driving), `anim_lod_far` another ~1-2 ms,
+`merc_lod_scale = 0.58` ~0.5-2 ms on the game thread plus render thread and GPU merc time,
+`shadow_count = 4` ~1-3 ms in crowded streets. Together perhaps 3-8 ms of the slums' ~21-27 ms
+logic, with 1-3 ms of traffic noise in any A/B.
+
+**What to look at on a console:** far citizens' walk cycles stepping at 15 or 10 Hz; a citizen
+coming round a corner with an old pose for a frame; shadows switching between two people at the
+same distance; low detail characters near Jak with `merc_lod_scale` below ~0.7.
+**Measuring:** `*anim-lod-skip-count*` and `*anim-lod-follow-count*` (per frame) in a REPL; the
+log's `perf:` logic ms with each key on and off (traffic varies 1-3 ms between windows).
+
 ## Caveats
 
 - One Mac, background load from other sessions (Discord, other agents' gk): the per-window

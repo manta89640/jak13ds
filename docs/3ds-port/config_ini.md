@@ -11,8 +11,9 @@ value shown here. `#` starts a comment.
 # Jak and Daxter (3DS) settings. Change a value after the "=", save, then restart the game.
 
 # normal = the usual settings (far scenery a little simpler, for a steady 30 fps) | full = the
-# most detail (slower in busy places) | safe = older, well-tested settings (try it if the game hangs
-# or looks broken) | bench = measures the GPU at start (testing) | breakdown = GPU timing log (testing)
+# most detail (slower in busy places) | fast = Jak II's city faster, with simpler far people and
+# fewer shadows | safe = older, well-tested settings (try it if the game hangs or looks broken) |
+# bench = measures the GPU at start (testing) | breakdown = GPU timing log (testing)
 preset = normal
 
 # game sound and music: on | off
@@ -47,6 +48,11 @@ ocean = full
 - **full**: the most detail, as the earlier builds drew at their best: `auto_detail = off`,
   `traffic_density = 1`, `particle_density = 1`, `shadows = all` (every shadow at any distance).
   Slower: Jak II's Haven City runs under 30 fps with it.
+- **fast** (AI-assisted, Nov 11; not yet run on a console): normal plus Jak II's cuts of the game
+  thread, which change what you see a little: far city people animate at 15 or 10 frames a second
+  (`anim_lod_far = on`), characters switch to their simpler models sooner (`merc_lod_scale = 0.58`),
+  only the 4 nearest shadows (`shadow_count = 4`), fewer civilians (`traffic_density = 0.35`) and
+  particles (`particle_density = 0.5`). In Jak 1 the same as normal.
 - **safe**: the Oct 11 behaviour, every renderer and loading improvement made after it switched
   back off. Use it if a new build hangs or draws something wrong, and say so in the bug report.
   For the old particle limits too, also set `particles = reduced`.
