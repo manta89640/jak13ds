@@ -1494,44 +1494,10 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   }
 #endif
 
-  // the texels with alpha, per alpha level (CtrTexture::box)
-  float box[8][4];
+  // the largest texel alpha (CtrTexture::max_alpha)
   int max_alpha = 0;
-  {
-    // the bounds of the texels whose alpha's highest bit is j, then those of j and above
-    int x0[8], y0[8], x1[8], y1[8];
-    for (int j = 0; j < 8; j++) {
-      x0[j] = w, y0[j] = h, x1[j] = -1, y1[j] = -1;
-    }
-    for (int y = 0; y < h; y++) {
-      const u32* row = data.data() + (size_t)y * w;
-      for (int x = 0; x < w; x++) {
-        const u32 a = row[x] >> 24;
-        if (a) {
-          const int j = 31 - __builtin_clz(a);
-          x0[j] = std::min(x0[j], x);
-          x1[j] = std::max(x1[j], x);
-          y0[j] = std::min(y0[j], y);
-          y1[j] = std::max(y1[j], y);
-          max_alpha = std::max(max_alpha, (int)a);
-        }
-      }
-    }
-    for (int j = 6; j >= 0; j--) {
-      x0[j] = std::min(x0[j], x0[j + 1]);
-      x1[j] = std::max(x1[j], x1[j + 1]);
-      y0[j] = std::min(y0[j], y0[j + 1]);
-      y1[j] = std::max(y1[j], y1[j + 1]);
-    }
-    for (int j = 0; j < 8; j++) {
-      box[j][0] = 0.f, box[j][1] = 0.f, box[j][2] = 1.f, box[j][3] = 1.f;
-      if (x1[j] >= 0) {
-        box[j][0] = (float)std::max(0, x0[j] - 1) / (float)w;
-        box[j][1] = (float)std::max(0, y0[j] - 1) / (float)h;
-        box[j][2] = (float)std::min(w, x1[j] + 2) / (float)w;
-        box[j][3] = (float)std::min(h, y1[j] + 2) / (float)h;
-      }
-    }
+  for (u32 c : data) {
+    max_alpha = std::max(max_alpha, (int)(c >> 24));
   }
 
   // the 3DS needs at least 8x8: repeat pixels (normalized coordinates stay the same)
@@ -1549,7 +1515,6 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   Entry e;
   e.tex.w = gw;
   e.tex.h = gh;
-  memcpy(e.tex.box, box, sizeof(box));
   e.tex.max_alpha = max_alpha;
   // (AI-assisted) the smallest 3DS format that holds it (sprites, HUD, font), checked for being a
   // radial glow (CtrSpriteRenderer draws those with the procedural texture unit)

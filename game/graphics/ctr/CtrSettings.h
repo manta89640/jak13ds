@@ -218,10 +218,6 @@ struct CtrSettings {
   // (AI-assisted) blended world sprites drop their alpha 0 fragments (alpha test, where alpha 0
   // adds nothing): no framebuffer traffic for them; the picture is the same. off: no alpha test
   bool sprite_alpha_discard = true;
-  // (AI-assisted, perfv2) particle_fill = off | on | strong. strong: big faint overlapping 2D
-  // particles thinned by alike slot pairs (CtrSprite draw_chunk_mode; an approximation); off and
-  // on draw every particle (each one over its texture's alpha box only, always: the same picture)
-  int particle_fill = 1;
   // the game's own visibility data (which parts of a level can be seen from the camera's spot)
   // hides level parts behind walls and hills (needs .c3l v10 files)
   bool vis_culling = true;

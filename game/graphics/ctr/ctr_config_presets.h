@@ -39,7 +39,6 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"skip_clear", "off"},       {"early_depth", "off"},
     {"tie_lod", "off"},          {"gpu_micro", "off"},         {"merc_fog", "off"},
     {"streaming", "off"}, /* (AI-assisted, streaming) */
-    {"particle_fill", "off"}, /* (AI-assisted, perfv2) */
     /* (AI-assisted, fidelity2) the full texture and shine detail */
     {"mip_bias", "0"},
     /* the Nov 11 options, on by default */
@@ -181,7 +180,7 @@ static const char* const ctr_cfg_removed[] = {
     "fine_vis", "fine_vis_kb", "occ_cull", "occ_cull_tris", "occ_cull_dist", "vista_untextured",
     /* models / effects strip: removed with their code */
     "ocean_near_alpha", "envmap_batch", "merc_tex_sort", "envmap_min_px",
-    "max_sprites", "sprite_max_size", "sprite_min_alpha",
+    "max_sprites", "sprite_max_size", "sprite_min_alpha", "particle_fill",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

@@ -218,9 +218,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.proctex_glows = parse_bool(v);
     } else if (key == "sprite_alpha_discard") {
       s.sprite_alpha_discard = parse_bool(v);  // (AI-assisted)
-    } else if (key == "particle_fill") {
-      // (AI-assisted, perfv2) off | on | strong (or 0 | 1 | 2)
-      s.particle_fill = v == "strong" || v == "2" ? 2 : (parse_bool(v) ? 1 : 0);
     } else if (key == "vis_culling") {
       s.vis_culling = parse_bool(v);
     } else if (key == "run_culling") {
@@ -533,7 +530,7 @@ std::string CtrSettings::summary() const {
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
       "merc {} sprites {} "
       "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} skin_rows_f24 {} skin_clip_f24 {} "
-      "color16 {} early_depth {}{} top_block32 {} compact_textures {} proctex_glows {} sprite_alpha_discard {} particle_fill {} "
+      "color16 {} early_depth {}{} top_block32 {} compact_textures {} proctex_glows {} sprite_alpha_discard {} "
       "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} fog_alpha {} tex1_gating {} shader_opt {} cmd_dedup {} cull_ties {} cull_merc {} merc_fog {} raw_cmds {} opaque_alpha {} tex_cache_clear {} asm_tex {} asm_mem {} "
       "ocean_tex_half {} fast_clock {} "
       // (AI-assisted) Oct 16: the rest of the keys, so the line holds every setting
@@ -583,7 +580,6 @@ std::string CtrSettings::summary() const {
       top_block32 == 1 ? "auto" : (top_block32 ? "on" : "off"),
       compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
       sprite_alpha_discard ? "on" : "off",
-      particle_fill == 2 ? "strong" : (particle_fill ? "on" : "off"),
       vis_culling ? "on" : "off", run_culling ? "on" : "off", tie_lod ? "on" : "off",
       streaming ? fmt::format("on ({} KB, reserve {} KB)", stream_kb, stream_reserve_kb)
                 : std::string("off"),

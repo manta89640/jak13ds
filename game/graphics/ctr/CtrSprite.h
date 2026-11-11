@@ -75,19 +75,6 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
 
   static_assert(sizeof(AdGif) == 80);
 
-  /*! particle_fill = strong pair thinning of 2D world sprites: what pair_weight needs of one (see
-   * draw_chunk_mode). valid: it would be drawn (not left out as faint or transparent); a: its
-   * alpha (0..128); half: its half size in GS units after the size limits; cx, cy: its center
-   * (GS units). */
-  struct PairM {
-    bool valid = false;
-    float a = 0, half = 0, cx = 0, cy = 0;
-  };
-  PairM pair_metrics(const VecData& v) const;
-  //! 0..1: how much of the partner's alpha the keeper takes (1: the partner is left out), from
-  //! both members' metrics; 0: draw both as they are
-  float pair_weight(const PairM& k, const PairM& p) const;
-
   CtrVram* m_vram;
   std::unique_ptr<CtrDirect> m_direct;
 
@@ -198,8 +185,7 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   u64 m_last_tex0 = 0;
   int m_last_tex = -1;
   bool m_last_tex_valid = false;
-  // (AI-assisted, perfv2) the last texture's CtrTexture::box and max_alpha
-  float m_last_tex_box[8][4] = {};
+  // the last texture's CtrTexture::max_alpha
   int m_last_tex_max_alpha = 255;
   // the adgif states resolved since the last flush, direct mapped by the adgif's words: a sprite
   // whose adgif isn't the previous sprite's (particles of different emitters alternate in the
@@ -211,28 +197,15 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
     u8 clamp_out = 0;  // the clamp mode after it
     ctr_draw_state state;
     u32 bucket = 0;
-    bool trim_ok = false;  // a texel of alpha 0 changes nothing in this blend
-    // the GS's (At * Av) >> 7 alpha (MODULATE) in such a blend: a sprite's alpha Av leaves the
-    // texels with At * Av < 128 out, so only the box of its alpha level is drawn
-    bool alpha_levels = false;
-    u8 trim = 0;   // bit j: world particles of alpha level j are trimmed to box[j]
-    u8 ready = 0;  // bit j: box[j], box_st[j] and trim bit j are worked out (resolve_level)
+    // a texel of alpha 0 changes nothing in this blend, and the GS's alpha is (At * Av) >> 7
+    // (MODULATE): a sprite whose alpha Av makes At * Av < 128 for every texel changes no pixel
+    bool alpha_skip = false;
     int max_alpha = 255;
-    float tex_box[8][4];
-    float box[8][4];
-    float box_st[8][4];  // box in texture coordinates
   };
   static constexpr int kResolved = 32;
   std::unique_ptr<Resolved[]> m_resolved{new Resolved[kResolved]};
   u32 m_resolved_gen = 1;
   Resolved* m_cur = nullptr;
-  void resolve_level(Resolved& r, int j);
-  int m_st_sel[4][2] = {{0, 1}, {2, 1}, {2, 3}, {0, 3}};  // corner k: its box s, t entries
-  // (AI-assisted, perfv2) this frame's st corners (m_st_out[0]) as an affine frame: the corners
-  // with (s, t) = (lo, lo), (hi, lo), (lo, hi), where hi / lo of each; -1: not a rectangle (no trim)
-  int m_st_k00 = -1, m_st_k10 = -1, m_st_k01 = -1;
-  bool m_xyz_affine = false;  // m_xyz_array's corners at those make a parallelogram
-  float m_st_lo[2] = {0.f, 0.f}, m_st_hi[2] = {1.f, 1.f};
   // state of the previous sprite (same adgif: same state and bucket)
   AdGif m_last_ad;
   bool m_have_last_ad = false;
@@ -243,10 +216,6 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   Bucket* m_last_bucket_ptr = nullptr;
   bool m_hud_dump = false;  // (AI-assisted, fable1) host: this frame's HUD sprites to the log
   float m_corner_reach = 0;
-  // (AI-assisted, perfv2) config particle_fill (0 off, 1 on, 2 strong), this frame; the world 2D
-  // sprites' slot (their index in the game's sparticle arrays: a particle keeps its slot while it
-  // lives) at the next chunk
-  int m_particle_fill = 1;
   // per frame: the corners' texture coordinates ([1]: for the procedural texture, centered on 0)
   float m_st_out[2][4][2] = {};
   // (AI-assisted) game version (see the constructor): GS y to clip y
@@ -266,8 +235,6 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   bool m_alpha_discard = false;  // (AI-assisted) CtrSettings::sprite_alpha_discard, this frame
   struct Stats {
     int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0, distort = 0;
-    int trimmed = 0;        // (AI-assisted, perfv2) drawn over their texture's alpha box only
-    int thinned = 0;        // (AI-assisted, perfv2) big faint ones left out, their partners denser
     int glows = 0;          // (AI-assisted) Jak II glow flares drawn
     int unseen = 0;         // world sprites whose alpha times the texture's is 0 everywhere
   } m_stats;

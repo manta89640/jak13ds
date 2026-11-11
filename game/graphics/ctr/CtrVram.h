@@ -41,13 +41,6 @@ unsigned ctr_vram_copy_kb();
 struct CtrTexture {
   int handle = -1;  // ctr_gpu texture
   int w = 0, h = 0;  // size of the GPU texture (1 << tw, 1 << th, clamped to 8..1024)
-  // box[j]: the part of the texture (normalized s0, t0, s1, t1) outside of
-  // which every texel has alpha below 1 << j (GS scale, 0x80 = 1.0), one texel more on each side
-  // (bilinear filtering reads half a texel out); the whole texture when there is none. Particles
-  // are drawn over the box of the texels their alpha makes visible only (CtrSprite)
-  float box[8][4] = {{0.f, 0.f, 1.f, 1.f}, {0.f, 0.f, 1.f, 1.f}, {0.f, 0.f, 1.f, 1.f},
-                     {0.f, 0.f, 1.f, 1.f}, {0.f, 0.f, 1.f, 1.f}, {0.f, 0.f, 1.f, 1.f},
-                     {0.f, 0.f, 1.f, 1.f}, {0.f, 0.f, 1.f, 1.f}};
   int max_alpha = 255;  // the largest texel alpha
 };
 

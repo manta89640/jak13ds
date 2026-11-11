@@ -20,7 +20,6 @@
 #include "game/graphics/ctr/CtrRenderer.h"
 #include "game/graphics/ctr/CtrMicro.h"
 #include "game/graphics/ctr/CtrSettings.h"
-#include "game/graphics/ctr/CtrSpriteTrim.h"
 #include "game/graphics/ctr/CtrVram.h"
 
 namespace {
@@ -94,21 +93,6 @@ bool same_state_words(const AdGif& a, const AdGif& b) {
   return ((a.tex0_data ^ b.tex0_data) | (a.tex1_data ^ b.tex1_data) | (a.clamp_data ^ b.clamp_data) |
           (a.clamp_addr ^ b.clamp_addr) | (a.alpha_data ^ b.alpha_data)) == 0;
 }
-
-// alpha a -> the alpha level j (CtrTexture::box) of the texels it makes visible: the largest
-// 1 << j <= ceil(128 / a)
-constexpr std::array<u8, 256> kAlphaLevel = [] {
-  std::array<u8, 256> t{};
-  for (int a = 1; a < 256; a++) {
-    const int need = (128 + a - 1) / a;
-    int j = 0;
-    while (j < 7 && (2 << j) <= need) {
-      j++;
-    }
-    t[a] = (u8)j;
-  }
-  return t;
-}();
 
 u8 color_byte(float f) {
   return (u8)((int)f & 0xff);
@@ -277,11 +261,10 @@ void CtrSpriteRenderer::log_slow_frame(CtrRenderState& rs,
       const Stats& s = m_stats;
       lg::info(
           "[ctr] sprite build {:.1f} ms (distort {:.1f} ms; {} frames over 3 ms since the last "
-          "line): {} 2d ({} trimmed, {} thinned), {} hud, {} 3d, {} distort sprites, {} draws; "
+          "line): {} 2d, {} hud, {} 3d, {} distort sprites, {} draws; "
           "textures {} decoded, {} revived, {} cached lookups; VRAM chunks {} written, {} already "
           "there; {} page uploads this frame",
           ms, m_distort_ms, m_slow_frames, s.sprites_2d - s0.sprites_2d,
-          s.trimmed - s0.trimmed, s.thinned - s0.thinned,
           s.sprites_hud - s0.sprites_hud, s.sprites_3d - s0.sprites_3d, s.distort - s0.distort,
           s.draws - s0.draws, v.decoded - v0.decoded, v.revived - v0.revived,
           v.cached - v0.cached, v.chunks_written - v0.chunks_written,
@@ -299,9 +282,9 @@ void CtrSpriteRenderer::log_slow_frame(CtrRenderState& rs,
     }
     m_rgb3d_frames = m_rgb3d_seen = m_rgb3d_swings = 0;
     lg::debug("[ctr] sprite: {} 2d, {} hud, {} 3d sprites, {} distort, {} with no visible "
-              "texel, {} trimmed, {} draws (since the last stats)",
+              "texel, {} draws (since the last stats)",
               m_stats.sprites_2d, m_stats.sprites_hud, m_stats.sprites_3d,
-              m_stats.distort, m_stats.unseen, m_stats.trimmed, m_stats.draws);
+              m_stats.distort, m_stats.unseen, m_stats.draws);
     m_stats = Stats();
     // (AI-assisted) the sprite arrays' snapshot (game thread): its size in the last frame, and
     // chunks that found none (read in place) or (host) whose copy differs from game memory
@@ -333,7 +316,6 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
   // call with a memory barrier for its static's guard)
   const CtrSettings& cs = ctr_settings();
   m_alpha_discard = cs.sprite_alpha_discard;
-  m_particle_fill = cs.particle_fill;  // (AI-assisted, perfv2)
   m_world_left = cs.sprites ? kMaxWorldSprites : 0;
   // direct GS data sent before the sprites
   m_direct->reset_state();
@@ -405,37 +387,6 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
       const float st_mul = p ? 2.f : 1.f, st_add = p ? -1.f : 0.f;
       m_st_out[p][k][0] = m_st_array[k].x() * st_mul + st_add;
       m_st_out[p][k][1] = m_st_array[k].y() * st_mul + st_add;
-    }
-  }
-  {
-    // (AI-assisted, perfv2) the st corners as a rectangle (particle trimming, draw_chunk_mode)
-    const float(*so)[2] = m_st_out[0];
-    for (int c = 0; c < 2; c++) {
-      m_st_lo[c] = std::min({so[0][c], so[1][c], so[2][c], so[3][c]});
-      m_st_hi[c] = std::max({so[0][c], so[1][c], so[2][c], so[3][c]});
-    }
-    m_st_k00 = m_st_k10 = m_st_k01 = -1;
-    int k11 = -1;
-    bool rect = m_st_hi[0] > m_st_lo[0] && m_st_hi[1] > m_st_lo[1];
-    for (int k = 0; k < 4 && rect; k++) {
-      const bool hs = so[k][0] == m_st_hi[0], ht = so[k][1] == m_st_hi[1];
-      rect = (hs || so[k][0] == m_st_lo[0]) && (ht || so[k][1] == m_st_lo[1]);
-      int& slot = hs ? (ht ? k11 : m_st_k10) : (ht ? m_st_k01 : m_st_k00);
-      rect = rect && slot < 0;
-      slot = k;
-    }
-    if (!rect || m_st_k00 < 0 || m_st_k10 < 0 || m_st_k01 < 0 || k11 < 0) {
-      m_st_k00 = -1;
-    }
-    // 3D sprites: corner offsets that make a parallelogram give one in clip space (a linear map)
-    m_xyz_affine = m_st_k00 >= 0;
-    for (int c = 0; c < 3 && m_xyz_affine; c++) {
-      m_xyz_affine = m_xyz_array[m_st_k00][c] + m_xyz_array[k11][c] ==
-                     m_xyz_array[m_st_k10][c] + m_xyz_array[m_st_k01][c];
-    }
-    for (int k = 0; k < 4; k++) {
-      m_st_sel[k][0] = so[k][0] == m_st_hi[0] ? 2 : 0;  // the box's s1 or s0
-      m_st_sel[k][1] = so[k][1] == m_st_hi[1] ? 3 : 1;  // t1 or t0
     }
   }
   dma.read_and_advance();  // mscalf
@@ -933,8 +884,6 @@ void CtrSpriteRenderer::resolve_state(const AdGif& ad, Mode mode) {
       m_last_tex0 = ad.tex0_data;
       m_last_tex = tex ? tex->handle : -1;
       m_last_tex_valid = true;  // also for unsupported formats: don't retry every sprite
-      static const CtrTexture kNone;
-      memcpy(m_last_tex_box, (tex ? tex : &kNone)->box, sizeof(m_last_tex_box));
       m_last_tex_max_alpha = tex ? tex->max_alpha : 255;
     }
     st.tex = m_last_tex;
@@ -1000,18 +949,12 @@ void CtrSpriteRenderer::resolve_state(const AdGif& ad, Mode mode) {
       st.atest = CTR_TEST_GREATER;
       st.aref = 0;
     }
-    // (AI-assisted, perfv2) the particle trim (draw_chunk_mode): only where a texel with alpha 0
-    // changes nothing: the texture's alpha used (TCC) and a blend weighted by it (Cs * As + or -
-    // Cd), no depth write
-    const bool trim_ok = st.tcc && !zwrite &&
-                         (st.blend == CTR_BLEND_ALPHA || st.blend == CTR_BLEND_ADD ||
-                          st.blend == CTR_BLEND_SUB);
-    r.trim_ok = trim_ok;
-    r.alpha_levels = trim_ok && tex0.tfx() == GsTex0::TextureFunction::MODULATE;
+    // a texel with alpha 0 changes nothing: the texture's alpha used (TCC), modulated, and a
+    // blend weighted by it (Cs * As + or - Cd), no depth write (draw_chunk_mode's unseen test)
+    r.alpha_skip = st.tcc && !zwrite && tex0.tfx() == GsTex0::TextureFunction::MODULATE &&
+                   (st.blend == CTR_BLEND_ALPHA || st.blend == CTR_BLEND_ADD ||
+                    st.blend == CTR_BLEND_SUB);
     r.max_alpha = m_last_tex_max_alpha;
-    memcpy(r.tex_box, m_last_tex_box, sizeof(r.tex_box));
-    r.trim = 0;
-    r.ready = 0;
     // (AI-assisted) a radial glow texture: from the procedural texture unit (no texels read);
     // its texture coordinates then go from -1 to 1 (see m_proc below)
     if (mode != MODE_HUD && ctr_gpu_tex_radial(st.tex)) {
@@ -1038,24 +981,6 @@ void CtrSpriteRenderer::note_rgb3d(int slot, int sum) {
     m_rgb3d_swings += hi >= 48 && 4 * d > hi;
   }
   m_rgb3d[slot] = (m_frame_seq & 0xffffu) << 16 | (u32)sum;
-}
-
-void CtrSpriteRenderer::resolve_level(Resolved& r, int j) {
-  float* box = r.box[j];
-  const bool level = r.trim_ok && (j == 0 || r.alpha_levels);
-  static const float kFullBox[4] = {0.f, 0.f, 1.f, 1.f};
-  memcpy(box, level ? r.tex_box[j] : kFullBox, sizeof(r.box[j]));
-  // The alpha box is in the texture's 0..1 domain, not a fraction of arbitrary/repeating UVs.
-  const bool unit_st = m_st_k00 >= 0 && m_st_lo[0] == 0.f && m_st_lo[1] == 0.f &&
-                       m_st_hi[0] == 1.f && m_st_hi[1] == 1.f;
-  if (level && unit_st && (box[0] > 0.f || box[1] > 0.f || box[2] < 1.f || box[3] < 1.f)) {
-    r.trim |= 1 << j;
-  }
-  for (int c = 0; c < 4; c++) {
-    const int a = c & 1;  // s (0, 2) or t (1, 3)
-    r.box_st[j][c] = m_st_lo[a] + box[c] * (m_st_hi[a] - m_st_lo[a]);
-  }
-  r.ready |= 1 << j;
 }
 
 void CtrSpriteRenderer::canary_report(Mode mode, u32 i, u32 count, const VecData& v,
@@ -1085,58 +1010,6 @@ void CtrSpriteRenderer::canary_report(Mode mode, u32 i, u32 count, const VecData
   if (shots < 20) {
     ctr_gfx::request_named_shot(fmt::format("canary_{:02d}", shots++).c_str());
   }
-}
-
-CtrSpriteRenderer::PairM CtrSpriteRenderer::pair_metrics(const VecData& v) const {
-  // (AI-assisted) the same numbers as draw_chunk_mode's (its tests that leave a sprite out too)
-  PairM out;
-  const float* m = m_camera;
-  const float px = v.xyz_sx.x(), py = v.xyz_sx.y(), pz = v.xyz_sx.z();
-  const float sx = v.xyz_sx.w(), sy = v.flag_rot_sy.w();
-  if (m_jak2 && as_int(v.flag_rot_sy.y()) == -1) {
-    return out;
-  }
-  const float tw = m[15] + m[3] * px + m[7] * py + m[11] * pz;
-  if (tw == 0) {
-    return out;
-  }
-  const float Q = m_pfog0 / tw;
-  float scale_x = sx * Q, scale_y = sy * Q;
-  const float a = color_byte(v.rgba.w()) * std::min(scale_x * scale_y * m_inv_area, 1.f);
-  if (a < 1.f) {
-    return out;
-  }
-  out.a = std::floor(a);  // (as the drawn u8)
-  const float tx = m[12] + m[0] * px + m[4] * py + m[8] * pz;
-  const float ty = m[13] + m[1] * px + m[5] * py + m[9] * pz;
-  scale_y = std::clamp(scale_y, m_min_scale, m_max_scale);
-  scale_x = std::clamp(scale_x, m_min_scale, m_max_scale);
-  out.half = std::max(std::abs(scale_x), std::abs(scale_y)) * m_corner_reach;
-  out.cx = tx * Q + m_hvdf_offset.x();
-  out.cy = ty * Q + m_hvdf_offset.y();
-  out.valid = true;
-  return out;
-}
-
-float CtrSpriteRenderer::pair_weight(const PairM& k, const PairM& p) const {
-  auto ramp = [](float x, float lo, float hi) { return std::clamp((x - lo) / (hi - lo), 0.f, 1.f); };
-  // 2D (strong): alpha up to 0.25 (fully) / none from 0.375, half size from 12 pixels (fully) /
-  // none under 9, and overlapping: centers within half the smaller half size (fully), none from
-  // 0.75 of it. (AI-assisted) The pixel size in GS units: Jak II's screen is 832 units high, Jak
-  // 1's 448 (was 448 for both: Jak II thinned from ~6.5 pixels)
-  const float max_a = 32.f;
-  const float min_half = 12.f * (m_jak2 ? 832.f : 448.f) / 240.f;
-  auto one = [&](const PairM& m) {
-    return ramp(-m.a, -1.5f * max_a, -max_a) * ramp(m.half, 0.75f * min_half, min_half);
-  };
-  const float both = std::min(one(k), one(p));
-  if (!(both > 0.f)) {
-    return 0.f;
-  }
-  const float h = std::min(k.half, p.half);
-  const float dx = k.cx - p.cx, dy = k.cy - p.cy;
-  const float d = std::sqrt(dx * dx + dy * dy);
-  return both * ramp(-d, -0.75f * h, -0.5f * h);
 }
 
 void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
@@ -1179,12 +1052,7 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
     m_clamp_s = m_clamp_t = true;
     m_have_last_ad = false;
   }
-  const int fill = m_particle_fill;
   const int slot0 = mode == MODE_3D ? kSpritesPerChunk * m_chunk3d++ : 0;
-  // (AI-assisted) particle_fill pair thinning: the keeper drawn last (its index in the chunk) and
-  // how much of its partner's alpha it took
-  u32 pair_keeper = ~0u;
-  float pair_w = 0.f;
   for (u32 i = 0; i < count; i++) {
     // the world sprites drawn (the decrement is after the tests below), at most the game's capacity
     if (mode != MODE_HUD && m_world_left <= 0) {
@@ -1373,77 +1241,22 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
     u8 a = (u8)(color_byte(v.rgba.w()) * alpha_scale);
     // procedural texture (radial glow): texture coordinates centered on 0
     const bool proc = (m_last_bucket_ptr->state.flags & CTR_STATE_PROCTEX) != 0;
-    // config particle_fill = strong: thinning by pairs (an approximation, off by default). The
-    // particle slots (2j, 2j + 1) of a chunk (48 slots: a pair never spans two) are a pair when
-    // both use the same texture and state, the blend is weighted by the texture's alpha
-    // (Resolved::trim_ok, see resolve_state) and pair_weight finds them alike: big faint 2D
-    // particles that overlap. The even one (the keeper) takes w of the odd one's alpha (alpha
-    // blending 1 - (1 - a)(1 - w a'), additive / subtractive a + w a'), the odd one is drawn with
-    // (1 - w) of its own, so left out at w = 1. w goes smoothly from 0 to 1 over bands of alpha,
-    // size, distance and overlap: no pop where a particle crosses a limit, and a particle with no
-    // alike partner (a lone light shaft, another emitter's particle in the next slot) is drawn as
-    // it is. Was one slot in n (strong: 3) left out whatever its neighbour was, its neighbour
-    // given n layers' alpha, stepping at alpha 48 / 16 px: lone particles in odd slots vanished
-    // and fading ones blinked. The doubled layer is approximate where the texture's alpha is soft:
-    // the vertex alpha can't give 1 - (1 - a At)(1 - a' At) (At: the texel's alpha), it gives
-    // (1 - (1 - a)(1 - a')) At, a little fainter at the soft edges (-15% at a = 0.375, At = 0.25);
-    // additive is exact.
-    if (mode == MODE_2D && !proc && m_cur->trim_ok && fill >= 2) {
-      if (!(i & 1)) {
-        if (i + 1 < count && same_state_words(ad, m_adgif[i + 1])) {
-          const PairM km = pair_metrics(v);
-          const PairM pm = km.valid ? pair_metrics(m_vec[i + 1]) : PairM();
-          const float w = pm.valid ? pair_weight(km, pm) : 0.f;
-          if (w > 0.f) {
-            const float af = a * (1.f / 128.f), ap = pm.a * (1.f / 128.f);
-            const float an = m_last_bucket_ptr->state.blend == CTR_BLEND_ALPHA
-                                 ? 1.f - (1.f - af) * (1.f - std::min(ap, 1.f) * w)
-                                 : af + ap * w;
-            a = (u8)std::min(128.f, an * 128.f + 0.5f);
-            pair_keeper = i;
-            pair_w = w;
-          }
-        }
-      } else if (pair_keeper == i - 1) {
-        if (pair_w >= 1.f) {
-          m_stats.thinned++;
-          continue;
-        }
-        a = (u8)(a * (1.f - pair_w) + 0.5f);
-      }
-    }
     // the GS's alpha is (At * a) >> 7: texels with At * a < 128 change nothing, none at all when
     // the texture's largest alpha is one of them
-    Resolved& rs = *m_cur;
-    int level = 0;
-    if (mode != MODE_HUD && rs.alpha_levels && !proc) {
-      if (rs.max_alpha * a < 128) {
-        m_stats.unseen++;
-        continue;
-      }
-      level = kAlphaLevel[a];
+    const Resolved& rs = *m_cur;
+    if (mode != MODE_HUD && rs.alpha_skip && !proc && rs.max_alpha * a < 128) {
+      m_stats.unseen++;
+      continue;
     }
-    if (mode != MODE_HUD && !((rs.ready >> level) & 1)) {
-      resolve_level(rs, level);
-    }
-    const bool trim = mode != MODE_HUD && ((rs.trim >> level) & 1);
     if (mode != MODE_HUD) {
       m_world_left--;  // drawn: see kMaxWorldSprites at the top
     }
     const float(*st_out)[2] = m_st_out[proc ? 1 : 0];
     if (mode == MODE_3D) {
-      // (AI-assisted) Interpolate x/y/z/w together: projected-space trimming distorts the
-      // texture and fails for panels crossing the near plane. No density/opacity change.
-      const bool trimmed = trim && !proc &&
-          ctr_trim_clip_quad(clip, m_st_k00, m_st_k10, m_st_k01, m_st_sel,
-                             rs.box[level], rs.box_st[level], m_xyz_affine);
-      m_stats.trimmed += trimmed;
       // the triangles (0, 1, 3) and (3, 1, 2) of the strip, in clip space
       for (int k = 0; k < 4; k++) {
-        if (!trimmed) {
-          clip[k].s = st_out[k][0];
-          clip[k].t = st_out[k][1];
-        }
+        clip[k].s = st_out[k][0];
+        clip[k].t = st_out[k][1];
         clip[k].r = r;
         clip[k].g = g;
         clip[k].b = b;
@@ -1478,37 +1291,7 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
                (corners[3][0] + 1.f) * 200.f, (1.f - corners[3][1] / 2.f) * 120.f);
     }
 #endif
-    // (AI-assisted, perfv2) a world particle is drawn over the part of its texture with alpha
-    // only (CtrTexture::box: alpha 0 outside it, bilinear reads included): the same pixels change,
-    // the GPU blends fewer (smoke and dust textures are mostly an empty square around a round
-    // puff). The quad is a parallelogram (affine in s, t): its corners move along its edges.
     ctr_vertex* out = m_last_bucket_ptr->verts.grow(4);
-    if (mode == MODE_2D && trim && !proc) {
-      const float* box = rs.box[level];
-      const float* box_st = rs.box_st[level];
-      // corner k at (fs, ft) of the box: P00 + fs (P10 - P00) + ft (P01 - P00); its texture
-      // coordinates the box's (Resolved::box_st)
-      const float* P00 = corners[m_st_k00];
-      const float* P10 = corners[m_st_k10];
-      const float* P01 = corners[m_st_k01];
-      const float e1x = P10[0] - P00[0], e1y = P10[1] - P00[1], e1z = P10[2] - P00[2];
-      const float e2x = P01[0] - P00[0], e2y = P01[1] - P00[1], e2z = P01[2] - P00[2];
-      for (int k = 0; k < 4; k++) {
-        const int ss = m_st_sel[k][0], ts = m_st_sel[k][1];
-        const float fs = box[ss], ft = box[ts];
-        out[k].x = P00[0] + fs * e1x + ft * e2x;
-        out[k].y = P00[1] + fs * e1y + ft * e2y;
-        out[k].z = std::clamp(P00[2] + fs * e1z + ft * e2z, 0.f, 1.f);
-        out[k].s = box_st[ss];
-        out[k].t = box_st[ts];
-        out[k].r = r;
-        out[k].g = g;
-        out[k].b = b;
-        out[k].a = a;
-      }
-      m_stats.trimmed++;
-      continue;
-    }
     for (int k = 0; k < 4; k++) {
       // (already in ctr_gpu coordinates)
       out[k].x = corners[k][0];
