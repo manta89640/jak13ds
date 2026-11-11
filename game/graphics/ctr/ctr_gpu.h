@@ -251,7 +251,7 @@ void ctr_gpu_screen_copy_pin(int level);
  * the tile x..x+w, y..y+h of it: their clip / ctr coordinates [-1, 1] cover the tile as they
  * cover the screen (x: tile left to right, y: bottom to top); x a multiple of 16, w + (x & 15)
  * <= max_tile_w; the tile is NOT cleared (draw over all of it first: alpha 0 for empty texels,
- * depth 0 with ztest ALWAYS). No sky hook in between (it resumes after).
+ * depth 0 with ztest ALWAYS).
  * Another ctr_gpu_rt_begin may follow (the next tile) without an end in between.
  * ctr_gpu_rt_end: the screen again. Only inside a frame. ctr_gpu_rt_uv: the texture coordinates
  * (ctr_vertex s, t) of logical point (lx, ly) of the texture (pixel edges at integers). */
@@ -500,19 +500,6 @@ void ctr_gpu_submit_partial(void);
  * citro3d's whole buffer */
 unsigned int ctr_gpu_cmd_buffer_kb(void);
 int ctr_gpu_set_pipeline(int on);
-/* (AI-assisted) config.ini sky_last. ctr_gpu_set_sky_hook: fn(arg) is called once, right before
- * the first draw of this frame that needs what is behind it on screen: blending, no depth write,
- * stencil or no-color draws, a screen copy, a clip / ocean reservation (only opaque depth-writing
- * draws let it wait), or at ctr_gpu_run_sky_hook / the frame end, whichever comes first. The
- * renderer draws the sky there (after the opaque level and models). fn = NULL: none. The frame
- * begin drops a hook still set. */
-typedef void (*ctr_gpu_hook_fn)(void* arg);
-void ctr_gpu_set_sky_hook(ctr_gpu_hook_fn fn, void* arg);
-void ctr_gpu_run_sky_hook(void);
-/* (AI-assisted) draws from now on get fragment depth 0 (the farthest: the cleared depth) instead
- * of their own (the depth map's scale 0, offset 0): with ztest GEQUAL they draw only where nothing
- * has drawn yet (the sky after the opaque geometry) */
-void ctr_gpu_set_depth_far(int on);
 /* (AI-assisted) the next frame begin clears only the depth buffer (Jak II's menu copies the last
  * frame's color before anything is drawn) */
 void ctr_gpu_set_skip_color_clear(int on);

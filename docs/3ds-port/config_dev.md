@@ -31,7 +31,7 @@ A key's value is, first match wins (one table for every reader:
    - `safe`: the Oct 11 behaviour (3ds-sdcard-oct12d config-safe.ini; its particle limits are the
      user key `particles = reduced`, which `stage_sd.sh --preset safe` writes): `overlap`, `shader_opt`,
      `frame_overlap2`, `skin_rows_f24`, `skin_clip_f24`, `cmd_dedup`, `cmd_dedup_draw`,
-     `fog_alpha`, `tex1_gating`, `cull_merc`, `sky_last`,
+     `fog_alpha`, `tex1_gating`, `cull_merc`,
      `fog_stage_skip`, `ocean_tex_half`,
      `tie_lod`, `merc_fog`, `streaming` off,
      `tex_cache_clear = always`, `c3l_read_buffer = 0`;
@@ -167,7 +167,6 @@ fps_cap = 30               # 30 (default): steady 30 fps (2 vblanks per frame); 
 frame_pacing = steady      # steady (default): every frame stays on screen as long as the game time it covers (even motion, ~1 frame more latency); fast: shown as soon as the GPU is done (uneven at ~30 fps). Log line: [ctr] pacing. (AI-assisted) The latency (2-4 vblanks) goes up after a late frame and down after ~5 s without one and with at most 2 frames done just in time, but for ~30 s not below the latency a frame was late at
 sky = on                   # the sky (time of day texture, clouds); off: cleared to the fog color ((AI-assisted, mercsprite) and no CPU sky blend either)
 clouds = on                # (AI-assisted) the clouds over the sky; off: the sky without them (one added pass less over the sky's part of the screen)
-sky_last = on              # (AI-assisted) the sky drawn after the opaque level and models instead of first: right before the first draw that needs what is behind it (anything blended, without depth write, stencil, a screen copy) or at the latest before the translucent buckets, with fragment depth 0 (the GPU's depth map: scale 0) and the depth test, so it only fills the pixels nothing opaque covered. Same picture (every blended pixel still blends over the sky). The sky's pixels behind the level are dropped before blending and color writes (the clouds read the framebuffer), and with the early depth test (early_depth = on / sky) before texturing. (default on since Oct 16; preset safe: off)
 overlap = on               # on: the GPU starts drawing each part of a frame while the CPU builds the rest (default on since Oct 16; preset safe: off)
 pipeline = on              # on: the CPU builds the next frame while the GPU draws this one (works with overlap) (default on since Oct 16)
 frame_overlap2 = on        # (AI-assisted) with pipeline = on, the GPU's idle gap between two frames. off: the frame end waits for the GPU, then hands the frame's command list over with a cache flush the GSP does while the GPU waits (as before). on: no wait at the frame end: the list is queued behind the frame the GPU is drawing; the next frame begin waits for the frame before that (whose buffers it reuses) instead. on needs frame_pacing = steady (else off). (AI-assisted, gpu-home) The GX queue has 256 entries (citro3d: 32, full every 3-4 GPU-bound frames); a drain of a full queue counts in gpu-wait and shows as "N GX queue drains" on the render line. The `[ctr] render ms/frame` line shows busy X (... active Y): active counts each frame from its command list on, busy also the CPU's build time of a pipelined frame. In gpu_profile = ab (on = the config's mode, clean if off; off = off) (default on since Oct 16; preset safe: off)

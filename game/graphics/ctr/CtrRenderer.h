@@ -101,13 +101,9 @@ class CtrDirectBucketRenderer : public CtrBucketRenderer {
   void set_sky(class CtrSky* sky) { m_sky = sky; }
 
  private:
-  // (AI-assisted) sky_last: the sky packet, drawn by the GPU code's sky hook (ctr_gpu_set_sky_hook)
-  static void deferred_sky(void* self);
   std::unique_ptr<CtrDirect> m_direct;
   class CtrSky* m_sky = nullptr;
   bool m_drew = false;
-  u8 m_deferred[128];
-  CtrRenderState* m_deferred_rs = nullptr;
 };
 
 class CtrRenderer {
@@ -163,10 +159,9 @@ class CtrRenderer {
   void dispatch_buckets_jak1(DmaFollower dma);
   // (AI-assisted) Jak II: buckets from the start of the chain (no default registers call)
   void dispatch_buckets_jak2(DmaFollower dma);
-  // (AI-assisted) the bucket loop of both: the sky hook from bucket sky_hook_bucket on,
-  // vif_interrupt_callback(bucket + callback_offset); false: a bucket
-  // didn't end at the next one
-  bool run_buckets(DmaFollower& dma, size_t sky_hook_bucket, int callback_offset);
+  // (AI-assisted) the bucket loop of both: vif_interrupt_callback(bucket + callback_offset); false:
+  // a bucket didn't end at the next one
+  bool run_buckets(DmaFollower& dma, int callback_offset);
   // (AI-assisted) Jak II's bucket table (CtrRendererJak2.cpp)
   void init_buckets_jak2();
   // (AI-assisted) the DMA tag of a bucket in a chain (Jak 1: after the default registers call)

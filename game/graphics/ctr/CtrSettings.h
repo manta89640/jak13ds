@@ -107,11 +107,6 @@ struct CtrSettings {
   bool sky = true;
   // (AI-assisted) the clouds over the sky (one added pass over the sky's part of the screen)
   bool clouds = true;
-  // (AI-assisted) the sky drawn after the opaque level and models (before the first draw that
-  // needs what's behind it), only where they left the cleared depth: its pixels behind them are
-  // dropped by the depth test (before blending and writing; with the early depth test, before
-  // texturing). Same picture
-  bool sky_last = true;
   // GPU starts on each part of a frame while the CPU builds the rest (off: at the frame end)
   bool overlap = true;
   // CPU builds frame N+1 while the GPU draws frame N

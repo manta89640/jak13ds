@@ -247,16 +247,7 @@ void CtrDirectBucketRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     auto data = dma.read_and_advance();
     if (m_sky && data.vifcode1().kind == VifCode::Kind::PC_PORT &&
         data.size_bytes == CtrSky::kPacketBytes) {
-      if (ctr_settings().sky_last) {
-        // (AI-assisted) sky_last: drawn after the opaque level and models, before the first draw
-        // that needs what's behind it (ctr_gpu_set_sky_hook), depth tested against them
-        static_assert(sizeof(m_deferred) == CtrSky::kPacketBytes);
-        memcpy(m_deferred, data.data, sizeof(m_deferred));
-        m_deferred_rs = &rs;
-        ctr_gpu_set_sky_hook(&CtrDirectBucketRenderer::deferred_sky, this);
-      } else {
-        m_sky->draw(data.data, rs);
-      }
+      m_sky->draw(data.data, rs);
     } else if (data.size_bytes) {
       m_direct->render_vif(data.vif0(), data.vif1(), data.data, data.size_bytes);
     }
@@ -273,22 +264,6 @@ void CtrDirectBucketRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
              st.triangles, st.flushes, st.skipped_prims);
     m_direct->clear_stats();
   }
-}
-
-void CtrDirectBucketRenderer::deferred_sky(void* arg) {
-  auto* self = static_cast<CtrDirectBucketRenderer*>(arg);
-#ifndef __3DS__
-  const std::string keep = ctr_gpu_soft_bucket_name();
-  ctr_gpu_soft_bucket("sky");
-#endif
-  self->m_sky->set_depth_tested(true);
-  ctr_gpu_set_depth_far(1);
-  self->m_sky->draw(self->m_deferred, *self->m_deferred_rs);
-  ctr_gpu_set_depth_far(0);
-  self->m_sky->set_depth_tested(false);
-#ifndef __3DS__
-  ctr_gpu_soft_bucket(keep.c_str());
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -1270,7 +1245,7 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
   // (AI-assisted) the visibility strings come with bucket tfrag-0 every frame
   m_rs.vis_valid[0] = m_rs.vis_valid[1] = false;
   m_rs.vis_packets = 0;
-  run_buckets(dma, (size_t)jak1::BucketId::ALPHA_TEX_LEVEL0, 0);
+  run_buckets(dma, 0);
   m_vram->prewarm(2.0);  // the boot sprite and HUD textures, before their first draw
   if (!m_menu_page_done) {
     const u32 page = g_menu_page.load(std::memory_order_relaxed);
@@ -1289,7 +1264,7 @@ void CtrRenderer::dispatch_buckets_jak2(DmaFollower dma) {
   }
   m_rs.vis_valid[0] = m_rs.vis_valid[1] = false;
   m_rs.vis_packets = 0;
-  const bool ok = run_buckets(dma, (size_t)jak2::BucketId::TEX_L0_ALPHA, 1);
+  const bool ok = run_buckets(dma, 1);
   tex_frame_done_jak2();
   if (!ok) {
     return;
@@ -1299,7 +1274,7 @@ void CtrRenderer::dispatch_buckets_jak2(DmaFollower dma) {
   }
 }
 
-bool CtrRenderer::run_buckets(DmaFollower& dma, size_t sky_hook_bucket, int callback_offset) {
+bool CtrRenderer::run_buckets(DmaFollower& dma, int callback_offset) {
   const bool profiling = m_profile_mode > 0;
   if (m_bucket_phase.size() != m_buckets.size()) {
     // (AI-assisted, gpu-rt) gpu_breakdown: the GPU phase of each bucket renderer (-1: keeps the
@@ -1322,11 +1297,6 @@ bool CtrRenderer::run_buckets(DmaFollower& dma, size_t sky_hook_bucket, int call
   for (size_t bucket_id = 0; bucket_id < m_buckets.size(); bucket_id++) {
     if (m_bucket_phase[bucket_id] >= 0) {
       ctr_gpu_phase(m_bucket_phase[bucket_id]);  // (AI-assisted, gpu-rt) gpu_breakdown
-    }
-    if (bucket_id >= sky_hook_bucket) {
-      // (AI-assisted) sky_last: at the latest before the translucent buckets (and the sky blend
-      // in tfrag-trans, which starts this frame's sky textures)
-      ctr_gpu_run_sky_hook();
     }
     // (AI-assisted, j2gpu) the clock read only around buckets with data (Jak II has 327 buckets,
     // most of them empty every frame: two system calls and two 64-bit to double conversions each)
