@@ -2857,31 +2857,6 @@ static int sync_texture_copy(u32* in, u32 indim, u32* out, u32 outdim, u32 size,
    * reads the copy's result on the CPU. */
 }
 
-/* sync_texture_copy's display transfer (first: the draws so far go to the GPU before it) */
-static void sync_display_transfer(u32* in, u32 indim, u32* out, u32 outdim, u32 flags, int first) {
-  if (!gx_begin()) {
-    return;
-  }
-  if (g.in_frame && s_pipeline) {
-    if (s_bd.frame) {
-      bd_copy(in, indim, out, outdim, 0, flags);
-    } else {
-      if (first) {
-        pipeline_submit();
-      }
-      GX_DisplayTransfer(in, indim, out, outdim, flags);
-    }
-    gx_end();
-    return;
-  }
-  if (g.in_frame && first) {
-    flush_vbuf();
-    C3D_FrameSplit(GX_CMDLIST_FLUSH);
-  }
-  C3D_SyncDisplayTransfer(in, indim, out, outdim, flags);
-  gx_end();
-}
-
 #define PARTIAL_MIN_DRAWS 24
 #define PARTIAL_MAX 6 /* citro3d's queue has 32 entries per frame */
 /* (AI-assisted, gpuopt) with the pipeline the GPU draws the frame before while this one is built,
