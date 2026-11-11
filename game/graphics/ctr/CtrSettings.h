@@ -324,19 +324,13 @@ struct CtrSettings {
   // fog stage (texture combiner pass-through, texture unit 1 off). On (preset safe: off)
   bool fog_stage_skip = true;
   // (AI-assisted) fog_alpha: level draws whose vertex alpha is 0x80 (~99.5%) get the fog amount in
-  // the vertex color's alpha (ctr_mesh_old_fa / ctr_mesh_opt_fa) and mix in the fog color as a
+  // the vertex color's alpha (ctr_mesh_opt_fa) and mix in the fog color as a
   // combiner constant: no fog ramp texture lookups, one vertex output less. The rest keep the
   // ramp. tex1_gating: texture unit 1 (the ramp) enabled only for draws whose combiner reads it
   // (raw draws switch the unit's enable bit, no texture cache clear; merc, sprites, sky, HUD and
   // shadows never read it). Both on (preset safe: off).
   bool fog_alpha = true;
   bool tex1_gating = true;
-  // (AI-assisted) shader_opt: the shorter vertex programs (platform/3ds/shaders/ctr_*_opt.v.pica:
-  // level meshes 21 -> 10 instructions and 4 -> 3 output registers, merc 53 -> 33, merc shine
-  // 56 -> 33, PS2 ocean 14 -> 9 and 12 -> 6). Same picture in Azahar. On (the user's decision,
-  // Oct 12: "we will keep the optimised shaders on"); pica_bench B3.mesh_opt / B3.skin_opt price
-  // it. Off (preset safe): the Oct 2 programs (ctr_mesh_old, ctr_skin_old, ...)
-  bool shader_opt = true;
   // (AI-assisted) cmd_dedup: register writes that would give a register the value it already has
   // are left out of the command list (texture unit 0's type at a texture change). The same
   // registers, the same picture; on. cmd_dedup_draw: the raw draws' PRIMITIVE_CONFIG mode and
@@ -392,10 +386,6 @@ struct CtrSettings {
   // (AI-assisted) defer_flush: the render thread's cache flushes held until the frame is submitted
   // (e165bc719); off: each one right away, as on Oct 2
   bool defer_flush = true;
-  // (AI-assisted) shader_basic new | old: the 7 instruction ctr_basic (hardware proven) or the
-  // Oct 2 one (ctr_basic_old). (The Oct 3 ctr_mesh / ctr_skin, which hung the real GPU, and their
-  // switches new_shaders / shader_mesh / shader_skin were removed on Oct 16.)
-  int shader_basic = 1;
   bool asm_mem = true;
   bool fast_clock = true;
   // running in an emulator (Azahar / Citra), for the auto defaults above

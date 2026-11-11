@@ -734,7 +734,6 @@ float s_env_fade_lo = -1.f, s_env_fade = 1.f;
 bool s_nofog = false;
 float s_mfog_hvdf_w = 255.f, s_mfog_lo = 0.f, s_mfog_hi = 0.f;
 float s_mhaze_k = 0.f, s_mhaze_c = 0.f;  // (AI-assisted, mercsprite) ctr_gpu_set_merc_haze
-int s_shader_opt = 1;
 bool fog_on() {
   static const bool off = getenv("CTR_SOFT_NO_FOG") != nullptr;
   return !off;
@@ -3726,9 +3725,8 @@ void ctr_gpu_set_merc_haze(float k, float c) {
   s_mhaze_c = c;
 }
 
-// (AI-assisted, far-fog) as the 3DS: only shader_opt's skin program has the fog
 int ctr_gpu_merc_fog_ready(void) {
-  return s_shader_opt;
+  return 1;
 }
 
 void ctr_gpu_request_screenshot(const char* path) {
@@ -3755,12 +3753,6 @@ void ctr_gpu_set_fog_alpha(int on) {
   g_soft_fog_alpha = on;
 }
 void ctr_gpu_set_tex1_gating(int) {}
-void ctr_gpu_set_shader_opt(int on) {  // (AI-assisted) the vertex math is the same here
-  s_shader_opt = on ? 1 : 0;              // (far-fog: but merc fog needs it, as on the 3DS)
-}
-int ctr_gpu_shader_opt_ready(void) {
-  return 1;
-}
 int ctr_gpu_fog_alpha_ready(void) {
   return 1;
 }
@@ -3867,7 +3859,6 @@ int ctr_gpu_breakdown_line(char*, int, const char*) {
 }
 void ctr_gpu_set_asm_tex(int) {}
 void ctr_gpu_set_defer_flush(int) {}
-void ctr_gpu_set_shader_basic(int) {}
 int ctr_gpu_asm_tex(void) {
   return 1;
 }

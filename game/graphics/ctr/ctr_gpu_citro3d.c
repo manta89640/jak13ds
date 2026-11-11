@@ -32,20 +32,14 @@ extern const uint8_t ctr_clip2_shbin[];
 extern const size_t ctr_clip2_shbin_size;
 extern const uint8_t ctr_ocean_shbin[];
 extern const size_t ctr_ocean_shbin_size;
-extern const uint8_t ctr_ocean_full_shbin[];
-extern const size_t ctr_ocean_full_shbin_size;
-extern const uint8_t ctr_ocean_full_clip_shbin[];
-extern const size_t ctr_ocean_full_clip_shbin_size;
 /* (AI-assisted, j2water) Jak II's ocean with the sky reflection (loaded by the Jak II build only) */
 extern const uint8_t ctr_ocean_env_shbin[];
 extern const size_t ctr_ocean_env_shbin_size;
 /* (AI-assisted) Envmapped ties in both games. */
 extern const uint8_t ctr_etie_shbin[];
 extern const size_t ctr_etie_shbin_size;
-/* the draws whose texture has an alpha mask (c3l v23): ctr_skin_old / _opt and
- * ctr_etie with the mask's texture coordinates */
-extern const uint8_t ctr_skin_old_mask_shbin[];
-extern const size_t ctr_skin_old_mask_shbin_size;
+/* the draws whose texture has an alpha mask (c3l v23): ctr_skin_opt and ctr_etie with the mask's
+ * texture coordinates */
 extern const uint8_t ctr_skin_opt_mask_shbin[];
 extern const size_t ctr_skin_opt_mask_shbin_size;
 /* (AI-assisted, onebone) ctr_skin_opt for draws with a one-bone palette */
@@ -66,21 +60,7 @@ extern const uint8_t ctr_tfrag_morph_shbin[];
 extern const size_t ctr_tfrag_morph_shbin_size;
 extern const uint8_t ctr_tfrag_morph_fa_shbin[];
 extern const size_t ctr_tfrag_morph_fa_shbin_size;
-/* (AI-assisted) the Oct 2 shaders (hardware proven; the level meshes and merc without shader_opt,
- * config.ini shader_basic = old). The Oct 3 ctr_mesh / ctr_skin / ctr_skin_env (the new ctr_mesh
- * hung the real GPU), the dph bisect mesh and the shader_groups shbins were removed on Oct 16. */
-extern const uint8_t ctr_basic_old_shbin[];
-extern const size_t ctr_basic_old_shbin_size;
-extern const uint8_t ctr_mesh_old_shbin[];
-extern const size_t ctr_mesh_old_shbin_size;
-extern const uint8_t ctr_skin_old_shbin[];
-extern const size_t ctr_skin_old_shbin_size;
-extern const uint8_t ctr_skin_env_old_shbin[];
-extern const size_t ctr_skin_env_old_shbin_size;
-/* (AI-assisted) config.ini fog_alpha: the mesh shaders with the fog amount in the color's alpha */
-extern const uint8_t ctr_mesh_old_fa_shbin[];
-extern const size_t ctr_mesh_old_fa_shbin_size;
-/* (AI-assisted) config.ini shader_opt: the shorter programs (platform/3ds/shaders/ctr_*_opt.v.pica) */
+/* the level mesh, merc and PS2 ocean programs (platform/3ds/shaders/ctr_*_opt.v.pica) */
 extern const uint8_t ctr_mesh_opt_shbin[];
 extern const size_t ctr_mesh_opt_shbin_size;
 extern const uint8_t ctr_mesh_opt_fa_shbin[];
@@ -98,11 +78,6 @@ extern const size_t ctr_mesh_opt_df_shbin_size;
 extern const uint8_t ctr_mesh_opt_df_fa_shbin[];
 extern const size_t ctr_mesh_opt_df_fa_shbin_size;
 #define OPT_DVLBS 8
-/* (AI-assisted) config.ini shader_basic: 1 ctr_basic (default), 0 the Oct 2 ctr_basic_old */
-static int s_basic_new = 1;
-void ctr_gpu_set_shader_basic(int basic) {
-  s_basic_new = basic ? 1 : 0;
-}
 void ctr_thread_install_crash_handler(void); /* platform/3ds/port */
 static void gl_to_pica_check(void); /* (AI-assisted) */
 
@@ -362,18 +337,15 @@ static inline int is_mesh_prog(int prog) {
          prog == PROG_MESH_MORPH_FA || prog == PROG_TFRAG_MORPH || prog == PROG_TFRAG_MORPH_FA;
 }
 
-/* (AI-assisted) The vertex programs and their uniforms' places, one shbin per program. Set 0: the
- * Oct 2 programs (hardware proven); set 1 (config.ini shader_opt): the ctr_*_opt ones. g.ps: the
- * set in use, switched at most once per frame (ctr_gpu_set_shader_opt). */
+/* (AI-assisted) The vertex programs and their uniforms' places, one shbin per program. */
 typedef struct {
   shaderProgram_s basic, mesh, mesh_fa, skin, env, clip, clip2, ocean, ocean_full, ocean_full_clip;
   shaderProgram_s mesh_df, mesh_df_fa; /* (AI-assisted) set 1: PROG_MESH_DF, PROG_MESH_DF_FA */
   int ok;      /* loaded */
-  /* (AI-assisted) set 1 (config.ini shader_opt): mesh, mesh_fa, skin, env, ocean_full and
-   * ocean_full_clip are the ctr_*_opt programs, whose uniforms carry factors the shaders no longer
-   * apply: the mesh matrix has two fog rows after it (mesh_fog_rows), the skin programs' clip has
-   * its x, y, z columns / 255 (unscaled weights) and skin's light colors the vertex color scale */
-  int opt;
+  /* mesh, mesh_fa, skin, env, ocean_full and ocean_full_clip are the ctr_*_opt programs, whose
+   * uniforms carry factors the shaders don't apply: the mesh matrix has two fog rows after it
+   * (mesh_fog_rows), the skin programs' clip has its x, y, z columns / 255 (unscaled weights) and
+   * skin's light colors the vertex color scale */
   int df_ok;   /* (AI-assisted) set 1: mesh_df and mesh_df_fa loaded, their uniforms in place */
   int fa_ok;   /* mesh_fa usable (fog_alpha) */
   int uloc_projection, uloc_clip, uloc_scales, uloc_fog0, uloc_fog1;
@@ -410,21 +382,17 @@ typedef struct {
   shaderProgram_s skin1;
   int skin1_ok;
 } ProgSet;
-static ProgSet s_ps[2];
+static ProgSet s_ps;
 
 static struct {
   int ready;
   C3D_RenderTarget* top;
-  ProgSet* ps;          /* (AI-assisted) the program set in use (s_ps) */
-  DVLB_s* opt_dvlb[OPT_DVLBS]; /* (AI-assisted) set 1's own shbins (shader_opt) */
+  ProgSet* ps;          /* (AI-assisted) the programs (s_ps) */
+  DVLB_s* opt_dvlb[OPT_DVLBS]; /* (AI-assisted) the ctr_*_opt shbins */
   /* (AI-assisted) skin_bl_valid: the skin program's bones and lights (last_skin_bones_id /
    * last_skin_lights) are in its registers */
   int skin_bl_valid;
   DVLB_s* dvlb;
-  DVLB_s* mesh_dvlb;
-  /* (AI-assisted) config.ini fog_alpha: the mesh program with the fog amount in the color's alpha
-   * (same uniforms at the same places; ProgSet::fa_ok: loaded and usable) */
-  DVLB_s* mesh_fa_dvlb;
   u32 fog_abgr; /* the fog color as a combiner constant (fog_alpha's stage 1), R in the low byte */
   float fog0[4], fog1[4]; /* see ctr_gpu_set_mesh_fog, mesh_fog_uniforms */
   /* (AI-assisted) changes with fog0 (never 0): ctr_mesh_matrix::fog_gen; and the inputs of the
@@ -434,14 +402,9 @@ static struct {
   const void* fog_in_ps;
   float fog_in0[4], fog_in1[4];
   int fog_df; /* (AI-assisted) the game fog is a constant 0: only the draw distance fog is left */
-  /* (AI-assisted) the Oct 2 mesh program's fog uniforms: the game's values unchanged (the ocean
-   * shader and shader_opt's programs use fog0/fog1) */
-  float mfog0[4], mfog1[4];
   C3D_Tex fog_tex;        /* 64x8: alpha ramp 0..1 along s, fog color */
   uint32_t fog_tex_rgb;
   int fog_tex_valid;
-  DVLB_s* skin_dvlb;
-  DVLB_s* env_dvlb; /* the envmap pass of skinned meshes (ctr_skin_env.v.pica) */
   DVLB_s* clip_dvlb; /* immediate draws in clip space (ctr_clip.v.pica) */
   DVLB_s* clip2_dvlb; /* the same with two texture coordinates (ctr_clip2.v.pica: clouds) */
   /* (AI-assisted) the ocean with waves (ctr_ocean.v.pica, ctr_gpu_ocean_draw) */
@@ -452,8 +415,8 @@ static struct {
   DVLB_s* morph_dvlb[2];  /* ctr_mesh_morph(_fa).v.pica */
   DVLB_s* tmorph_dvlb[2]; /* ctr_tfrag_morph(_fa).v.pica */
   u32 tmorph_unif_id;     /* the tfrag geomorph uniforms the GPU has (ctr_gpu_draw_mesh_tmorph) */
-  /* ctr_skin_old_mask, ctr_skin_opt_mask, ctr_etie_fa.v.pica */
-  DVLB_s* skin_mask_dvlb[2];
+  /* ctr_skin_opt_mask, ctr_etie_fa.v.pica */
+  DVLB_s* skin_mask_dvlb;
   DVLB_s* skin1_dvlb; /* (AI-assisted, onebone) */
   DVLB_s* etie_fa_dvlb;
   u32 wind_rows_id;       /* the slot rows the GPU has (ctr_gpu_draw_mesh_wind), 0: none */
@@ -471,8 +434,6 @@ static struct {
   /* (AI-assisted) fog_stage_skip: level draws without the fog stage (ctr_gpu_set_mesh_nofog), and
    * texture unit 1 (the fog ramp) switched off for them (raw draws) */
   int mesh_nofog;
-  DVLB_s* ocean_full_dvlb; /* (AI-assisted) the PS2 ocean's GS vertices (ctr_ocean_full.v.pica) */
-  DVLB_s* ocean_full_clip_dvlb; /* (AI-assisted) the same in clip space (ctr_ocean_full_clip.v.pica) */
   C3D_Mtx ocean_full_gs; /* GS screen units (x, y 12.4, z 24 bits) -> PICA clip space at w = 1 */
   /* the open ctr_gpu_ocean_full_reserve: vertices and indices at these g.vbuf offsets */
   int ocean_full_open;
@@ -1118,55 +1079,16 @@ static void use_program(int prog) {
                   1.0f / 127.0f);
     unif_vectors += 1;
     g.mesh_st_atlas = 0; /* (AI-assisted) scales.x is 1/1024 */
-    if (g.ps->opt) {
-      /* (AI-assisted) shader_opt: the fog clamps (mesh_fog_uniforms' form); the fog factors are
-       * in the matrix's fog rows (mesh_fog_rows) */
-      C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_fog1, g.fog1[0], g.fog1[1], g.fog1[2],
-                    g.fog1[3]);
-    } else {
-      C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_fog0, g.mfog0[0], g.mfog0[1], g.mfog0[2],
-                    g.mfog0[3]);
-      C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_fog1, g.mfog1[0], g.mfog1[1], g.mfog1[2],
-                    g.mfog1[3]);
-      unif_vectors += 2;
-    }
+    /* (AI-assisted) the fog clamps (mesh_fog_uniforms' form); the fog factors are in the
+     * matrix's fog rows (mesh_fog_rows) */
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_fog1, g.fog1[0], g.fog1[1], g.fog1[2], g.fog1[3]);
   }
   g.cur.prog_unif_vectors += unif_vectors;
   g.cur_prog = prog;
 }
 
-/* (AI-assisted) config.ini shader_opt, each frame (gpu_profile = ab switches it): the program set
- * for the rest of the frame. Every cache of what the GPU has is dropped with a change. */
-static int s_want_opt;
 static void res_apply(int on);
 static void resident_programs(const ProgSet* rp);
-static const ProgSet* s_res_set;
-static void prog_set_select(void) {
-  ProgSet* want = s_want_opt && s_ps[1].ok ? &s_ps[1] : &s_ps[0];
-  if (!g.ready || want == g.ps) {
-    return;
-  }
-  g.ps = want;
-  if (s_res_set && s_res_set != want) {
-    res_apply(0);
-    resident_programs(want);
-  }
-  const int prog = g.cur_prog;
-  g.cur_prog = PROG_NONE;
-  if (prog != PROG_NONE) {
-    use_program(prog);
-  }
-}
-
-/* (AI-assisted) config.ini shader_opt, each frame (gpu_profile = ab switches it) */
-void ctr_gpu_set_shader_opt(int on) {
-  s_want_opt = on ? 1 : 0;
-  prog_set_select();
-}
-
-int ctr_gpu_shader_opt_ready(void) {
-  return s_ps[1].ok;
-}
 
 static float s_gs_half_height = 112.0f; /* ctr_gpu_set_gs_half_height */
 
@@ -1452,10 +1374,8 @@ static int res_desc_bits(u32 ins) {
 
 static void res_apply(int on);
 
-/* the set the image holds (both sets' programs don't fit in shader memory with the alpha mask
- * programs): made again when the set in use changes (prog_set_select) */
+/* the image of the programs' code */
 static void resident_programs(const ProgSet* rp) {
-  s_res_set = rp;
   s_res_n = 0;
   if (!(s_micro & MICRO_RESIDENT)) {
     printf("[ctr] shader_resident: off\n");
@@ -1581,9 +1501,9 @@ static void resident_programs(const ProgSet* rp) {
          n, np, (unsigned long)code, (unsigned long)ndesc);
 }
 
-/* (AI-assisted) config.ini shader_opt: set 1, set 0's basic, clip, clip2 and ocean (the same
- * shbins) with the ctr_*_opt programs for the rest */
-static void load_opt_set(void) {
+/* (AI-assisted) the ctr_*_opt programs and the ones that build on them, after basic, clip, clip2,
+ * ocean and the ties' programs; 0: they didn't load */
+static int load_opt_set(void) {
   static const uint8_t* const kBins[OPT_DVLBS] = {
       ctr_mesh_opt_shbin,       ctr_mesh_opt_fa_shbin,         ctr_skin_opt_shbin,
       ctr_skin_env_opt_shbin,   ctr_ocean_full_opt_shbin,      ctr_ocean_full_clip_opt_shbin,
@@ -1596,23 +1516,19 @@ static void load_opt_set(void) {
   for (int i = 0; i < OPT_DVLBS; i++) {
     g.opt_dvlb[i] = DVLB_ParseFile((u32*)kBins[i], (u32)sizes[i]);
     if (!g.opt_dvlb[i]) {
-      printf("[ctr] shader_opt: the programs didn't load, off\n");
+      printf("[ctr] shaders: the ctr_*_opt programs didn't load\n");
       for (int k = 0; k < i; k++) {
         DVLB_Free(g.opt_dvlb[k]);
         g.opt_dvlb[k] = NULL;
       }
-      return;
+      return 0;
     }
   }
-  ProgSet* p = &s_ps[1];
+  ProgSet* p = &s_ps;
   struct {
     shaderProgram_s* prog;
     DVLE_s* dvle;
   } set[] = {
-      {&p->basic, &g.dvlb->DVLE[0]},
-      {&p->clip, &g.clip_dvlb->DVLE[0]},
-      {&p->clip2, &g.clip2_dvlb->DVLE[0]},
-      {&p->ocean, &g.ocean_dvlb->DVLE[0]},
       {&p->mesh, &g.opt_dvlb[0]->DVLE[0]},
       {&p->mesh_fa, &g.opt_dvlb[1]->DVLE[0]},
       {&p->skin, &g.opt_dvlb[2]->DVLE[0]},
@@ -1626,25 +1542,11 @@ static void load_opt_set(void) {
     shaderProgramInit(set[i].prog);
     shaderProgramSetVsh(set[i].prog, set[i].dvle);
   }
-  if (g.ocean_env_dvlb) {
-    /* (AI-assisted, j2water) Jak II: set 0's */
-    shaderProgramInit(&p->ocean_env);
-    shaderProgramSetVsh(&p->ocean_env, &g.ocean_env_dvlb->DVLE[0]);
-  }
-  if (g.etie_dvlb) {
-    /* (AI-assisted, j2water2) Jak II: set 0's */
-    shaderProgramInit(&p->etie);
-    shaderProgramSetVsh(&p->etie, &g.etie_dvlb->DVLE[0]);
-  }
-  if (g.etie_fa_dvlb) {
-    shaderProgramInit(&p->etie_fa); /* set 0's */
-    shaderProgramSetVsh(&p->etie_fa, &g.etie_fa_dvlb->DVLE[0]);
-  }
-  g.skin_mask_dvlb[1] =
+  g.skin_mask_dvlb =
       DVLB_ParseFile((u32*)ctr_skin_opt_mask_shbin, (u32)ctr_skin_opt_mask_shbin_size);
-  if (g.skin_mask_dvlb[1]) {
+  if (g.skin_mask_dvlb) {
     shaderProgramInit(&p->skin_mask);
-    shaderProgramSetVsh(&p->skin_mask, &g.skin_mask_dvlb[1]->DVLE[0]);
+    shaderProgramSetVsh(&p->skin_mask, &g.skin_mask_dvlb->DVLE[0]);
   }
   /* (AI-assisted, onebone) ctr_skin_opt1 */
   g.skin1_dvlb = DVLB_ParseFile((u32*)ctr_skin_opt1_shbin, (u32)ctr_skin_opt1_shbin_size);
@@ -1711,7 +1613,6 @@ static void load_opt_set(void) {
                  shaderInstanceGetUniformLocation(vs, "scales") == p->uloc_scales &&
                  shaderInstanceGetUniformLocation(vs, "fog1") == p->uloc_fog1;
   }
-  p->opt = 1;
   p->df_ok = 1;
   const shaderProgram_s* df[2] = {&p->mesh_df, &p->mesh_df_fa};
   for (int i = 0; i < 2; i++) {
@@ -1720,9 +1621,10 @@ static void load_opt_set(void) {
   }
   p->ok = p->uloc_clip >= 0 && p->uloc_fog1 >= 0 && p->uloc_skin_clip >= 0 &&
           p->uloc_skin_lights >= 0 && p->uloc_env_clip >= 0;
-  printf("[ctr] shader_opt: %s (fog_alpha program %s, game fog off programs %s)\n",
-         p->ok ? "ready" : "uniforms missing, off", p->fa_ok ? "ready" : "off",
+  printf("[ctr] shaders: %s (alpha mask mesh program %s, game fog off programs %s)\n",
+         p->ok ? "ready" : "uniforms missing", p->fa_ok ? "ready" : "off",
          p->df_ok ? "ready" : "off");
+  return p->ok;
 }
 
 /* Boot check of the CPU cache cleaning the GPU depends on: data written on another core,
@@ -1828,25 +1730,12 @@ int ctr_gpu_init(void) {
     return -2;
   }
 
-  printf("[ctr] shaders: basic %s, mesh / skin Oct 2 (shader_opt: the opt programs)\n",
-         s_basic_new ? "new" : "old");
-  g.ps = &s_ps[0];
-  g.dvlb = s_basic_new ? DVLB_ParseFile((u32*)ctr_basic_shbin, (u32)ctr_basic_shbin_size)
-                         : DVLB_ParseFile((u32*)ctr_basic_old_shbin, (u32)ctr_basic_old_shbin_size);
+  g.ps = &s_ps;
+  g.dvlb = DVLB_ParseFile((u32*)ctr_basic_shbin, (u32)ctr_basic_shbin_size);
   shaderProgramInit(&g.ps->basic);
   shaderProgramSetVsh(&g.ps->basic, &g.dvlb->DVLE[0]);
   C3D_BindProgram(&g.ps->basic);
 
-  g.mesh_dvlb = DVLB_ParseFile((u32*)ctr_mesh_old_shbin, (u32)ctr_mesh_old_shbin_size);
-  shaderProgramInit(&g.ps->mesh);
-  shaderProgramSetVsh(&g.ps->mesh, &g.mesh_dvlb->DVLE[0]);
-  /* (AI-assisted) fog_alpha: its program (ctr_mesh_old_fa) has the mesh program's uniforms at the
-   * same places (the draws upload them by g.ps->uloc_*) */
-  g.mesh_fa_dvlb = DVLB_ParseFile((u32*)ctr_mesh_old_fa_shbin, (u32)ctr_mesh_old_fa_shbin_size);
-  if (g.mesh_fa_dvlb) {
-    shaderProgramInit(&g.ps->mesh_fa);
-    shaderProgramSetVsh(&g.ps->mesh_fa, &g.mesh_fa_dvlb->DVLE[0]);
-  }
   /* no fog until ctr_gpu_set_mesh_fog (AI-assisted: the shader's form, see mesh_fog_uniforms) */
   g.fog0[0] = -1.0f / 255.0f;
   g.fog0[1] = 0.0f;
@@ -1856,32 +1745,18 @@ int ctr_gpu_init(void) {
   g.fog1[1] = 0.0f;
   g.fog1[2] = 0.0f;
   g.fog1[3] = 0.0f;
-  memcpy(g.mfog0, g.fog0, sizeof(g.mfog0));
-  memcpy(g.mfog1, g.fog1, sizeof(g.mfog1));
   g.fog_gen = 1; /* (AI-assisted) */
   g.merc_fog_gen = 1; /* (AI-assisted, far-fog) no merc fog until ctr_gpu_set_merc_fog */
   g.merc_fog_hvdf_w = 255.0f;
   g.merc_fog_lo = g.merc_fog_hi = 0.0f;
   g.merc_haze_k = g.merc_haze_c = 0.0f;
   g.fog_in_valid = 0;
-  {
-    /* the Oct 2 shader's form: hvdf.w, fog min, fog max, -1/255; w scale, start, 1 / range */
-    const float f0[4] = {0.0f, 255.0f, 255.0f, -1.0f / 255.0f}, f1[4] = {0.0f, 1.0f, 0.0f, 0.0f};
-    memcpy(g.mfog0, f0, sizeof(f0));
-    memcpy(g.mfog1, f1, sizeof(f1));
-  }
   if (C3D_TexInit(&g.fog_tex, 64, 8, GPU_RGBA8)) {
     C3D_TexSetFilter(&g.fog_tex, GPU_LINEAR, GPU_LINEAR);
     C3D_TexSetWrap(&g.fog_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
     g.fog_tex_valid = 1;
     g.fog_tex_rgb = 0xffffffff; /* force the first fill */
   }
-  g.skin_dvlb = DVLB_ParseFile((u32*)ctr_skin_old_shbin, (u32)ctr_skin_old_shbin_size);
-  shaderProgramInit(&g.ps->skin);
-  shaderProgramSetVsh(&g.ps->skin, &g.skin_dvlb->DVLE[0]);
-  g.env_dvlb = DVLB_ParseFile((u32*)ctr_skin_env_old_shbin, (u32)ctr_skin_env_old_shbin_size);
-  shaderProgramInit(&g.ps->env);
-  shaderProgramSetVsh(&g.ps->env, &g.env_dvlb->DVLE[0]);
   g.clip_dvlb = DVLB_ParseFile((u32*)ctr_clip_shbin, (u32)ctr_clip_shbin_size);
   shaderProgramInit(&g.ps->clip);
   shaderProgramSetVsh(&g.ps->clip, &g.clip_dvlb->DVLE[0]);
@@ -1891,13 +1766,6 @@ int ctr_gpu_init(void) {
   g.ocean_dvlb = DVLB_ParseFile((u32*)ctr_ocean_shbin, (u32)ctr_ocean_shbin_size);
   shaderProgramInit(&g.ps->ocean);
   shaderProgramSetVsh(&g.ps->ocean, &g.ocean_dvlb->DVLE[0]);
-  g.ocean_full_dvlb = DVLB_ParseFile((u32*)ctr_ocean_full_shbin, (u32)ctr_ocean_full_shbin_size);
-  shaderProgramInit(&g.ps->ocean_full);
-  shaderProgramSetVsh(&g.ps->ocean_full, &g.ocean_full_dvlb->DVLE[0]);
-  g.ocean_full_clip_dvlb =
-      DVLB_ParseFile((u32*)ctr_ocean_full_clip_shbin, (u32)ctr_ocean_full_clip_shbin_size);
-  shaderProgramInit(&g.ps->ocean_full_clip);
-  shaderProgramSetVsh(&g.ps->ocean_full_clip, &g.ocean_full_clip_dvlb->DVLE[0]);
 #if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
   /* (AI-assisted, j2water) Jak II's ocean with the sky reflection (the Jak 1 build loads none) */
   g.ocean_env_dvlb = DVLB_ParseFile((u32*)ctr_ocean_env_shbin, (u32)ctr_ocean_env_shbin_size);
@@ -1918,17 +1786,9 @@ int ctr_gpu_init(void) {
     shaderProgramInit(&g.ps->etie_fa);
     shaderProgramSetVsh(&g.ps->etie_fa, &g.etie_fa_dvlb->DVLE[0]);
   }
-  g.skin_mask_dvlb[0] =
-      DVLB_ParseFile((u32*)ctr_skin_old_mask_shbin, (u32)ctr_skin_old_mask_shbin_size);
-  if (g.skin_mask_dvlb[0]) {
-    shaderProgramInit(&g.ps->skin_mask);
-    shaderProgramSetVsh(&g.ps->skin_mask, &g.skin_mask_dvlb[0]->DVLE[0]);
+  if (!load_opt_set()) {
+    return -5;
   }
-  prog_set_ulocs(&s_ps[0], g.mesh_fa_dvlb != NULL);
-  s_ps[0].ok = 1;
-  printf("[ctr] fog_alpha program: %s\n",
-         s_ps[0].fa_ok ? "ready" : (g.mesh_fa_dvlb ? "uniforms don't match, off" : "none for this mesh shader, off"));
-  load_opt_set(); /* (AI-assisted) config.ini shader_opt's programs (set 1) */
   /* (AI-assisted, micro-gpu) config.ini gpu_micro */
   s_micro = s_micro_cfg = ctr_config_bool("gpu_micro", 1) ? MICRO_ALL : 0;
   printf("[ctr] gpu_micro: %s\n", s_micro ? "on" : "off");
@@ -2052,20 +1912,17 @@ void ctr_gpu_exit(void) {
     memset(&s_arena, 0, sizeof(s_arena));
   }
   ctr_linear_unlock();
-  /* (AI-assisted) both program sets, then their shbins */
-  prog_set_free(&s_ps[0]);
-  prog_set_free(&s_ps[1]);
-  g.ps = &s_ps[0];
+  /* (AI-assisted) the programs, then their shbins */
+  prog_set_free(&s_ps);
   for (int i = 0; i < OPT_DVLBS; i++) {
     if (g.opt_dvlb[i]) {
       DVLB_Free(g.opt_dvlb[i]);
       g.opt_dvlb[i] = NULL;
     }
   }
-  DVLB_s* dvlbs[] = {g.dvlb,      g.mesh_dvlb,  g.mesh_fa_dvlb, g.skin_dvlb,
-                     g.env_dvlb,  g.clip_dvlb,  g.clip2_dvlb,   g.ocean_dvlb,
-                     g.ocean_full_dvlb, g.ocean_full_clip_dvlb, g.ocean_env_dvlb, g.etie_dvlb,
-                     g.wind_dvlb, g.skin_mask_dvlb[0], g.skin_mask_dvlb[1], g.etie_fa_dvlb,
+  DVLB_s* dvlbs[] = {g.dvlb,      g.clip_dvlb,  g.clip2_dvlb,   g.ocean_dvlb,
+                     g.ocean_env_dvlb, g.etie_dvlb,
+                     g.wind_dvlb, g.skin_mask_dvlb, g.etie_fa_dvlb,
                      g.morph_dvlb[0], g.morph_dvlb[1], g.tmorph_dvlb[0], g.tmorph_dvlb[1],
                      g.skin1_dvlb};
   for (size_t i = 0; i < sizeof(dvlbs) / sizeof(dvlbs[0]); i++) {
@@ -2073,7 +1930,6 @@ void ctr_gpu_exit(void) {
       DVLB_Free(dvlbs[i]);
     }
   }
-  g.mesh_fa_dvlb = NULL;
   C3D_RenderTargetDelete(g.top);
   C3D_Fini();
   ctr_port_set_gpu_active(0);
@@ -8402,8 +8258,8 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
     raw_sync();
     if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
       g.last_clip_id = matrix->id;
-      if (g.ps->opt) {
-        /* (AI-assisted) shader_opt: the matrix and its fog rows in one burst (the draw distance
+      {
+        /* (AI-assisted) the matrix and its fog rows in one burst (the draw distance
          * fog's only with the game fog off: the df programs don't read the other). The rows are
          * made once per matrix and fog (fog_gen): a chunk's matrix is uploaded again at every
          * switch between chunks (the draws are sorted by texture) */
@@ -8416,8 +8272,6 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
           mm->fog_gen = g.fog_gen;
         }
         raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, matrix->f24, df ? 15 : 18, 0));
-      } else {
-        raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, matrix->f24, 12, 0));
       }
       g.last_mesh_valid = 1;
     }
@@ -8427,12 +8281,10 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
     if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
       g.last_clip_id = matrix->id;
       C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_clip, (const C3D_Mtx*)matrix->m);
-      if (g.ps->opt) {
-        float r[8];
-        mesh_fog_rows(matrix->m, r);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_clip + 4, r[3], r[2], r[1], r[0]);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_clip + 5, r[7], r[6], r[5], r[4]);
-      }
+      float r[8];
+      mesh_fog_rows(matrix->m, r);
+      C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_clip + 4, r[3], r[2], r[1], r[0]);
+      C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_clip + 5, r[7], r[6], r[5], r[4]);
     }
     g.last_mesh_valid = 1;
     c3d_mesh_buffers(ms, NULL, 0);
@@ -8539,7 +8391,7 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
 }
 
 int ctr_gpu_wind_ready(void) {
-  return g.ready && s_ps[1].wind_ok;
+  return g.ready && s_ps.wind_ok;
 }
 
 /* the PS2's tie geomorph (see ctr_gpu.h): ctr_gpu_draw_mesh_prepared's citro3d path with the morph
@@ -8665,7 +8517,7 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
 }
 
 int ctr_gpu_morph_ready(void) {
-  return g.ready && s_ps[1].morph_ok;
+  return g.ready && s_ps.morph_ok;
 }
 
 /* the PS2's tfrag geomorph (see ctr_gpu.h): ctr_gpu_draw_mesh_morph's paths with the tfrag morph
@@ -9210,13 +9062,10 @@ static void skin_clip_matrix(const float clip[16], C3D_Mtx* m) {
   gl_to_pica_mul(clip, m);
 }
 
-/* (AI-assisted) shader_opt (ctr_skin_opt / ctr_skin_env_opt.v.pica): the weights go in unscaled
+/* (AI-assisted) ctr_skin_opt / ctr_skin_env_opt.v.pica: the weights go in unscaled
  * (0..255), so the camera space position is 255 times as long: the clip matrix's x, y, z columns
  * (C3D_FVec c[3], c[2], c[1]) / 255 undo it */
 static void skin_opt_scale(C3D_Mtx* m) {
-  if (!g.ps->opt) {
-    return;
-  }
   for (int r = 0; r < 4; r++) {
     for (int c = 1; c < 4; c++) {
       m->r[r].c[c] *= 1.0f / 255.0f;
@@ -9482,7 +9331,7 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
   if (!same_clip && raw) {
     /* (AI-assisted, gpuopt) the words made once per instance (skin_clip_words) */
     const SkinClipEnt* ce = skin_clip_words(clip, 1u | (s_skin_clip_f24 ? 2u : 0u) |
-                                                      (g.ps->opt ? 4u : 0u));
+                                                      4u);
     /* (AI-assisted, far-fog) the w row for the fog rows (made again below) */
     memcpy(g.skin_wrow, ce->wrow, sizeof(g.skin_wrow));
     g.skin_mfog_gen = 0;
@@ -9538,21 +9387,19 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
     /* (AI-assisted, gpuopt) the words made once per instance (skin_light_words): shader_opt's
      * scaled light colors, as float24 with skin_clip_f24 (21 words instead of 28) */
     const SkinLightEnt* le = skin_light_words(lights, 1u | (s_skin_clip_f24 ? 2u : 0u) |
-                                                          (g.ps->opt ? 4u : 0u));
+                                                          4u);
     raw_end(raw_unif(raw_ptr(), g.ps->uloc_skin_lights, le->words, s_skin_clip_f24 ? 21 : 28,
                      s_skin_clip_f24 ? 0 : 1));
     memcpy(g.last_skin_lights, lights, sizeof(g.last_skin_lights));
   } else if (!same_lights) {
-    /* (AI-assisted) shader_opt: the light colors and ambient times the vertex color scale */
+    /* (AI-assisted) the light colors and ambient times the vertex color scale */
     float lopt[28];
     const float* lights_in = lights;
-    if (g.ps->opt) {
-      memcpy(lopt, lights, sizeof(lopt));
-      for (int i = 12; i < 28; i++) {
-        lopt[i] *= (i & 3) == 3 ? 1.0f / 255.0f : 1.0f / 510.0f;
-      }
-      lights = lopt;
+    memcpy(lopt, lights, sizeof(lopt));
+    for (int i = 12; i < 28; i++) {
+      lopt[i] *= (i & 3) == 3 ? 1.0f / 255.0f : 1.0f / 510.0f;
     }
+    lights = lopt;
     if (raw && s_skin_clip_f24) {
       /* (AI-assisted) skin_clip_f24: the lights as float24 (21 words instead of 28) */
       u32 l24[21];
@@ -9640,7 +9487,7 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
     /* (AI-assisted, gpuopt) the base pass's words for this instance (skin_clip_words): the same
      * bits, made once */
     const SkinClipEnt* ce = skin_clip_words(clip, 1u | (s_skin_clip_f24 ? 2u : 0u) |
-                                                      (g.ps->opt ? 4u : 0u));
+                                                      4u);
     raw_end(raw_unif(raw_ptr(), g.ps->uloc_env_clip, ce->words, s_skin_clip_f24 ? 12 : 16,
                      s_skin_clip_f24 ? 0 : 1));
     memcpy(g.last_env_clip, clip, sizeof(g.last_env_clip));
@@ -9906,19 +9753,10 @@ void ctr_gpu_set_mesh_fog(const float fog0_in[4], const float fog1[4], uint8_t r
    * are equal (config.ini fog = off: 0, 255, 255, -1/255), and no fog when that constant is <= 0
    * (half a step of the fog ramp's 255 for rounding) */
   g.fog_df = fog0[1] == fog0[2] && 1.0f + fog0[3] * fog0[1] <= 0.5f / 255.0f;
-  memcpy(g.mfog0, fog0, sizeof(g.mfog0));
-  memcpy(g.mfog1, fog1, sizeof(g.mfog1));
-  if (g.ps->opt) {
-    /* (AI-assisted) shader_opt: new fog rows with the next matrix upload, the clamps now */
-    g.last_mesh_valid = 0;
-    if (is_mesh_prog(g.cur_prog)) {
-      C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_fog1, g.fog1[0], g.fog1[1], g.fog1[2],
-                    g.fog1[3]);
-      raw_note_unif();
-    }
-  } else if (is_mesh_prog(g.cur_prog)) {
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_fog0, g.mfog0[0], g.mfog0[1], g.mfog0[2], g.mfog0[3]);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_fog1, g.mfog1[0], g.mfog1[1], g.mfog1[2], g.mfog1[3]);
+  /* (AI-assisted) new fog rows with the next matrix upload, the clamps now */
+  g.last_mesh_valid = 0;
+  if (is_mesh_prog(g.cur_prog)) {
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_fog1, g.fog1[0], g.fog1[1], g.fog1[2], g.fog1[3]);
     raw_note_unif();
   } else if (g.cur_prog == PROG_OCEAN) {
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_ocean_fog0, g.fog0[0], g.fog0[1], g.fog0[2],

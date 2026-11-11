@@ -128,12 +128,6 @@ enum { CTR_TCC_TRILINEAR = 64, CTR_TCC_MIP_MAX1 = 128 };
  * frame (gpu_profile = ab switches them). ctr_gpu_fog_alpha_ready: the program for it is loaded
  * (ctr_mesh_old_fa, or shader_opt's ctr_mesh_opt_fa). */
 void ctr_gpu_set_fog_alpha(int on);
-/* (AI-assisted) config.ini shader_opt (each frame after ctr_gpu_frame_begin; gpu_profile = ab
- * switches it): the shorter ctr_*_opt.v.pica programs for level meshes, merc and the PS2 ocean
- * (fewer instructions per vertex, fog rows folded into the mesh matrix, texcoord1 packed into
- * texcoord0's output register). ctr_gpu_shader_opt_ready: they loaded. */
-void ctr_gpu_set_shader_opt(int on);
-int ctr_gpu_shader_opt_ready(void);
 void ctr_gpu_set_tex1_gating(int on);
 int ctr_gpu_fog_alpha_ready(void);
 void ctr_gpu_set_cull(int enable, int flip);
@@ -519,10 +513,6 @@ int ctr_gpu_breakdown_line(char* out, int size, const char* label);
 void ctr_gpu_set_asm_tex(int on);
 /* (AI-assisted) config.ini defer_flush (hang bisect): 0 = every cache flush right away */
 void ctr_gpu_set_defer_flush(int on);
-/* (AI-assisted) config.ini shader_basic: 1 the 7 instruction ctr_basic (default), 0 the Oct 2
- * ctr_basic_old; before ctr_gpu_init. Level meshes and merc use the Oct 2 ctr_mesh_old /
- * ctr_skin_old / ctr_skin_env_old, or with shader_opt the ctr_*_opt programs. */
-void ctr_gpu_set_shader_basic(int basic);
 int ctr_gpu_asm_tex(void);
 /* (AI-assisted) where the render thread is (a static string) and its frame count; logged once
  * per second for the first 60 s by a watchdog thread (ctr_gpu_diag_start: config.ini

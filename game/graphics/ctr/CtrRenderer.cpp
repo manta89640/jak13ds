@@ -591,7 +591,6 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_set_skin_clip_f24(ctr_settings().skin_clip_f24 ? 1 : 0);         // (AI-assisted)
   ctr_gpu_set_fog_alpha(ctr_settings().fog_alpha ? 1 : 0);
   ctr_gpu_set_tex1_gating(ctr_settings().tex1_gating ? 1 : 0);
-  ctr_gpu_set_shader_opt(ctr_settings().shader_opt ? 1 : 0);        // (AI-assisted)
   ctr_gpu_set_merc_one_bone(ctr_settings().merc_one_bone ? 1 : 0);
   ctr_gpu_set_index_u8(ctr_settings().index_u8 ? 1 : 0);
   ctr_gpu_set_vram_vertices(ctr_settings().vram_vertices ? 1 : 0);  // (AI-assisted, vramvtx)
@@ -1509,7 +1508,6 @@ void wait_render_idle() {
 int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_steady_pacing(ctr_settings().steady_pacing ? 1 : 0);
   // (AI-assisted) hardware hang bisect switches (config.ini, CtrSettings.h)
-  ctr_gpu_set_shader_basic(ctr_settings().shader_basic);
   ctr_gpu_set_asm_tex(ctr_settings().asm_tex ? 1 : 0);
   ctr_gpu_set_defer_flush(ctr_settings().defer_flush ? 1 : 0);
   lg::info("[ctr] diag: defer_flush {}", ctr_settings().defer_flush ? "on" : "off");
