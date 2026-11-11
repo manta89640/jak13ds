@@ -1942,3 +1942,20 @@ linear buffer at once, the VRAM freed 3 frames later), so does a VRAM loss
 `ctr_gpu_mesh_vertices`) drops its copy. citro3d's non-raw path keeps reading the linear buffer.
 Not measured: compare render times and the GPU counters' memory traffic (`gpu_counters`) with it
 on and off in one place on a console.
+
+### 11. The shine pass folded into its base draw: measured first (shinefold)
+
+An envmapped merc effect is drawn twice: its base draws, then a shine draw per base draw over
+the same triangles (the converter repeats the base draw's index range, `gen_merc_lod`), with
+ctr_skin_env_opt (the full bone blend again) and an additive blend. One pass could do both: the
+base program with the sphere map as a fourth output (texcoord2), and a combiner chain base x
+light, the fog stage, then + envmap x fade x 2 on unit 2, for opaque base draws without an alpha
+mask (unit 2), dropping the shine draw and its queue entry. That is a new vertex program, a new
+three-texture combiner path and a change to the model's draw order, none of which can be
+compiled, assembled or drawn in this environment (ctr_gpu_citro3d.c is 3DS-only; picasso didn't
+run here). So this step measures what it would save before writing it:
+
+- CtrMerc counts, per stats window, the shine draws drawn and those over exactly an opaque base
+  draw's triangles of the same model: `[ctr] merc: ... (N shine draws left out: envmap_min_px; D
+  drawn, F over their opaque base draw's triangles: foldable)`. F is the number of draws (and of
+  whole bone-blend vertex passes) the fold would remove.

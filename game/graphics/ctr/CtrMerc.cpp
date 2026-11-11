@@ -422,10 +422,12 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
   if (rs.log_now && m_stats.models) {
     lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones, {} with the generated low LOD), "
-              "{} draws, {} envmap batches ({} shine draws left out: envmap_min_px), {} draws sorted by texture, {} with back faces culled "
+              "{} draws, {} envmap batches ({} shine draws left out: envmap_min_px; {} drawn, {} "
+              "over their opaque base draw's triangles: foldable), {} draws sorted by texture, {} with back faces culled "
               "({} not: mirroring bone), {} palette bones not sent, {} draws with fog",
               m_name, m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.gen_lod,
-              m_stats.draws, m_stats.env_batches, m_stats.env_small, m_stats.sorted_draws, m_stats.culled,
+              m_stats.draws, m_stats.env_batches, m_stats.env_small, m_stats.env_drawn,
+              m_stats.env_foldable, m_stats.sorted_draws, m_stats.culled,
               m_stats.mirrored, m_stats.unsent_bones, m_stats.fogged);
     m_stats = Stats();
   }
@@ -1567,6 +1569,9 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     }
     return env_small == 1;
   };
+  // (AI-assisted, shinefold) this model's opaque base draws' triangle ranges (first, count)
+  u64 base_ranges[32];
+  int n_base_ranges = 0;
   for (const auto& draw : *draws) {
     if (!(flags.enable_mask & (1ull << draw.effect))) {
       continue;
@@ -1707,6 +1712,15 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       }
     }
     if (envmap) {
+      // (AI-assisted, shinefold) counted: a shine over exactly its opaque base draw's triangles
+      m_stats.env_drawn++;
+      const u64 key = (u64)draw.first_index << 32 | draw.index_count;
+      for (int k = 0; k < n_base_ranges; k++) {
+        if (base_ranges[k] == key) {
+          m_stats.env_foldable++;
+          break;
+        }
+      }
       // emerc.frag: texture * fade * 2, no alpha test, the envmap mode's blending (adds a shine)
       st.atest = CTR_TEST_ALWAYS;
       if (env_batch) {
@@ -1758,6 +1772,9 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       st.flags |= CTR_STATE_EARLY_DEPTH;
     }
     const bool opaque = st.blend == CTR_BLEND_OFF && st.zwrite && st.ztest == CTR_TEST_GEQUAL;
+    if (opaque && n_base_ranges < 32) {  // (AI-assisted, shinefold)
+      base_ranges[n_base_ranges++] = (u64)draw.first_index << 32 | draw.index_count;
+    }
     if (tex_sort && opaque && draw.eye_id == 0xff) {
       if (q_clip == ~0u) {
         q_clip = queue_floats(clip, 16);
