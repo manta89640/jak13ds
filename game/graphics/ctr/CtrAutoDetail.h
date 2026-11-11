@@ -34,6 +34,9 @@ constexpr float kSmallTieMeters = 100.f;  // the converter's limit of small ties
 constexpr float kShrubFarK = 0.5f;
 constexpr float kTieFarMeters = 250.f;
 constexpr float kTieFar2Meters = 150.f;
+// Jak II's floor: the city is GPU bound on near far-version ties (hardware: 142k triangles)
+constexpr float kTieFarMetersJak2 = 150.f;
+constexpr float kTieFar2MetersJak2 = 80.f;
 constexpr float kReliefMax = (float)kKnobs;
 // a distance limit's fade band: from the limit to this times it
 constexpr float kFadeBand = 1.1f;
@@ -118,9 +121,10 @@ struct Relief {
     from[kShrubFar] = 1.f;
     to[kShrubFar] = far_levers ? kShrubFarK : 1.f;
     from[kTieFar] = draw;
-    to[kTieFar] = far_levers ? std::min(draw, kTieFarMeters) : draw;
+    to[kTieFar] = far_levers ? std::min(draw, jak2 ? kTieFarMetersJak2 : kTieFarMeters) : draw;
     from[kTieFar2] = to[kTieFar];
-    to[kTieFar2] = far_levers ? std::min(to[kTieFar], kTieFar2Meters) : to[kTieFar];
+    to[kTieFar2] =
+        far_levers ? std::min(to[kTieFar], jak2 ? kTieFar2MetersJak2 : kTieFar2Meters) : to[kTieFar];
     n = 0;
     for (Knob k : kOrder) {
       const bool moves = k == kTieLodPx ? from[k] < to[k] : from[k] > to[k];
