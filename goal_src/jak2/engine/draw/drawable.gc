@@ -961,6 +961,25 @@
     )
   )
 
+;; og:preserve-this (AI-assisted, j2cuts) 3DS: config.ini merc_lod_scale (kmachine.cpp), as Jak 1's
+;; (goal_src/jak1/engine/draw/drawable.gc): a model's LOD distances times this. 1 for Jak and his
+;; children (Daxter, the gun), HUD models and in movies.
+(#when TARGET_3DS
+  (define-extern *pc-3ds-merc-lod-scale* float)
+  (defun pc-3ds-merc-lod-scale-of ((pd process-drawable) (dc draw-control))
+    (if (or (= *pc-3ds-merc-lod-scale* 1.0)
+            (logtest? (-> dc status) (draw-control-status hud))
+            (logtest? (-> *kernel-context* prevent-from-run) (process-mask movie))
+            (not *target*)
+            (= pd *target*)
+            (= (ppointer->process (-> pd parent)) *target*)
+            )
+        1.0
+        *pc-3ds-merc-lod-scale*
+        )
+    )
+  )
+
 (defun dma-add-process-drawable ((pd process-drawable) (dc draw-control) (flag symbol) (dma-buf dma-buffer))
   "Draw a normal process-drawable. Set up lighting/shadow settings, then pass on to foreground renderer."
   (local-vars
@@ -1258,8 +1277,15 @@
                              )
                          )
                         (else
-                          (while (and (< lod-idx (the-as int (-> dc lod-set max-lod))) (< (-> dc lod-set lod lod-idx dist) dist-w))
-                            (+! lod-idx 1)
+                          ;; og:preserve-this (AI-assisted) 3DS: the lower detail models sooner, at
+                          ;; config.ini merc_lod_scale times the distances (not Jak's; the distance
+                          ;; cull below compares the real distance)
+                          (let ((lod-dist-scale (#if TARGET_3DS (pc-3ds-merc-lod-scale-of pd dc) 1.0)))
+                            (while (and (< lod-idx (the-as int (-> dc lod-set max-lod)))
+                                        (< (* lod-dist-scale (-> dc lod-set lod lod-idx dist)) dist-w)
+                                        )
+                              (+! lod-idx 1)
+                              )
                             )
                           )
                         )

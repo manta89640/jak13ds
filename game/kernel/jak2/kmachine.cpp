@@ -824,6 +824,26 @@ void InitMachine_PCPort() {
     intern_from_c("*pc-3ds-anim-lod-far*")->value() =
         anim_lod_far ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
   }
+  // (AI-assisted, j2cuts) config.ini merc_lod_scale (default 1, as Jak 1): characters and objects
+  // other than Jak switch to their lower detail models at this fraction of the game's distances
+  // (drawable.gc, TARGET_3DS; the distance cull stays). Fewer joints and vertices per model.
+  {
+    float lod_scale = 1.f;
+#ifdef __3DS__
+    char v[32];
+    if (ctr_config_get("merc_lod_scale", v, sizeof(v))) {
+      lod_scale = std::clamp((float)atof(v), 0.05f, 1.f);
+    }
+    lg::info("merc LOD distances x{:.2f} (config.ini merc_lod_scale)", lod_scale);
+#else
+    if (const char* e = getenv("OPENGOAL_MERC_LOD_SCALE")) {
+      lod_scale = std::clamp((float)atof(e), 0.05f, 1.f);
+    }
+#endif
+    u32 bits;
+    memcpy(&bits, &lod_scale, 4);
+    intern_from_c("*pc-3ds-merc-lod-scale*")->value() = bits;
+  }
   // config.ini ocean = full: the PS2 ocean's DMA (draw-ocean) for CtrOceanFull instead of
   // ocean-3ds-packet's for CtrOceanRenderer (ocean.gc, TARGET_3DS)
   {
