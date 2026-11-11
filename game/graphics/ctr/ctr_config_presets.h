@@ -103,12 +103,8 @@ typedef struct {
 } ctr_cfg_alias;
 
 static const ctr_cfg_alias ctr_cfg_aliases[] = {
-    {"particles", "full", "max_sprites", "2176"},
-    {"particles", "full", "sprite_max_size", "0"},
-    {"particles", "full", "sprite_min_alpha", "2"},
-    {"particles", "reduced", "max_sprites", "1000"},
-    {"particles", "reduced", "sprite_max_size", "0.5"},
-    {"particles", "reduced", "sprite_min_alpha", "6"},
+    {"particles", "full", "sprites", "on"},
+    {"particles", "reduced", "sprites", "on"},
     /* (AI-assisted, j1ocean) the safe preset's particles = reduced keeps the old 0.7 density */
     {"particles", "reduced", "particle_density", "0.7"},
     {"text_size", NULL, "text_scale", NULL},
@@ -185,6 +181,7 @@ static const char* const ctr_cfg_removed[] = {
     "fine_vis", "fine_vis_kb", "occ_cull", "occ_cull_tris", "occ_cull_dist", "vista_untextured",
     /* models / effects strip: removed with their code */
     "ocean_near_alpha", "envmap_batch", "merc_tex_sort", "envmap_min_px",
+    "max_sprites", "sprite_max_size", "sprite_min_alpha",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

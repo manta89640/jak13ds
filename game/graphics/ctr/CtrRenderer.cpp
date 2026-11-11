@@ -148,13 +148,6 @@ const AbSwitch kAbSwitches[] = {
        s.shadow_casters = on ? kConfigCap : 0;
      },
      [](const CtrSettings& s) { return s.shadow_casters > 0; }},
-    // sprite_min_alpha: the config's value for big sprites (on; 6 when it is 2) or 2 (off)
-    {"sprite_min_alpha",
-     [](CtrSettings& s, bool on) {
-       static const int kConfigAlpha = s.sprite_min_alpha > 2 ? s.sprite_min_alpha : 6;
-       s.sprite_min_alpha = on ? kConfigAlpha : 2;
-     },
-     [](const CtrSettings& s) { return s.sprite_min_alpha > 2; }},
     {"sprite_alpha_discard", [](CtrSettings& s, bool on) { s.sprite_alpha_discard = on; },
      [](const CtrSettings& s) { return s.sprite_alpha_discard; }},
     {"merc_gen_lod", [](CtrSettings& s, bool on) { s.merc_gen_lod = on; },

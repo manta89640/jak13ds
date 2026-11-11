@@ -169,7 +169,6 @@ CtrSpriteRenderer::CtrSpriteRenderer(std::string name, int id, CtrVram* vram)
   m_jak2 = ctr_is_jak2();
   if (m_jak2) {
     m_inv_y = 1.f / 208.f;
-    m_big_half_gs = 20.f * 832.f / 240.f;
   }
   memset(m_hud_matrix, 0, sizeof(m_hud_matrix));
 }
@@ -278,10 +277,10 @@ void CtrSpriteRenderer::log_slow_frame(CtrRenderState& rs,
       const Stats& s = m_stats;
       lg::info(
           "[ctr] sprite build {:.1f} ms (distort {:.1f} ms; {} frames over 3 ms since the last "
-          "line): {} 2d ({} made smaller, {} trimmed, {} thinned), {} hud, {} 3d, {} distort sprites, {} draws; "
+          "line): {} 2d ({} trimmed, {} thinned), {} hud, {} 3d, {} distort sprites, {} draws; "
           "textures {} decoded, {} revived, {} cached lookups; VRAM chunks {} written, {} already "
           "there; {} page uploads this frame",
-          ms, m_distort_ms, m_slow_frames, s.sprites_2d - s0.sprites_2d, s.capped - s0.capped,
+          ms, m_distort_ms, m_slow_frames, s.sprites_2d - s0.sprites_2d,
           s.trimmed - s0.trimmed, s.thinned - s0.thinned,
           s.sprites_hud - s0.sprites_hud, s.sprites_3d - s0.sprites_3d, s.distort - s0.distort,
           s.draws - s0.draws, v.decoded - v0.decoded, v.revived - v0.revived,
@@ -299,11 +298,10 @@ void CtrSpriteRenderer::log_slow_frame(CtrRenderState& rs,
                m_rgb3d_seen ? 100.0 * m_rgb3d_swings / m_rgb3d_seen : 0.0);
     }
     m_rgb3d_frames = m_rgb3d_seen = m_rgb3d_swings = 0;
-    lg::debug("[ctr] sprite: {} 2d ({} made smaller), {} hud, {} 3d sprites, {} distort, {} faint "
-              "big ones left out, {} with no visible texel, {} trimmed, {} draws (since the last "
-              "stats)",
-              m_stats.sprites_2d, m_stats.capped, m_stats.sprites_hud, m_stats.sprites_3d,
-              m_stats.distort, m_stats.faint, m_stats.unseen, m_stats.trimmed, m_stats.draws);
+    lg::debug("[ctr] sprite: {} 2d, {} hud, {} 3d sprites, {} distort, {} with no visible "
+              "texel, {} trimmed, {} draws (since the last stats)",
+              m_stats.sprites_2d, m_stats.sprites_hud, m_stats.sprites_3d,
+              m_stats.distort, m_stats.unseen, m_stats.trimmed, m_stats.draws);
     m_stats = Stats();
     // (AI-assisted) the sprite arrays' snapshot (game thread): its size in the last frame, and
     // chunks that found none (read in place) or (host) whose copy differs from game memory
@@ -336,7 +334,7 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
   const CtrSettings& cs = ctr_settings();
   m_alpha_discard = cs.sprite_alpha_discard;
   m_particle_fill = cs.particle_fill;  // (AI-assisted, perfv2)
-  m_world_left = cs.sprites ? cs.max_sprites : 0;
+  m_world_left = cs.sprites ? kMaxWorldSprites : 0;
   // direct GS data sent before the sprites
   m_direct->reset_state();
   while (dma.current_tag().qwc != 7 && dma.current_tag_offset() != rs.next_bucket) {
@@ -402,8 +400,6 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
     }
     m_corner_reach = b * xy;
   }
-  m_size_cap = cs.sprite_max_size * (m_jak2 ? 416.f : 224.f);
-  m_min_alpha_big = cs.sprite_min_alpha > 2 ? (float)cs.sprite_min_alpha : 0.f;
   for (int k = 0; k < 4; k++) {
     for (int p = 0; p < 2; p++) {
       const float st_mul = p ? 2.f : 1.f, st_add = p ? -1.f : 0.f;
@@ -1107,8 +1103,7 @@ CtrSpriteRenderer::PairM CtrSpriteRenderer::pair_metrics(const VecData& v) const
   const float Q = m_pfog0 / tw;
   float scale_x = sx * Q, scale_y = sy * Q;
   const float a = color_byte(v.rgba.w()) * std::min(scale_x * scale_y * m_inv_area, 1.f);
-  if (a < 1.f || (a < m_min_alpha_big &&
-                  std::max(std::abs(scale_x), std::abs(scale_y)) * m_corner_reach > m_big_half_gs)) {
+  if (a < 1.f) {
     return out;
   }
   out.a = std::floor(a);  // (as the drawn u8)
@@ -1117,9 +1112,6 @@ CtrSpriteRenderer::PairM CtrSpriteRenderer::pair_metrics(const VecData& v) const
   scale_y = std::clamp(scale_y, m_min_scale, m_max_scale);
   scale_x = std::clamp(scale_x, m_min_scale, m_max_scale);
   out.half = std::max(std::abs(scale_x), std::abs(scale_y)) * m_corner_reach;
-  if (m_size_cap > 0.f) {
-    out.half = std::min(out.half, m_size_cap);
-  }
   out.cx = tx * Q + m_hvdf_offset.x();
   out.cy = ty * Q + m_hvdf_offset.y();
   out.valid = true;
@@ -1177,10 +1169,9 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
   // the compiler knows, which made it load the matrix and these again for every sprite
   float m[16];
   memcpy(m, mode == MODE_HUD ? m_hud_matrix : m_camera, sizeof(m));
-  const float pfog0 = m_pfog0, inv_area = m_inv_area, min_alpha_big = m_min_alpha_big;
+  const float pfog0 = m_pfog0, inv_area = m_inv_area;
   const float corner_reach = m_corner_reach, min_scale = m_min_scale, max_scale = m_max_scale;
-  const float size_cap = m_size_cap, deg_to_rad = m_deg_to_rad;
-  const float big_half_gs = m_big_half_gs;
+  const float deg_to_rad = m_deg_to_rad;
   const bool jak2 = m_jak2;
   // (AI-assisted) each chunk starts clamped (Sprite3: m_current_mode = m_default_mode, whose
   // clamp bits are set); the cached state of the last adgif holds the clamp mode it was made with
@@ -1195,9 +1186,7 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
   u32 pair_keeper = ~0u;
   float pair_w = 0.f;
   for (u32 i = 0; i < count; i++) {
-    // (AI-assisted) max_sprites counts the world sprites drawn (the decrement is after the tests
-    // below): it counted array slots, holes and sprites left out included (3D first), so with
-    // 1000 the 2D particles in slots above ~744 were gone however few were alive
+    // the world sprites drawn (the decrement is after the tests below), at most the game's capacity
     if (mode != MODE_HUD && m_world_left <= 0) {
       return;
     }
@@ -1239,14 +1228,6 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
     if (mode != MODE_HUD) {
       const float a = color_byte(v.rgba.w()) * alpha_scale;
       if (a < 1.f && (a < 0.f || alpha_weighted_blend(ad.alpha_data))) {
-        continue;
-      }
-      // (AI-assisted) config sprite_min_alpha: a faint sprite with a half size over kBigHalfGs
-      // (~20 pixels) is skipped below that alpha too (128 = opaque): mist and smoke layers that
-      // add a few color steps each but blend a big area
-      if (a < min_alpha_big &&
-          std::max(std::abs(scale_x), std::abs(scale_y)) * corner_reach > big_half_gs) {
-        m_stats.faint++;
         continue;
       }
     }
@@ -1321,17 +1302,6 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
       } else {
         scale_y = std::clamp(scale_y, min_scale, max_scale);
         scale_x = std::clamp(scale_x, min_scale, max_scale);
-        // (AI-assisted) config.ini sprite_max_size: a particle or glow close to the camera covers
-        // a big part of the screen, and every covered pixel is blended (the 3DS GPU's fill rate):
-        // at most that fraction of the screen height (448 GS units) across
-        const float cap = size_cap;
-        const float half = std::max(std::abs(scale_x), std::abs(scale_y)) * corner_reach;
-        if (cap > 0.f && half > cap) {
-          const float k = cap / half;
-          scale_x *= k;
-          scale_y *= k;
-          m_stats.capped++;
-        }
         m_stats.sprites_2d++;
       }
       if (mode == MODE_2D) {
@@ -1458,7 +1428,7 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
     }
     const bool trim = mode != MODE_HUD && ((rs.trim >> level) & 1);
     if (mode != MODE_HUD) {
-      m_world_left--;  // (AI-assisted) drawn: see max_sprites at the top
+      m_world_left--;  // drawn: see kMaxWorldSprites at the top
     }
     const float(*st_out)[2] = m_st_out[proc ? 1 : 0];
     if (mode == MODE_3D) {

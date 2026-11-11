@@ -120,10 +120,6 @@ struct CtrSettings {
   // (AI-assisted) frame_pacing: steady (default) shows each frame a fixed time after the game
   // made it, so motion is even; fast shows it as soon as the GPU is done (lower latency, uneven)
   bool steady_pacing = true;
-  // world space sprites (particles) per frame; the HUD is always drawn
-  // (AI-assisted) default 2176 since Oct 12: the game's own particle capacity (1920 2d + 256 3d,
-  // sparticle.gc), so nothing the PS2 draws is left out; 1000 was the 30 fps era cut
-  int max_sprites = 2176;
   // RGBA4 level/model textures stored as RGBA8 (twice the memory): Azahar renders RGBA4 as noise.
   // Default (auto): on in the emulator, off on the 3DS.
   bool rgba4_as_rgba8 = false;
@@ -219,12 +215,6 @@ struct CtrSettings {
   bool compact_textures = true;
   // glows (radial gradient textures) from the procedural texture unit: no texels read
   bool proctex_glows = true;
-  // world sprites (particles, glows) at most this fraction of the screen height (0 = no limit)
-  float sprite_max_size = 0.f;  // (AI-assisted) 0 since Oct 12, as the PS2 (0.5 was the 30 fps cut)
-  // (AI-assisted) world sprites with a half size over ~20 pixels are left out below this alpha
-  // (the game's 0..128); 2: none (only sprites drawn with alpha 0 are skipped, where that changes
-  // no pixel)
-  int sprite_min_alpha = 2;
   // (AI-assisted) blended world sprites drop their alpha 0 fragments (alpha test, where alpha 0
   // adds nothing): no framebuffer traffic for them; the picture is the same. off: no alpha test
   bool sprite_alpha_discard = true;

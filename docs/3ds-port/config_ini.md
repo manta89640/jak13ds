@@ -28,7 +28,7 @@ draw_distance = 500
 # shadows: full (every shadow, like the PS2) | blob (only a dark spot under Jak) | off
 shadows = full
 
-# particles (smoke, sparks, glows): full (like the PS2) | reduced (fewer and smaller, faster)
+# particles (smoke, sparks, glows): full (like the PS2) | reduced (fewer, faster)
 particles = full
 
 # size of all game text: 1 = normal, 2 = twice as big, 0.5 = half

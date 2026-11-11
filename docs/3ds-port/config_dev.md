@@ -21,9 +21,8 @@ A key's value is, first match wins (one table for every reader:
 `ctr_config_get` in `platform/3ds/port/ctr_port.c`):
 
 1. its own line in config.ini (the last one if there are several);
-2. a user key that stands for it: `particles = full` (`max_sprites = 2176`,
-   `sprite_max_size = 0`, `sprite_min_alpha = 2`) or `reduced` (1000, 0.5, 6, and
-   `particle_density = 0.7`); `text_size = X`
+2. a user key that stands for it: `particles = full` or `reduced` (`particle_density = 0.7`);
+   `text_size = X`
    (`text_scale = X`);
 3. the preset (`preset = normal | full | fast | safe | bench | breakdown`; presets set only these keys, never
    the user keys):
@@ -154,7 +153,6 @@ shrub_scale_max = 1        # (AI-assisted) the far end for v14 shrubs with auto_
 # ---- what is drawn ----
 merc = on                  # characters and objects
 sprites = on               # world particles; the HUD is always drawn
-max_sprites = 2176         # world particles per frame. (AI-assisted) 2176 (default since Oct 12) = the game's own capacity (1920 2d + 256 3d), nothing the PS2 draws is left out; 1000 was the 30 fps era cut. (AI-assisted, mercsprite) Counts the sprites drawn (was array slots, empty and off screen ones included: with 1000 the 2d particles in high slots were gone however few were alive)
 shadow_count = 0             # Jak II default 4; (AI-assisted, j2cuts, Nov 11) Jak II: only the N shadow casters nearest the camera get a shadow volume, and Jak always (foreground.gc foreground-shadow: the N-th nearest distance of the frame before + 1 m). Less shadow-execute work on the game thread and fewer stencil volumes. 0: no limit (the PS2's distances, shadows = full). Not with shadows = all. 0 .. 64. Not yet run on a console
 traffic_density = 0.5      # Jak II: the share of Haven City's civilians (citizen types 0-2) and civilian vehicles (bikes, cars: 11-16) the traffic manager keeps (traffic-manager.gc init-params: their want-counts x this, at least 2; targets follow as want - 1); guards, guard bikes, hellcats, metalheads and mission actors unchanged. 0.1 .. 1; 1 = the PS2's (preset full). Log: "city traffic: civilians and their vehicles x0.50"
 particle_density = 1       # Jak II default 0.7 (Jak 1: 1). (AI-assisted) the share of particles launched (bursts, periodic emitters; 0.1 .. 1). (j1ocean) 1 = every particle, like the PS2 (default since Oct 25; 0.7 before, now only with particles = reduced, e.g. the safe preset). (AI-assisted, mercsprite) Both games (Jak II's launcher had no density cut)
@@ -197,8 +195,6 @@ top_block32 = off          # the top render target's tile mode: off (default: on
 depth16 = off              # on: 16-bit depth buffer instead of 24-bit + stencil (the stencil is used by ocean = waves and shadows = full, which becomes blob): half the depth buffer traffic and 192 KB more VRAM for textures, but the game's depth is 1 / distance, so 16 bits leave ~6 cm steps at 30 m and ~0.6 m at 100 m: far geometry may z-fight
 compact_textures = on      # sprite, HUD and font textures in 8 / 16-bit formats (L8, LA8, RGB565, RGBA5551, RGBA4), and in 384 KB of reserved VRAM with vram_textures
 proctex_glows = on         # glows (round gradient textures) from the procedural texture unit: no texels read. Only a texture whose bilinear samples (texel centers and midpoints) all lie within 2 of its radius table (color, and the 3DS's doubled alpha) is taken; any other stays a texture
-sprite_max_size = 0        # world particles and glows at most this fraction of the screen height across (0 = no limit, the default since Oct 12, as the PS2; 0.5 was the 30 fps era cut)
-sprite_min_alpha = 2       # (AI-assisted) world particles bigger than ~20 pixels (half size) are left out below this alpha (the game's 0..128: 6 = under 5% opaque): faint mist and smoke that adds a few color steps but blends a big area. 2: none left out (as the PS2; particles = reduced sets 6). Any world sprite drawn with alpha 0 whose blend is weighted by its alpha (alpha, additive, subtractive) is skipped: it changes no pixel. Log line (debug): [ctr] sprite: ... faint big ones left out
 sprite_alpha_discard = on  # (AI-assisted) blended world particles drop their fully transparent pixels (alpha test greater than 0; only the blend modes where alpha 0 adds nothing), so those pixels cost no framebuffer read and write. Same picture. off: no alpha test, as before
 particle_fill = on         # (AI-assisted, perfv2) off | on | strong. Each world particle (2d and 3d) is always drawn over its texture's alpha box only (texels with alpha outside it plus one for bilinear filtering; the same picture: outside it every pixel has alpha 0), only for blends weighted by the texture's alpha (alpha, additive, subtractive, TCC set, no depth write). off / on: every particle drawn. strong (an approximation): big faint overlapping 2d particles are thinned by pairs: game particle slots 2j and 2j + 1 with the same texture and state, both 12+ pixels, alpha 0.25 or less, centers within half their size (smoothly from 9 pixels, alpha 0.375, 0.75 of their size): the even one takes the odd one's alpha (alpha blending 1 - (1 - a)(1 - a'), additive a + a'), the odd one is left out. The doubled layer is a vertex alpha: where the texture's alpha is soft it is a little fainter than two layers (-15% at a = 0.375, texel alpha 0.25). Log: [ctr] sprite build ... (N trimmed, M thinned)
 vis_culling = on           # the game's own visibility data hides level parts behind walls and hills (needs .c3l v10 files)
@@ -261,7 +257,7 @@ fast_clock = on            # steady_clock from the system tick without divides. 
 
 # ---- measuring ----
 gpu_profile = off          # every 2.5 s leaves out one group of renderers and logs what each costs the GPU (flickers); also logs the GPU's own counters once per level (`[ctr] gpu profile <level>: hw busy % ...`: which pipeline stage is busy, and memory traffic per frame; zeros in Azahar)
-                           # (AI-assisted) gpu_profile = ab: A/B windows instead. Each switch of the table (vis_culling, run_culling, cull_ties, vista, fog_stage_skip, shadows (the volumes' draws), envmap, distort, distort_copy, shadow_casters, sprite_min_alpha, sprite_alpha_discard, merc_gen_lod, clouds, frame_overlap2, sky_last, skip_clear, early_depth, tex_cache_clear, mip_bias, skin_rows_f24, fog_alpha, tex1_gating, cull_merc, shader_opt, cmd_dedup, cmd_dedup_draw, skin_clip_f24, ocean_tex_half, opaque_alpha; CtrRenderer.cpp kAbSwitches) is turned on for ~1.5 s, then off for ~1.5 s (the next cycle off first), the others staying at their config.ini values; from 10 s after each level starts, for as long as the setting is there. Log, after each cycle (~45 s), per switch: [ctr] gpu ab <level> cycle N: <key> on X ms, off Y ms (on - off D ms; triangles, draws ...): the GPU busy time per frame (needs frame_pacing = steady). color16 and depth16 change the render target and can't be switched while running: price them with two sessions
+                           # (AI-assisted) gpu_profile = ab: A/B windows instead. Each switch of the table (vis_culling, run_culling, cull_ties, vista, fog_stage_skip, shadows (the volumes' draws), envmap, distort, distort_copy, shadow_casters, sprite_alpha_discard, merc_gen_lod, clouds, frame_overlap2, sky_last, skip_clear, early_depth, tex_cache_clear, mip_bias, skin_rows_f24, fog_alpha, tex1_gating, cull_merc, shader_opt, cmd_dedup, cmd_dedup_draw, skin_clip_f24, ocean_tex_half, opaque_alpha; CtrRenderer.cpp kAbSwitches) is turned on for ~1.5 s, then off for ~1.5 s (the next cycle off first), the others staying at their config.ini values; from 10 s after each level starts, for as long as the setting is there. Log, after each cycle (~45 s), per switch: [ctr] gpu ab <level> cycle N: <key> on X ms, off Y ms (on - off D ms; triangles, draws ...): the GPU busy time per frame (needs frame_pacing = steady). color16 and depth16 change the render target and can't be switched while running: price them with two sessions
 stats_period = 15          # (AI-assisted) seconds between the render thread's statistics lines ([ctr] render ms/frame ... triangles, draws; culling); 5 for measuring fixed views
 render_watchdog = off      # (AI-assisted) a watchdog thread (core 0, 16 KB stack) logs once per second for the first 60 s that the render thread is alive: `[ctr] render alive Ns: frame F, last stage S` ("(no frame in the last second)" when it stalled), to find where a boot hangs. Off by default since Oct 12 (it was always on: ~60 log lines per session)
 vram_probe = off           # hardware diagnostic for textures read wrongly from VRAM (ctr_gpu_vprobe.c): per-frame GPU probes of a VRAM pattern texture, a live pool texture and pool VRAM, every GPU write checked against our allocations, the shared font hashed; `[vprobe]` lines, the event ring dumped at the first failure
@@ -281,7 +277,7 @@ vfp_vector = on            # (AI-assisted, vfpvec, Nov 11) pc-new-bones-mtx-calc
   the log: it shows which group costs the GPU the most. Then:
   - level expensive: lower `shrub_scale` (e.g. 0.6; older levels: `shrub_distance`, e.g. 35), `draw_distance` (e.g. 300) and
     `lod_distance` (e.g. 120), or `detail_scale = 0.7`;
-  - sprites expensive: `max_sprites = 500`;
+  - sprites expensive: `particles = reduced`;
   - turn off `distort` or `envmap` to see what they cost.
   Keep `mipmaps = on` and `vram_textures = auto`: without them the GPU reads full size textures
   from main memory, which was the main cause of low frame rates on hardware.
@@ -290,7 +286,7 @@ vfp_vector = on            # (AI-assisted, vfpvec, Nov 11) pc-new-bones-mtx-calc
   with VRAM off the emulator needed ~4 MB more linear memory than the 3DS and levels didn't fit). Azahar doesn't
   model the GPU's speed, so frame rates there say nothing about the GPU on hardware.
 - **Best looking:** `mipmaps = trilinear` (smoother far textures, a little slower),
-  `sprite_max_size = 0`, `shrub_scale = 1` (v14 levels; older ones: `shrub_distance = 0`,
+  `shrub_scale = 1` (v14 levels; older ones: `shrub_distance = 0`,
   shrubs to 100 m: slower in village2 and rolling).
 - **3DS hardware features:** all on by default except `color16` and `depth16` (`early_depth` once the boot self-test passes). The log line `[ctr] textures: ...` shows the
   compact textures (and how many are in the reserved VRAM, how many are radial glows) and the

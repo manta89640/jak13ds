@@ -243,23 +243,15 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   Bucket* m_last_bucket_ptr = nullptr;
   bool m_hud_dump = false;  // (AI-assisted, fable1) host: this frame's HUD sprites to the log
   float m_corner_reach = 0;
-  // (AI-assisted) per frame: config.ini sprite_max_size in GS units, and the corners' texture
-  // coordinates ([1]: for the procedural texture, centered on 0)
-  float m_size_cap = 0;
-  // (AI-assisted) config sprite_min_alpha (GS alpha, 128 = opaque) for sprites with a half size
-  // over kBigHalfGs GS units: 20 pixels at the screen's 240 / 448 pixels per GS unit; 0 (the
-  // config's 2): none left out
-  float m_min_alpha_big = 0.f;
-  static constexpr float kBigHalfGs = 20.f * 448.f / 240.f;
   // (AI-assisted, perfv2) config particle_fill (0 off, 1 on, 2 strong), this frame; the world 2D
   // sprites' slot (their index in the game's sparticle arrays: a particle keeps its slot while it
   // lives) at the next chunk
   int m_particle_fill = 1;
+  // per frame: the corners' texture coordinates ([1]: for the procedural texture, centered on 0)
   float m_st_out[2][4][2] = {};
-  // (AI-assisted) game version (see the constructor): GS y to clip y, kBigHalfGs
+  // (AI-assisted) game version (see the constructor): GS y to clip y
   bool m_jak2 = false;
   float m_inv_y = 1.f / 112.f;
-  float m_big_half_gs = kBigHalfGs;
   // Jak II stats line: by 3D slot (3D chunk * 48 + index), the frame (high 16 bits) and the color
   // sum it was last drawn with, for the share of sprites the game gives a new brightness each frame
   static constexpr int kRgbSlots = 1024;
@@ -268,11 +260,12 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   int m_chunk3d = 0;
   int m_rgb3d_frames = 0, m_rgb3d_seen = 0, m_rgb3d_swings = 0;
   void note_rgb3d(int slot, int sum);
-  int m_world_left = 0;  // world sprites left this frame (CtrSettings::max_sprites)
+  // the game's world sprite capacity (1920 2d + 256 3d, sparticle.gc)
+  static constexpr int kMaxWorldSprites = 2176;
+  int m_world_left = 0;  // world sprites left this frame
   bool m_alpha_discard = false;  // (AI-assisted) CtrSettings::sprite_alpha_discard, this frame
   struct Stats {
-    int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0, distort = 0, capped = 0;
-    int faint = 0;          // (AI-assisted) sprite_min_alpha: big faint ones left out
+    int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0, distort = 0;
     int trimmed = 0;        // (AI-assisted, perfv2) drawn over their texture's alpha box only
     int thinned = 0;        // (AI-assisted, perfv2) big faint ones left out, their partners denser
     int glows = 0;          // (AI-assisted) Jak II glow flares drawn
