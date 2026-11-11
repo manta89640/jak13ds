@@ -3918,8 +3918,7 @@ int ctr_gpu_tex_create_mipmapped(int w, int h, const uint8_t* rgba) {
 /* (AI-assisted) cull_ties: which PICA mode culls the c3l back faces (see ctr_gpu_set_cull_flip) */
 static int g_cull_flip = 0;
 static int g_cull_enable = 0;
-/* (AI-assisted) config.ini fog_alpha, tex1_gating (set each frame: gpu_profile = ab switches them) */
-static int g_fog_alpha = 0;
+/* (AI-assisted) config.ini tex1_gating */
 static int g_tex1_gating = 0;
 
 void ctr_gpu_set_cull(int enable, int flip) {
@@ -7098,11 +7097,11 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
   if (!cmd_room()) {
     return;
   }
-  /* (AI-assisted) fog_alpha: draws whose vertex alpha is 0x80 everywhere (CTR_TCC_ALPHA80) take
-   * the fog in the color's alpha (mesh 5, no fog ramp and texcoord1); the fog stage's cost is the
-   * same with no fog (fog_stage_skip is for the ramp's texture unit) */
+  /* (AI-assisted) a texture with an alpha mask (c3l v23; vertex alpha 0x80 everywhere,
+   * CTR_TCC_ALPHA80): the mesh_fa programs, with the fog in the color's alpha (mesh 5) and the
+   * mask on unit 1 */
   const int fa = g.ps->fa_ok && (state->tcc & CTR_TCC_ALPHA80) &&
-                 (g_fog_alpha || tex_mask(tex_res(state->tex)) >= 0);
+                 tex_mask(tex_res(state->tex)) >= 0;
   /* (AI-assisted) shader_opt with the game fog off: the programs with only the draw distance fog */
   const int df = g.ps->df_ok && g.fog_df;
   use_program(fa ? (df ? PROG_MESH_DF_FA : PROG_MESH_FA) : (df ? PROG_MESH_DF : PROG_MESH));
@@ -7169,16 +7168,8 @@ void ctr_gpu_set_mesh_nofog(int on) {
   g.mesh_nofog = on ? 1 : 0;
 }
 
-void ctr_gpu_set_fog_alpha(int on) {
-  g_fog_alpha = on ? 1 : 0;
-}
-
 void ctr_gpu_set_tex1_gating(int on) {
   g_tex1_gating = on ? 1 : 0;
-}
-
-int ctr_gpu_fog_alpha_ready(void) {
-  return g.ps->fa_ok;
 }
 
 void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int mesh,
@@ -7279,7 +7270,7 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
     return;
   }
   const int fa = g.ps->fa_ok && (state->tcc & CTR_TCC_ALPHA80) &&
-                 (g_fog_alpha || tex_mask(tex_res(state->tex)) >= 0);
+                 tex_mask(tex_res(state->tex)) >= 0;
   use_program(fa ? PROG_MESH_MORPH_FA : PROG_MESH_MORPH);
   {
     const int atlas = (state->tcc & CTR_TCC_ST_ATLAS) ? 1 : 0;
@@ -7403,7 +7394,7 @@ void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix
     return;
   }
   const int fa = g.ps->fa_ok && (state->tcc & CTR_TCC_ALPHA80) &&
-                 (g_fog_alpha || tex_mask(tex_res(state->tex)) >= 0);
+                 tex_mask(tex_res(state->tex)) >= 0;
   use_program(fa ? PROG_TFRAG_MORPH_FA : PROG_TFRAG_MORPH);
   {
     const int atlas = (state->tcc & CTR_TCC_ST_ATLAS) ? 1 : 0;

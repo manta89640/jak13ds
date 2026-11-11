@@ -2775,7 +2775,6 @@ void ctr_gpu_mesh_delete(int mesh) {
 // (AI-assisted) cull_ties (ctr_gpu_set_cull_flip)
 static int g_soft_cull_flip = 0;
 static int g_soft_cull_enable = 0;
-static int g_soft_fog_alpha = 0;  // (AI-assisted) fog_alpha: only the program choice (statistics)
 
 static int g_soft_cur_mesh = -1;  // (AI-assisted, perfv2) CTR_SOFT_DRAW_PX
 void ctr_gpu_draw_mesh(const ctr_draw_state* state,
@@ -2784,8 +2783,7 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
                        int first_index,
                        int index_count) {
   g_soft_cur_mesh = mesh;
-  // (AI-assisted) fog_alpha: the 3DS backend's second mesh program (9) for CTR_TCC_ALPHA80 draws
-  softstats::prog(g_soft_fog_alpha && state && (state->tcc & CTR_TCC_ALPHA80) ? 9 : 1);
+  softstats::prog(1);
   if (!soft_mesh_ok(mesh, true)) {
     return;
   }
@@ -3701,14 +3699,8 @@ void ctr_gpu_set_mesh_fog(const float* fog0, const float* fog1, uint8_t r, uint8
 void ctr_gpu_set_mesh_nofog(int on) {  // (AI-assisted) fog_stage_skip: no fog stage
   s_nofog = on != 0;
 }
-// (AI-assisted) fog_alpha, tex1_gating: no fog and one texture unit here
-void ctr_gpu_set_fog_alpha(int on) {
-  g_soft_fog_alpha = on;
-}
+// (AI-assisted) tex1_gating: one texture unit here
 void ctr_gpu_set_tex1_gating(int) {}
-int ctr_gpu_fog_alpha_ready(void) {
-  return 1;
-}
 // (AI-assisted) cull_ties: back faces of CTR_TCC_CULL_BACK draws (counter-clockwise front faces
 // on screen, x right / y up; flip: the other way)
 void ctr_gpu_set_cull(int enable, int flip) {

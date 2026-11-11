@@ -290,13 +290,9 @@ struct CtrSettings {
   // (AI-assisted) level chunks entirely in front of where both fogs start are drawn without the
   // fog stage (texture combiner pass-through, texture unit 1 off). On (preset safe: off)
   bool fog_stage_skip = true;
-  // (AI-assisted) fog_alpha: level draws whose vertex alpha is 0x80 (~99.5%) get the fog amount in
-  // the vertex color's alpha (ctr_mesh_opt_fa) and mix in the fog color as a
-  // combiner constant: no fog ramp texture lookups, one vertex output less. The rest keep the
-  // ramp. tex1_gating: texture unit 1 (the ramp) enabled only for draws whose combiner reads it
-  // (raw draws switch the unit's enable bit, no texture cache clear; merc, sprites, sky, HUD and
-  // shadows never read it). Both on (preset safe: off).
-  bool fog_alpha = true;
+  // (AI-assisted) tex1_gating: texture unit 1 (the fog ramp) enabled only for draws whose combiner
+  // reads it (raw draws switch the unit's enable bit, no texture cache clear; merc, sprites, sky,
+  // HUD and shadows never read it). On (preset safe: off).
   bool tex1_gating = true;
   // (AI-assisted) skin_clip_f24: each merc model's clip matrix and lights as float24 uniforms like
   // the bone rows (skin_rows_f24): 11 words less per model. Not bit-identical (rounding): off until

@@ -105,7 +105,7 @@ enum { CTR_TCC_CULL_BACK = 2 };
  * decided: merc draws with config cull_merc), with its winding (flip) */
 enum { CTR_TCC_CULL_OWN = 8 };
 /* (AI-assisted) ctr_draw_state::tcc bit of level mesh draws: every vertex the draw uses has alpha
- * 0x80, so with ctr_gpu_set_fog_alpha the mesh shader may put the fog amount in the color's alpha
+ * 0x80, so the alpha mask programs (c3l v23) may put the fog amount in the color's alpha
  * (the texture combiner then takes the constant 0x80 for the vertex alpha). CtrLevel sets it at
  * load from the chunk's vertices. */
 enum { CTR_TCC_ALPHA80 = 4 };
@@ -120,13 +120,9 @@ enum { CTR_TCC_FOG = 32 };
  * levels blended (the GS's TEX1 MMIN 5, whatever config.ini mipmaps says); MIP_MAX1: only levels
  * 0 and 1 (TEX1 MXL 1, the near ocean's; also its sky reflection's fade) */
 enum { CTR_TCC_TRILINEAR = 64, CTR_TCC_MIP_MAX1 = 128 };
-/* (AI-assisted) config.ini fog_alpha (CTR_TCC_ALPHA80 draws: fog in the vertex alpha, no fog ramp
- * texture) and tex1_gating (texture unit 1 enabled only for draws whose combiner reads it), each
- * frame (gpu_profile = ab switches them). ctr_gpu_fog_alpha_ready: the program for it is loaded
- * (ctr_mesh_old_fa, or shader_opt's ctr_mesh_opt_fa). */
-void ctr_gpu_set_fog_alpha(int on);
+/* (AI-assisted) config.ini tex1_gating: texture unit 1 enabled only for draws whose combiner
+ * reads it */
 void ctr_gpu_set_tex1_gating(int on);
-int ctr_gpu_fog_alpha_ready(void);
 void ctr_gpu_set_cull(int enable, int flip);
 void ctr_gpu_cull_reset(void);
 /* (AI-assisted) 1 if the depth buffer has a stencil part (always: D24S8) */
