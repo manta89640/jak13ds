@@ -12253,6 +12253,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
 #endif
         const u8 v_nat = v;  // (ctr_pop: by distance alone)
         bool gone = false;   // its near data left (not: beyond its near chunk's distance, far mode)
+        bool held_now = false;
         bool covered = false;
         if (v < 2 && has_units) {
           bool ok = g < lev.group_unit_count.size() && lev.group_unit_count[g] > 0;
@@ -12298,6 +12299,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                 (u32)rs.frame_idx - lev.lod_hold_since[g] < kHoldFrames) {
               v = 2;
               held_groups++;
+              held_now = true;
             } else {
               keep_far = false;
             }
@@ -12325,8 +12327,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         }
         if ((st & 2) && v_old != v && (forced || (st & 16)) && pop_on && !covered &&
             sphere_in_view(cam, lg.bsphere)) {
-          pop(far_flip ? ctr_pop::kFar
-                       : !forced ? ctr_pop::kLate : gone ? ctr_pop::kEvict : ctr_pop::kLine,
+          pop(far_flip  ? ctr_pop::kFar
+              : !forced ? ctr_pop::kLate
+              : gone     ? ctr_pop::kEvict
+              : held_now ? ctr_pop::kHold
+                         : ctr_pop::kUnit,
               lg.bsphere, forced ? "morph group far" : "morph group near", (u32)g);
         }
         st = (u8)((st & 4) | 2 | (v < 2 ? 1 : 0) | (v == 1 ? 8 : 0) | (forced ? 16 : 0));
@@ -12350,6 +12355,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       bool keep_far = (st & 4) != 0 && !g_screen_black;
       const bool n_nat = n;  // (ctr_pop: by distance alone)
       bool gone = false;
+      bool held_now = false;
       if (n && has_units) {
         if (g >= lev.group_unit_count.size() || !lev.group_unit_count[g]) {
           n = false;  // (a v19 group whose near version is in no near chunk: none to draw)
@@ -12418,6 +12424,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                 (u32)rs.frame_idx - lev.lod_hold_since[g] < kHoldFrames) {
               n = false;
               held_groups++;
+              held_now = true;
             } else {
               keep_far = false;
             }
@@ -12476,7 +12483,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
       if ((st & 2) && ((st & 1) != 0) != n && pop_on && sphere_in_view(cam, lg.bsphere)) {
         pop(far_flip ? ctr_pop::kFar
-            : forced ? (gone ? ctr_pop::kEvict : ctr_pop::kLine)
+            : forced ? (gone ? ctr_pop::kEvict : held_now ? ctr_pop::kHold : ctr_pop::kUnit)
                      : (st & 16) ? ctr_pop::kLate
                                  : ctr_pop::kLod,
             lg.bsphere, n ? "tie group near" : "tie group far", (u32)g);
@@ -12573,6 +12580,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       const u32 cnt = tf_units ? lev.tf_unit_count[g] : 0;
       const u8 v_nat = v;  // (ctr_pop: by depth alone)
       bool gone = false;
+      bool held_now = false;
       bool ramp = false;  // one of its units is on a morph in or out, or just went by one
       if (v && cnt) {
         bool ok = true, late = false;
@@ -12620,6 +12628,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
               (u32)rs.frame_idx - lev.tf_hold_since[g] < kTfHoldFrames) {
             v = fallback;
             held_groups++;
+            held_now = true;
           } else {
             hold = false;
           }
@@ -12636,8 +12645,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
       if ((st & 9) != v && (forced || (st & 64)) && pop_on && !ramp &&
           rs.frame_idx > lev.reveal_frame + 1 && sphere_in_view(cam, b)) {
-        pop(far_flip ? ctr_pop::kFar
-                     : !forced ? ctr_pop::kLate : gone ? ctr_pop::kEvict : ctr_pop::kLine,
+        pop(far_flip  ? ctr_pop::kFar
+            : !forced ? ctr_pop::kLate
+            : gone     ? ctr_pop::kEvict
+            : held_now ? ctr_pop::kHold
+                       : ctr_pop::kUnit,
             b, forced ? "tfrag group coarser" : "tfrag group finer", (u32)g);
       }
       st = (u8)(v | (hold ? 16 : 0) | (moves ? 32 : 0) | (forced ? 64 : 0));
@@ -12993,7 +13005,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       // ctr_pop: drawn now, not chosen last frame
       if (!sel_last && m_pop_why[ci] != 0xff && !lev.is_unit(ci)) {
         pop(vista_tier ? ctr_pop::kVista
-                       : m_pop_why[ci] ? (ctr_pop::Cause)(m_pop_why[ci] - 1) : ctr_pop::kFar,
+                       : m_pop_why[ci] ? (ctr_pop::Cause)(m_pop_why[ci] - 1)
+                       : far_flip      ? ctr_pop::kFar
+                                       : ctr_pop::kOther,
             ch.bsphere, "chunk in", (u32)ci, vista_tier || vista_chunk);
       }
       lev.pop_drawn_at[ci] = pf;
@@ -13240,7 +13254,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // ctr_pop: a chunk in view the config would draw, not drawn: a hole unless a vista copy stands in
   auto note_hole = [&](size_t ci, const c3l::Chunk& ch, bool miss) {
     const bool vista = ch.kind == c3l::CHUNK_KIND_VISTA;
-    if (string_hides(ci, ch) || !sphere_in_view(cam, ch.bsphere) ||
+    // (the string hides every run of it: drawn, it would show nothing)
+    if (string_hides(ci, ch) || bits_hide(ci) || !sphere_in_view(cam, ch.bsphere) ||
         fog_at(ch.bsphere, vista) >= 0.9f) {
       return;
     }
@@ -13361,6 +13376,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                  near ? "2 -> 1" : "1 -> 2", std::sqrt(d2) / 4096.f,
                  lev.lod_cell_sphere[ci * 4 + 3] / 4096.f);
       }
+      if (last && last != (near ? 1 : 2)) {
+        m_pop_why[ci] = 1 + ctr_pop::kTier;
+      }
       state = (u8)((state & ~3) | (near ? 1 : 2));
       lod_ok = near == (ch.lod_tier == 1);
     }
@@ -13420,6 +13438,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     // (AI-assisted, streammem) the tfrag tiers by far_tfrag, the rest by far_level
     if (ch.lod_tier != 0 ? far_tfrag : far_level) {
+      if (!m_pop_why[ci]) {
+        m_pop_why[ci] = 1 + ctr_pop::kFar;  // (ctr_pop: far mode's rules decide it)
+      }
       // only the level's low resolution version (or the coarse one), no tie but (AI-assisted) the
       // landmarks (far_chunk)
       if (!far_chunk(lev, ch)) {
@@ -13579,7 +13600,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     const bool vista = ch.kind == c3l::CHUNK_KIND_VISTA;
     pop(vista ? ctr_pop::kVista
-              : m_pop_why[ci] ? (ctr_pop::Cause)(m_pop_why[ci] - 1) : ctr_pop::kFar,
+              : m_pop_why[ci] ? (ctr_pop::Cause)(m_pop_why[ci] - 1)
+              : far_flip      ? ctr_pop::kFar
+                              : ctr_pop::kOther,
         ch.bsphere, "chunk out", ci, vista || (lowres_vista && ch.lod_tier == 3));
   }
   lev.pop_drawn.clear();

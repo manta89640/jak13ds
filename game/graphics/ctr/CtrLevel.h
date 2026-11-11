@@ -53,20 +53,23 @@ struct CtrMercModEffect {
 // would draw with nothing drawn in its place.
 namespace ctr_pop {
 enum Cause : u8 {
-  kCtl,     // the detail controller moved
-  kLine,    // a distance limit the relief pulled in was crossed
-  kLimit,   // a distance limit of the config was crossed
-  kEvict,   // near data was freed
-  kLate,    // near data came late
-  kLod,     // a version switch without a morph
-  kFar,     // far mode, or a mesh read back
-  kShrub,   // a shrub's fade jumped
-  kVista,   // the vista distance
+  kLine,   // a distance limit the fixed detail floor pulled in was crossed
+  kLimit,  // a distance limit of the config was crossed
+  kEvict,  // near data was freed
+  kLate,   // a group back to its version once its near data came
+  kLod,    // a version switch without a morph
+  kFar,    // far mode switched, or its landmark reach was crossed
+  kShrub,  // a shrub's fade jumped
+  kVista,  // the vista distance
+  kTier,   // a tfrag cell switched tier 1 / 2 (lod_distance)
+  kHold,   // a group kept far in view by a hold
+  kUnit,   // a group's near data beyond its near chunk's limit, or not read
+  kOther,  // a mesh came or went, the dormant hold, the low resolution tier's rules
   kCauses
 };
-constexpr const char* kNames[kCauses] = {"controller", "relief limit", "config limit",
-                                         "freed",      "late",         "lod switch",
-                                         "far mode",   "shrub fade",   "vista"};
+constexpr const char* kNames[kCauses] = {
+    "floor limit", "config limit", "freed",     "late",       "lod switch", "far mode",
+    "shrub fade",  "vista",        "tier switch", "held far", "unit limit", "mesh or rule"};
 enum HoleKind : u8 { kHoleTfrag, kHoleTie, kHoleVista, kHoleKinds };
 constexpr u32 kHoleFrames = 15;  // a hole this long is counted (0.5 s)
 struct Stats {

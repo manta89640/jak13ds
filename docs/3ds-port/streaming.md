@@ -312,14 +312,16 @@ the file's block directory (16 bytes per block: village1 ~22 KB, lavatube ~50 KB
   (group frames), ms on average, at most (frames); needed now KB on average, at most; read with
   their file neighbours; scheduling ms/frame (most); per level: meshes KB + textures KB, near chunks
   there of all (KB)`.
-- Every stats period, `[ctr] in view over N frames: P pops (per minute): controller, relief limit,
-  config limit, freed, late, lod switch, far mode, shrub fade, vista; holes: tfrag, tie, vista chunk
+- Every stats period, `[ctr] in view over N frames: P pops (per minute): floor limit, config
+  limit, freed, late, lod switch, far mode, shrub fade, vista, tier switch, held far, unit limit,
+  mesh or rule; holes: tfrag, tie, vista chunk
   frames (without their mesh), holes of 0.5 s or more ended / open, longest; chunk frames drawn by a
   vista copy within the config's distance; tfrag chunk frames beyond the draw distance with nothing
   in place; group frames kept far with that version not drawn; near chunks under a morph: in, out`
   (`ctr_pop`, CtrLevel.h): a pop is a chunk or group in view, not under 90% fog, that appears, goes
   or switches its version between two frames with no morph or fade over it, by cause; a hole is a
-  chunk the config would draw with nothing drawn in its place. Not counted in the frame of a camera
+  chunk the config would draw with nothing drawn in its place (not one whose every run the
+  visibility string hides: it would show nothing). Not counted in the frame of a camera
   cut, a level's first frame or while the screen is black. All of the hole counts are 0 by
   construction unless a mesh is missing (a detail reload after a partial unload, an incomplete
   load). Host with `CTR_POP_LOG=1`: one `[popE]` line per pop, `[hole]` / `[holeG]` per hole, and
