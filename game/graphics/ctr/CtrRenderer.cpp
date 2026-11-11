@@ -141,13 +141,6 @@ const AbSwitch kAbSwitches[] = {
     // distort_copy: rows (on) or the whole screen (off)
     {"distort_copy", [](CtrSettings& s, bool on) { s.distort_copy_rows = on; },
      [](const CtrSettings& s) { return s.distort_copy_rows; }},
-    // shadow_casters: the config's cap (on; 6 when the config says all) or every caster (off)
-    {"shadow_casters",
-     [](CtrSettings& s, bool on) {
-       static const int kConfigCap = s.shadow_casters > 0 ? s.shadow_casters : 6;
-       s.shadow_casters = on ? kConfigCap : 0;
-     },
-     [](const CtrSettings& s) { return s.shadow_casters > 0; }},
     {"sprite_alpha_discard", [](CtrSettings& s, bool on) { s.sprite_alpha_discard = on; },
      [](const CtrSettings& s) { return s.sprite_alpha_discard; }},
     {"merc_gen_lod", [](CtrSettings& s, bool on) { s.merc_gen_lod = on; },

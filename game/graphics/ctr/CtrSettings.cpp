@@ -137,8 +137,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
           lg::warn("[ctr] {}:{}: shadows = {}: expected full, all, blob or off", path.string(), n, v);
         }
       }
-    } else if (key == "shadow_casters") {
-      s.shadow_casters = std::clamp(std::atoi(v.c_str()), 0, 64);  // (AI-assisted)
     } else if (key == "sky") {
       s.sky = parse_bool(v);
     } else if (key == "clouds") {
@@ -527,7 +525,7 @@ std::string CtrSettings::summary() const {
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
       "merc {} sprites {} "
-      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} skin_rows_f24 {} skin_clip_f24 {} "
+      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} merc_gen_lod {} (x{:.2f}) shadows {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} skin_rows_f24 {} skin_clip_f24 {} "
       "color16 {} early_depth {}{} top_block32 {} compact_textures {} sprite_alpha_discard {} "
       "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} fog_alpha {} tex1_gating {} shader_opt {} cmd_dedup {} cull_ties {} cull_merc {} merc_fog {} raw_cmds {} opaque_alpha {} tex_cache_clear {} asm_tex {} asm_mem {} "
       "ocean_tex_half {} fast_clock {} "
@@ -563,7 +561,6 @@ std::string CtrSettings::summary() const {
       : shadows == ShadowMode::Blob ? (shadows_full_wanted ? "blob (full needs the stencil: depth16)"
                                                            : "blob")
                                     : "off",
-      shadow_casters,
       rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), mip_bias,
       skin_rows_f24 ? "on" : "off", skin_clip_f24 ? "on" : "off", color16 ? "on" : "off",

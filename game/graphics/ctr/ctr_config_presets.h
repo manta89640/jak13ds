@@ -181,7 +181,7 @@ static const char* const ctr_cfg_removed[] = {
     /* models / effects strip: removed with their code */
     "ocean_near_alpha", "envmap_batch", "merc_tex_sort", "envmap_min_px",
     "max_sprites", "sprite_max_size", "sprite_min_alpha", "particle_fill",
-    "proctex_glows",
+    "proctex_glows", "shadow_casters",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

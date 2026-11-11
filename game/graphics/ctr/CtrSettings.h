@@ -89,10 +89,6 @@ struct CtrSettings {
   enum class ShadowMode { Off, Blob, Full };
   ShadowMode shadows = ShadowMode::Full;
   bool shadows_full_wanted = false;  // full in config.ini, blob because of depth16 (for the log)
-  // (AI-assisted) shadows = full: at most this many objects' shadows per frame, the ones that look
-  // biggest from the camera (bounding sphere over distance: Jak's normally is one); 0 = all
-  // (AI-assisted) default 0 since Oct 12 (all casters, like the PS2); 6 was the 30 fps era cut
-  int shadow_casters = 0;
   // the sky (time of day sky texture, clouds); off: the screen is cleared to the fog color
   bool sky = true;
   // (AI-assisted) the clouds over the sky (one added pass over the sky's part of the screen)
@@ -142,9 +138,7 @@ struct CtrSettings {
   // moment and the GPU time without it is logged ([ctr] gpu profile). The picture flickers.
   bool gpu_profile = false;
   // (AI-assisted) gpu_profile = ab: instead, the switches of the A/B table (CtrRenderer.cpp
-  // kAbSwitches: run_culling, cull_ties, vista, fog_stage_skip, shadows, envmap, distort, and the
-  // snow-gpu-impl keys distort_copy, shadow_casters, sprite_*, envmap_batch, merc_*, clouds) are
-  // turned on and off in turns, in windows of ~1.5 s, and the GPU busy time of each setting is
+  // kAbSwitches) are turned on and off in turns, in windows of ~1.5 s, and the GPU busy time of each setting is
   // logged per level ([ctr] gpu ab). Nothing vanishes for good; the picture changes slightly.
   bool gpu_profile_ab = false;
   // (AI-assisted) the GPU's own counters (busy % of each pipeline stage, memory traffic) over 10 s

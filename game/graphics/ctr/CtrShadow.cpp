@@ -162,9 +162,6 @@ void CtrShadowVolumes::begin(ctr_clip_vertex* verts, int vert_cap, u16* front, u
   m_ntop = m_ndual = 0;
   m_have_clip = false;
   m_stats = Stats();
-  m_keep = nullptr;
-  m_keep_n = 0;
-  m_obj_index = 0;
 }
 
 void CtrShadowVolumes::set_output(ctr_clip_vertex* verts, u16* front) {
@@ -175,38 +172,6 @@ void CtrShadowVolumes::set_output(ctr_clip_vertex* verts, u16* front) {
 bool CtrShadowVolumes::starts_object(const DmaTransfer& t) {
   const VifCode v1 = t.vifcode1();
   return v1.kind == VifCode::Kind::UNPACK_V4_32 && VifCodeUnpack(v1).addr_qw == kVuTop;
-}
-
-float CtrShadowVolumes::object_score(const DmaTransfer& t, float center[3]) {
-  const VifCode v1 = t.vifcode1();
-  const int num = std::min(v1.num ? (int)v1.num : 256, kTableSize);
-  if (t.size_bytes < (u32)num * 16 || num <= 0) {
-    return 0.f;
-  }
-  // the vertex table is in camera space (game units, 4096 per meter)
-  float lo[3] = {kMaxCamera, kMaxCamera, kMaxCamera}, hi[3] = {-kMaxCamera, -kMaxCamera, -kMaxCamera};
-  const float* v = (const float*)t.data;
-  for (int i = 0; i < num; i++, v += 4) {
-    for (int c = 0; c < 3; c++) {
-      if (!(v[c] < kMaxCamera && v[c] > -kMaxCamera)) {
-        return 0.f;  // (NaN too) the object is left out later anyway
-      }
-      lo[c] = std::min(lo[c], v[c]);
-      hi[c] = std::max(hi[c], v[c]);
-    }
-  }
-  float r2 = 0.f, d2 = 0.f;
-  for (int c = 0; c < 3; c++) {
-    const float h = 0.5f * (hi[c] - lo[c]), m = 0.5f * (hi[c] + lo[c]);
-    r2 += h * h;
-    d2 += m * m;
-    if (center) {
-      center[c] = m;
-    }
-  }
-  const float r = std::sqrt(r2);
-  // (half a meter as the nearest distance: anything closer is as big as it gets)
-  return (r + 1.f) / std::max(std::sqrt(d2) - r, 2048.f);
 }
 
 void CtrShadowVolumes::make_clip_matrix() {
@@ -720,12 +685,6 @@ void CtrShadowVolumes::transfer(const DmaTransfer& t) {
       m_ndual = 0;
       m_obj_open = true;
       m_obj_transformed = m_obj_dropped = m_obj_any = false;
-      // (AI-assisted) shadow_casters: not one of the biggest on screen
-      const int k = m_obj_index++;
-      if (m_keep && k < m_keep_n && !m_keep[k]) {
-        m_obj_dropped = true;
-        m_stats.capped++;
-      }
       keira_check_object();
     } else if (up.addr_qw == kVuDual) {
       if (m_obj_open && !m_obj_transformed) {
@@ -821,57 +780,6 @@ void CtrShadowRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   m_vol.set_frame(rs.frame_idx);
   m_reserved = false;
   bool no_room = false;
-  // (AI-assisted) config shadow_casters: only the N objects that look biggest from the camera
-  // (nearest / largest); a first pass over the bucket's DMA scores each object's vertex table
-  const int cap = ctr_settings().shadow_casters;
-  if (cap > 0) {
-    m_scores.clear();
-    m_centers.clear();
-    DmaFollower scan = dma;
-    while (scan.current_tag_offset() != rs.next_bucket) {
-      const auto t = scan.read_and_advance();
-      if (CtrShadowVolumes::starts_object(t)) {
-        std::array<float, 3> c = {0.f, 0.f, 0.f};
-        float s = CtrShadowVolumes::object_score(t, c.data());
-        // (AI-assisted) hysteresis: one drawn last frame (a center within ~1 m + 10% of its
-        // distance of one of theirs: the camera and the object move a little per frame) keeps its
-        // place unless another one is kIncumbent x bigger. Was chosen anew every frame, so objects
-        // of about the same size at the cut swapped and their shadows blinked
-        constexpr float kIncumbent = 1.25f;
-        const float d2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
-        const float tol2 = 4096.f * 4096.f + 0.01f * d2;
-        for (const auto& k : m_kept_prev) {
-          const float dx = k[0] - c[0], dy = k[1] - c[1], dz = k[2] - c[2];
-          if (dx * dx + dy * dy + dz * dz < tol2) {
-            s *= kIncumbent;
-            break;
-          }
-        }
-        m_scores.push_back(s);
-        m_centers.push_back(c);
-      }
-    }
-    const int n = (int)m_scores.size();
-    m_kept_prev.clear();
-    if (n > cap) {
-      m_order.resize(n);
-      for (int i = 0; i < n; i++) {
-        m_order[i] = i;
-      }
-      // (AI-assisted) equal scores by DMA order: the same pick every frame
-      std::nth_element(m_order.begin(), m_order.begin() + (cap - 1), m_order.end(), [&](int a, int b) {
-        return m_scores[a] > m_scores[b] || (m_scores[a] == m_scores[b] && a < b);
-      });
-      m_keep.assign(n, 0);
-      for (int i = 0; i < cap; i++) {
-        m_keep[m_order[i]] = 1;
-        m_kept_prev.push_back(m_centers[m_order[i]]);
-      }
-      m_vol.set_keep(m_keep.data(), n);
-    } else {
-      m_kept_prev = m_centers;
-    }
-  }
   while (dma.current_tag_offset() != rs.next_bucket) {
     const auto t = dma.read_and_advance();
     if (!m_reserved && !no_room && CtrShadowVolumes::starts_object(t)) {
@@ -899,11 +807,11 @@ void CtrShadowRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
   if (rs.log_now) {
     const auto& st = m_vol.stats();
-    lg::debug("[ctr] shadow: {} objects ({} left out, {} over shadow_casters), {} vertices, {} "
+    lg::debug("[ctr] shadow: {} objects ({} left out), {} vertices, {} "
               "front + {} back triangles, {} cut to the guard band (planes +x {} -x {} +y {} -y {} "
               "near {} far {}); {} bad entries, {} bad packets, {} without camera; Keira's shadow "
               "drawn {} times",
-              st.objects, st.dropped_objects, st.capped, m_vol.vert_count(), m_vol.front_count() / 3,
+              st.objects, st.dropped_objects, m_vol.vert_count(), m_vol.front_count() / 3,
               m_vol.back_count() / 3, st.clipped, st.cut_planes[0], st.cut_planes[1],
               st.cut_planes[2], st.cut_planes[3], st.cut_planes[4], st.cut_planes[5],
               st.bad_entries, st.bad_packets, st.no_camera, m_vol.keira_replaced());
