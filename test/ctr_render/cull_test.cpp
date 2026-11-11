@@ -549,6 +549,87 @@ void test_sphere_px() {
   fmt::print("  sphere size on screen: {} spheres within their bound\n", n);
 }
 
+// (AI-assisted, facecull) a cone that says a run faces away is right for every triangle of it
+void test_cones() {
+  std::mt19937 rng(21);
+  std::uniform_real_distribution<float> u(-1.f, 1.f);
+  int away = 0, tested = 0;
+  for (int iter = 0; iter < 400; iter++) {
+    // a patch of triangles around a random normal, spread by up to ~40 degrees
+    float n0[3] = {u(rng), u(rng), u(rng)};
+    float l = std::sqrt(ctr_cull::dot3(n0, n0));
+    for (float& c : n0) {
+      c /= l;
+    }
+    const float spread = 0.7f * (u(rng) + 1.f) * 0.5f;
+    const float base[3] = {u(rng) * 50.f, u(rng) * 50.f, u(rng) * 50.f};
+    std::vector<float> tris;
+    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+    for (int k = 0; k < 20; k++) {
+      float n[3] = {n0[0] + spread * u(rng), n0[1] + spread * u(rng), n0[2] + spread * u(rng)};
+      l = std::sqrt(ctr_cull::dot3(n, n));
+      for (float& c : n) {
+        c /= l;
+      }
+      // two directions in the triangle's plane
+      float t1[3], t2[3];
+      const float h[3] = {std::fabs(n[0]) < 0.9f ? 1.f : 0.f, std::fabs(n[0]) < 0.9f ? 0.f : 1.f, 0.f};
+      ctr_cull::cross3(n, h, t1);
+      ctr_cull::cross3(n, t1, t2);
+      const float p0[3] = {base[0] + 3 * u(rng), base[1] + 3 * u(rng), base[2] + 3 * u(rng)};
+      // corners p0, p0 + t2, p0 + t1: (p1 - p0) x (p2 - p0) = t2 x t1 = n x ... (checked below)
+      float p1[3], p2[3];
+      for (int c = 0; c < 3; c++) {
+        p1[c] = p0[c] + t1[c];
+        p2[c] = p0[c] + t2[c];
+      }
+      float e1[3] = {p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]};
+      float e2[3] = {p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]};
+      float cr[3];
+      ctr_cull::cross3(e1, e2, cr);
+      const bool flip = ctr_cull::dot3(cr, n) < 0;
+      const float* q[3] = {p0, flip ? p2 : p1, flip ? p1 : p2};
+      for (const float* p : q) {
+        for (int c = 0; c < 3; c++) {
+          tris.push_back(p[c]);
+          lo[c] = std::fmin(lo[c], p[c]);
+          hi[c] = std::fmax(hi[c], p[c]);
+        }
+      }
+    }
+    const uint32_t cone = ctr_cull::make_cone(tris.data(), tris.size() / 9, 0.f);
+    if (cone == ctr_cull::kNoCone) {
+      continue;
+    }
+    float c[3], r = 0;
+    for (int k = 0; k < 3; k++) {
+      c[k] = 0.5f * (lo[k] + hi[k]);
+      r += (hi[k] - lo[k]) * (hi[k] - lo[k]) * 0.25f;
+    }
+    r = std::sqrt(r) + 0.01f;
+    for (int e = 0; e < 60; e++) {
+      const float eye[3] = {c[0] + 80 * u(rng), c[1] + 80 * u(rng), c[2] + 80 * u(rng)};
+      tested++;
+      if (!ctr_cull::cone_away(cone, c, r, eye)) {
+        continue;
+      }
+      away++;
+      for (size_t i = 0; i < tris.size() / 9; i++) {
+        const float* t = &tris[9 * i];
+        const float e1[3] = {t[3] - t[0], t[4] - t[1], t[5] - t[2]};
+        const float e2[3] = {t[6] - t[0], t[7] - t[1], t[8] - t[2]};
+        float nn[3];
+        ctr_cull::cross3(e1, e2, nn);
+        const float to_eye[3] = {eye[0] - t[0], eye[1] - t[1], eye[2] - t[2]};
+        check(ctr_cull::dot3(nn, to_eye) < 0, "a run the cone hides has every triangle facing away");
+      }
+    }
+  }
+  check(away > tested / 20, "cones hide some runs");
+  fmt::print("  normal cones: {} of {} views of runs facing away, every triangle checked\n", away,
+             tested);
+}
+
 }  // namespace
 
 void run_cull_tests() {
@@ -563,4 +644,5 @@ void run_cull_tests() {
   test_depth_reuse();
   test_cell_bins();
   test_sphere_px();
+  test_cones();
 }

@@ -204,6 +204,9 @@ struct Options {
   // (AI-assisted, terraincull) c3l::kDrawCullTerrain on the terrain whose back can't be seen (off:
   // the marked triangles' draws split from the others cost draws)
   bool terrain_cull = false;
+  // (AI-assisted, facecull) c3l::ExtCones: back face culled triangles of a visibility node in runs by
+  // the way they face (6 bins), each with its normal cone (off: more runs, a worse vertex cache)
+  bool face_runs = false;
   // (AI-assisted) v13 vista tier (c3l::CHUNK_KIND_VISTA): the far content (low resolution tfrag,
   // the ties (small and medium ones too), the coarse tfrag of levels without low resolution tfrag; of a
   // "spanning" level's the far cells too: VistaSpan)
@@ -1771,6 +1774,34 @@ struct Converter {
     }
     return true;
   }
+  // (AI-assisted, facecull) Options::face_runs: a back face culled triangle's facing bin (1 + axis x 2
+  // + negative: the largest component of its normal), 0: not culled (or culled only through opening
+  // planes), moved by the wind, or without an area
+  u8 face_bin(const SrcTri& t) const {
+    const auto& dk = draw_keys[t.draw_key];
+    if (!(dk.kind & (c3l::kDrawCullBack | c3l::kDrawCullTerrain)) || (dk.kind & c3l::kDrawCullCond)) {
+      return 0;
+    }
+    const auto& a = verts[t.v[0]];
+    const auto& b = verts[t.v[1]];
+    const auto& c = verts[t.v[2]];
+    if (a.wind != UINT32_MAX || b.wind != UINT32_MAX || c.wind != UINT32_MAX) {
+      return 0;
+    }
+    const double e1[3] = {(double)b.x - a.x, (double)b.y - a.y, (double)b.z - a.z};
+    const double e2[3] = {(double)c.x - a.x, (double)c.y - a.y, (double)c.z - a.z};
+    const double n[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
+                         e1[0] * e2[1] - e1[1] * e2[0]};
+    int ax = 0;
+    for (int k = 1; k < 3; k++) {
+      ax = std::abs(n[k]) > std::abs(n[ax]) ? k : ax;
+    }
+    if (n[ax] == 0) {
+      return 0;
+    }
+    return (u8)(1 + ax * 2 + (n[ax] < 0 ? 1 : 0));
+  }
+
   // (AI-assisted, terraincull) Options::terrain_cull: c3l::kDrawCullTerrain on opaque floor-like
   // tfrag (|normal y| >= kFloorNy) that is the ground itself (collision within 1 m at its center)
   // and has no collision ground more than kDrop below its plane within kReach horizontally (the
@@ -5902,6 +5933,14 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   std::vector<ChunkPlan> plans;
   // (AI-assisted) per vertex: a vista copy (its own quantizing grids, see PosKey)
   std::vector<u8> vista_vertex(cv.verts.size(), 0);
+  // (AI-assisted, facecull) each triangle's facing bin (Options::face_runs; empty: off)
+  std::vector<u8> tri_face;
+  if (opt.face_runs) {
+    tri_face.resize(cv.tris.size());
+    for (size_t i = 0; i < cv.tris.size(); i++) {
+      tri_face[i] = cv.face_bin(cv.tris[i]);
+    }
+  }
   // (AI-assisted) a cell's triangles -> plans of at most 65535 vertices
   auto make_plans = [&](std::map<CellKey, std::vector<u32>>& cell_map) {
     for (auto& [key, tri_ids] : cell_map) {
@@ -5928,6 +5967,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         }
         if (ta.vis != tb.vis) {
           return ta.vis < tb.vis;
+        }
+        // (AI-assisted, facecull) then by facing (a node's runs by the way they face)
+        if (!tri_face.empty() && tri_face[a] != tri_face[b]) {
+          return tri_face[a] < tri_face[b];
         }
         // (AI-assisted, j2vis) v20: then the toggled prototype (0xffff, every other triangle,
         // last: the order of levels without such prototypes doesn't change)
@@ -6431,6 +6474,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   std::vector<c3l::RunLod> out_run_lods;  // (AI-assisted) v17: one per out_runs
   std::vector<u16> out_run_protos;  // (AI-assisted, j2vis) v20: one per out_runs (SrcTri::proto)
   std::vector<u32> out_run_bands;   // one per out_runs (SrcTri::band)
+  std::vector<u32> out_run_cones;   // (AI-assisted, facecull) one per out_runs (ctr_cull::make_cone)
   size_t lod_runs = 0, lod_chunks = 0;
   std::vector<u32> chunk_first_run;
   std::vector<u8> chunk_stream_cls;  // (AI-assisted, streaming) v19: per chunk, 0 or its class
@@ -6967,6 +7011,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       std::vector<u16> run_protos;        // (AI-assisted, j2vis) v20
       std::vector<u32> run_bands;         // shrub fade bands (SrcTri::band)
       std::vector<c3l::RunLod> run_tlods;  // the tfrag geomorph's versions (c3l::ExtTfrag)
+      std::vector<u8> run_faces;          // (AI-assisted, facecull) each run's facing bin
+      bool any_face = false;
       bool any_band = false;
       bool any_vis = false, any_lod = false, any_proto = false, any_tlod = false;
       for (size_t i = 0; i < cp.tris.size(); i++) {
@@ -7005,17 +7051,20 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         // (AI-assisted, j2vis) v20: and per toggled prototype
         // shrubs: per fade band, in pieces of kShrubRunIndices (the runtime fades run by run)
         const u16 tg = t.tlod ? (u16)t.tgroup : (u16)0xffff;
+        const u8 fb = tri_face.empty() ? 0 : tri_face[cp.tris[i]];  // (AI-assisted, facecull)
         if (new_draw || runs.back().vis != t.vis || run_lods.back().group != lg ||
             run_lods.back().lod != t.lod || run_protos.back() != t.proto ||
             run_bands.back() != t.band || run_tlods.back().group != tg ||
-            run_tlods.back().lod != t.tlod ||
+            run_tlods.back().lod != t.tlod || run_faces.back() != fb ||
             (t.band && runs.back().index_count >= kShrubRunIndices)) {
           runs.push_back(c3l::VisRun{(u16)(out_draws.size() - 1 - ch.first_draw), t.vis, 0});
           run_lods.push_back(c3l::RunLod{lg, t.lod, 0});
           run_tlods.push_back(c3l::RunLod{tg, t.tlod, 0});
           run_protos.push_back(t.proto);
           run_bands.push_back(t.band);
+          run_faces.push_back(fb);
         }
+        any_face |= fb != 0;
         any_band |= t.band != 0;
         any_proto |= t.proto != 0xffff;
         runs.back().index_count += 3;
@@ -7172,7 +7221,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       // v17: or there are levels of detail
       // (AI-assisted, j2vis) v20: or a prototype the game hides (a shrub chunk: runs per draw and
       // prototype, vis 0xffff)
-      const bool keep_runs = any_vis || any_lod || any_proto || any_band || any_tlod;
+      const bool keep_runs = any_vis || any_lod || any_proto || any_band || any_tlod || any_face;
       chunk_first_run.push_back(keep_runs ? (u32)out_runs.size() : 0);
       ch.vis_run_count = keep_runs ? (u32)runs.size() : 0;
       if (keep_runs) {
@@ -7180,6 +7229,29 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         out_run_lods.insert(out_run_lods.end(), run_lods.begin(), run_lods.end());
         out_run_protos.insert(out_run_protos.end(), run_protos.begin(), run_protos.end());
         out_run_bands.insert(out_run_bands.end(), run_bands.begin(), run_bands.end());
+        // (AI-assisted, facecull) each run's normal cone, from its triangles as drawn (their
+        // indices after the vertex cache order, in run order from the chunk's first index); 3
+        // degrees wider (6 where the PS2's geomorph moves a corner)
+        u32 at = ch.draw_count || out_draws.size() > ch.first_draw
+                     ? out_draws[ch.first_draw].first_index
+                     : (u32)out_indices.size();
+        std::vector<float> pos;
+        for (size_t r = 0; r < runs.size(); r++) {
+          const u32 n = runs[r].index_count;
+          u32 cone = ctr_cull::kNoCone;
+          if (run_faces[r] && n >= 3) {
+            pos.clear();
+            bool moves = false;
+            for (u32 k = at; k < at + n; k++) {
+              const auto& v = cv.verts[local_src.at(out_indices[k])];
+              pos.insert(pos.end(), {v.x, v.y, v.z});
+              moves = moves || v.mband;
+            }
+            cone = ctr_cull::make_cone(pos.data(), n / 3, (moves ? 6.f : 3.f) * 3.14159265f / 180.f);
+          }
+          out_run_cones.push_back(cone);
+          at += n;
+        }
         lod_runs += any_lod ? runs.size() : 0;
         lod_chunks += any_lod;
       }
@@ -7840,7 +7912,12 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   const bool far_out = ext_out && opt.far_copies &&
                        std::any_of(chunk_far_role.begin(), chunk_far_role.end(),
                                    [](u8 r) { return r != 0; });
+  // (AI-assisted, facecull) c3l::ExtCones
+  const bool cone_out = ext_out && opt.face_runs && out_run_cones.size() == out_runs.size() &&
+                        std::any_of(out_run_cones.begin(), out_run_cones.end(),
+                                    [](u32 c) { return c != ctr_cull::kNoCone; });
   const u32 eh_size = !ext_out                           ? 0
+                      : cone_out                         ? c3l::kExtHeaderConeSize
                       : far_out                          ? c3l::kExtHeaderFarCopySize
                       : hz_out                           ? c3l::kExtHeaderHorizonSize
                       : occ_out                          ? c3l::kExtHeaderOccSize
@@ -8298,6 +8375,18 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       cpy += r == 2;
     }
     lg::info("{}: far copies: {} source chunks, {} copy chunks", level.level_name, src, cpy);
+  }
+  if (cone_out) {
+    // (AI-assisted, facecull) per file run its normal cone (load_cones)
+    c3l::ExtCones ec{};
+    ec.count = (u32)out_run_cones.size();
+    ec.offset = append(buf, out_run_cones.data(), out_run_cones.size());
+    ext_put(c3l::kExtHeaderFarCopySize, &ec, sizeof(ec));
+    size_t with = 0;
+    for (const u32 c : out_run_cones) {
+      with += c != ctr_cull::kNoCone;
+    }
+    lg::info("{}: normal cones: {} of {} runs", level.level_name, with, out_run_cones.size());
   }
   if (morph_out) {
     ext_put(c3l::kExtHeaderV24Size, &em, sizeof(em));
@@ -9069,6 +9158,8 @@ int main(int argc, char** argv) {
   bool no_occluders = false;  // (AI-assisted, occluders)
   app.add_flag("--no-occluders", no_occluders, "no occluders (boxes inside closed tie surfaces)");
   bool no_horizon = false;  // (AI-assisted, horizon)
+  app.add_flag("--face-runs", opt.face_runs,
+               "back face culled triangles in runs by facing, with normal cones (c3l::ExtCones)");
   app.add_flag("--terrain-cull", opt.terrain_cull,
                "mark the terrain whose underside can't be seen for back face culling "
                "(c3l::kDrawCullTerrain)");

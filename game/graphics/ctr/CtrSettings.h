@@ -281,6 +281,11 @@ struct CtrSettings {
   // --terrain-cull: ground whose underside the camera can't get to) are culled, with cull_ties'
   // winding (needs cull_ties on). Read at level load. Off: both sides (docs/3ds-port/culling.md)
   bool cull_terrain = false;
+  // (AI-assisted, facecull) levels converted with --face-runs: a run of a back face culled draw
+  // whose every triangle faces away from the camera (its normal cone and sphere) is not sent to the
+  // GPU at all (it would cull all of it: the same picture, less vertex work). Needs cull_ties.
+  // Off (docs/3ds-port/culling.md)
+  bool cone_cull = false;
   bool depth_reuse = false;
   float depth_reuse_min = 20.f;
   // (AI-assisted) c3l v17 tie levels of detail: the instance groups that have a near version

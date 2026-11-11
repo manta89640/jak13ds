@@ -657,6 +657,21 @@ static_assert(sizeof(ExtFarCopy) == kExtHeaderFarCopySize - kExtHeaderHorizonSiz
 constexpr uint32_t kFarSourceTier = 5, kFarCopyTier = 6;
 
 /*!
+ * (AI-assisted, facecull) Normal cones (ctr_level_converter --face-runs, config.ini `cone_cull`,
+ * docs/3ds-port/culling.md "10."): a back face culled visibility node's triangles in runs by the
+ * way they face, and per file run (from ExtHeader::runs_offset, as RunSphere) a u32 cone
+ * (CtrCull.h cone_pack: axis s8 x 3, cos of the half angle s8; ctr_cull::kNoCone: none).
+ * ExtHeader::size >= kExtHeaderConeSize, then this at ext_offset + kExtHeaderFarCopySize.
+ */
+constexpr uint32_t kExtHeaderConeSize = 288;
+struct ExtCones {
+  uint32_t count;   // the file's runs
+  uint32_t offset;  // u32[count], absolute
+  uint32_t pad[2];
+};
+static_assert(sizeof(ExtCones) == kExtHeaderConeSize - kExtHeaderFarCopySize);
+
+/*!
  * (AI-assisted, streaming) v19: a run's bounding sphere in its chunk's quantized units (world =
  * origin + c * scale, radius r * scale): the center of the box of the run's vertices (rounded down)
  * and the length of the larger half of the box per axis, ceil + 1 (as the runtime made them from the

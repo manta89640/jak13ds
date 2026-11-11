@@ -992,3 +992,10 @@ sections before a present one are zero when the level has none).
   neither) and the copies' error. Sources and copies are ordinary tie chunks (lod_tier 0) of the
   same cell, so they share `lod_center`. The runtime reads the roles whatever config.ini says: a
   copy is never drawn with its sources.
+- `ExtCones` (size >= `kExtHeaderConeSize` 288, at ext_offset + 272), only with `--face-runs`:
+  per file run (from `ExtHeader::runs_offset`, as `RunSphere`) a u32 normal cone (`CtrCull.h
+  cone_pack`: the axis as three s8, the cosine of the half angle as an s8 rounded down;
+  `kNoCone`: none). With `--face-runs` a back face culled draw's triangles of one visibility node
+  are sorted by facing (the largest component of their normal: 6 bins) and split into runs at the
+  bins' changes; the cone of each is computed from its triangles after the vertex cache order,
+  3 degrees wider (6 where the geomorph moves a corner) and checked against the quantized axis.

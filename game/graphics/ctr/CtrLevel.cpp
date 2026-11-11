@@ -5962,6 +5962,41 @@ void load_far_copy(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
            ef.error / 4096.f);
 }
 
+// (AI-assisted, facecull) c3l::ExtCones: per file run its normal cone (read only while
+// config.ini cone_cull is on: 4 bytes per run)
+void load_cones(c3l::Reader& f,
+                const c3l::Header& hdr,
+                u32 runs_lo,
+                size_t file_runs,
+                CtrLevelData* lev) {
+  lev->run_cone.clear();
+  if (!ctr_settings().cone_cull || runs_lo == UINT32_MAX || !file_runs) {
+    return;
+  }
+  c3l::ExtHeader eh;
+  if (!hdr.ext_offset || !read_ext_header(f, hdr, &eh) || eh.size < c3l::kExtHeaderConeSize) {
+    return;
+  }
+  c3l::ExtCones ec{};
+  std::vector<u32> cones;
+  // the file's runs from runs_lo, in the table from ExtHeader::runs_offset (as load_tie_lod's)
+  if (!f.read(hdr.ext_offset + c3l::kExtHeaderFarCopySize, &ec, sizeof(ec)) || !ec.count ||
+      runs_lo < eh.runs_offset || (runs_lo - eh.runs_offset) % sizeof(c3l::VisRun) != 0 ||
+      (runs_lo - eh.runs_offset) / sizeof(c3l::VisRun) + file_runs > ec.count ||
+      file_runs > lev->vis_runs.size() || !f.read_array(ec.offset, ec.count, &cones)) {
+    return;
+  }
+  const size_t first = (runs_lo - eh.runs_offset) / sizeof(c3l::VisRun);
+  // (the runs made at load after the file's have none)
+  lev->run_cone.assign(lev->vis_runs.size(), ctr_cull::kNoCone);
+  size_t with = 0;
+  for (size_t r = 0; r < file_runs; r++) {
+    lev->run_cone[r] = cones[first + r];
+    with += cones[first + r] != ctr_cull::kNoCone;
+  }
+  lg::info("[ctr] {}: normal cones: {} of {} runs", lev->name, with, file_runs);
+}
+
 // a cond box in world game units
 void cond_box(const CtrLevelData& lev, u32 i, float* lo, float* hi) {
   const auto& b = lev.cond_boxes[i];
@@ -7858,6 +7893,7 @@ bool CtrLevels::load_file(const fs::path& path,
   load_horizon(f, hdr, out);    // (AI-assisted, horizon)
   load_vis_bake(out);           // (AI-assisted, visbake)
   load_far_copy(f, hdr, out);   // (AI-assisted, farcopy)
+  load_cones(f, hdr, runs_lo, file_runs, out);  // (AI-assisted, facecull)
   // merc models: one skinned mesh per model
   if (hdr.num_merc_models) {
     std::vector<c3l::MercModel> models;
@@ -11681,6 +11717,14 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              m_name, 100.0 * m_cv_ok / n, m_cv_chunks / n, m_cv_runs / n, m_cv_tris / n, m_cv_frames);
     m_cv_frames = m_cv_ok = m_cv_chunks = m_cv_runs = m_cv_tris = 0;
   }
+  if (rs.log_now && m_cone_frames) {
+    // (AI-assisted, facecull)
+    const double n = (double)m_cone_frames;
+    lg::info("[ctr] {}: cone_cull hid {:.1f} runs ({:.0f} tris) facing away per level draw ({} level "
+             "draws)",
+             m_name, m_cone_runs / n, m_cone_tris / n, m_cone_frames);
+    m_cone_frames = m_cone_runs = m_cone_tris = 0;
+  }
   if (rs.log_now && m_fc_frames) {
     // (AI-assisted, farcopy)
     const double n = (double)m_fc_frames;
@@ -13991,6 +14035,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
 #else
   const bool baking = false;
 #endif
+  // (AI-assisted, facecull) cone_cull: runs facing away (only where the GPU would cull them)
+  m_cone_on = settings.cone_cull && settings.cull_ties && lev.run_cone.size() == lev.vis_runs.size() &&
+              !lev.run_cone.empty();
+  m_cone_frames += m_cone_on;
   // (AI-assisted, farcopy) far_copy: from this distance of a cell's center its copies
   m_fc_d2 = 0.f;
   if (settings.far_copy && !lev.far_role.empty()) {
@@ -14272,7 +14320,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       const u32 x_nr = vis_test || vista_tier
                            ? ch.vis_run_count
                            : (lev.chunk_run_count[ci] ? lev.chunk_run_count[ci] : ch.vis_run_count);
-      if ((((occ_mask || hz_runs || dr_runs || sz_runs) && run_sph) || m_vb_n || m_cv_on) && x_nr) {
+      const bool cone_runs = m_cone_on && run_sph && !vista_tier;  // (AI-assisted, facecull)
+      if ((((occ_mask || hz_runs || dr_runs || sz_runs || cone_runs) && run_sph) || m_vb_n || m_cv_on) &&
+          x_nr) {
         const u32 r0 = lev.chunk_first_run[ci];
         const u32 nr = x_nr;
         if (!runs_valid) {
@@ -14318,6 +14368,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
               m_run_shown[r] = 0;
               m_hz_runs++;
               m_hz_tris += lev.vis_runs[r].index_count / 3;
+            }
+            if (cone_runs && m_run_shown[r] && lev.run_cone[r] != ctr_cull::kNoCone &&
+                (lev.draw_states[ch.first_draw + lev.vis_runs[r].draw].tcc & CTR_TCC_CULL_BACK)) {
+              // (AI-assisted, facecull) every triangle faces away: the GPU would cull all of them
+              const float eye[3] = {cam.trans[0], cam.trans[1], cam.trans[2]};
+              if (ctr_cull::cone_away(lev.run_cone[r], c, rr, eye)) {
+                m_run_shown[r] = 0;
+                m_cone_runs++;
+                m_cone_tris += lev.vis_runs[r].index_count / 3;
+              }
             }
             if (sz_runs && m_run_shown[r]) {
               // (AI-assisted, sizecull)
