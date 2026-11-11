@@ -144,6 +144,7 @@ class CtrRenderer {
     int dropped = 0;
     int tex_binds = 0;
     int draws = 0;
+    double vsh_instr = 0, state_changes = 0, blend_states = 0, prog_switches = 0;  // gpu_model
     // (AI-assisted) see ctr_gpu_stats: waiting for the GPU in C3D_FrameBegin, the GPU time of the
     // frames measured by the steady pacing fence, triangles, the vertex buffer's busiest frame
     double gpu_wait_ms = 0;

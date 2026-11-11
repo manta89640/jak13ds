@@ -958,6 +958,10 @@ typedef struct {
    * linear_free, vram_free and linear_largest (the largest block linearAlloc can give) */
   int detailed;
   unsigned int linear_largest;
+  /* gpu_model features: vertex program instructions (3 x triangles x the bound program's length),
+   * draw state changes, of them with blending (docs/3ds-port/gpu_model.md) */
+  unsigned int vsh_instr;
+  int state_changes, blend_states;
 } ctr_gpu_stats;
 void ctr_gpu_get_stats(ctr_gpu_stats* out);
 #ifndef __3DS__

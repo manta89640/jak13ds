@@ -1009,6 +1009,14 @@ static void process_pending_deletes(int hold) {
 
 static void raw_note_unif(void);
 
+/* gpu_model: the bound program's length and the frame's triangles drawn with it so far */
+static unsigned s_gm_instr;
+static int s_gm_tris;
+static void gm_vsh_flush(void) {
+  g.cur.vsh_instr += (unsigned)(g.cur.triangles - s_gm_tris) * 3u * s_gm_instr;
+  s_gm_tris = g.cur.triangles;
+}
+
 /* Programs have different vertex layouts and uniforms: switch both together. (AI-assisted) A
  * switch keeps none of the uniforms (another shbin: its uniforms and constants overlap). */
 static void use_program(int prog) {
@@ -1046,6 +1054,10 @@ static void use_program(int prog) {
     g.cur.prog_switches++;
     g.cur.prog_uploads += dvlp != last_dvlp;
     last_dvlp = dvlp;
+    gm_vsh_flush();
+    s_gm_instr = sp->vertexShader ? sp->vertexShader->dvle->endmainOffset -
+                                        sp->vertexShader->dvle->mainOffset + 1
+                                  : 0;
   }
   g.env_valid = 0; /* (AI-assisted) another program: the env uniforms' registers are reused */
   g.etie_valid = 0;
@@ -3491,6 +3503,7 @@ static void frame_state_reset(void) {
   s_partial_draws = 0;
   s_partials = 0;
   memset(&g.cur, 0, sizeof(g.cur));
+  s_gm_tris = 0;
   g.in_frame = 1;
   migrate_small_textures();
 }
@@ -4149,6 +4162,7 @@ void ctr_gpu_frame_end(void) {
   }
   g.cur.queue_drains = (int)s_ov2_drains; /* (AI-assisted, gpu-home) */
   s_ov2_drains = 0;
+  gm_vsh_flush();
   g.last = g.cur;
   apt_gate_leave(); /* (AI-assisted, gpu-home) the frame's GPU work is all queued */
 }
@@ -6905,6 +6919,8 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   g.last_state_mesh = mesh;
   g.last_tint = tint;
   g.last_state_valid = 1;
+  g.cur.state_changes++;
+  g.cur.blend_states += st->blend != CTR_BLEND_OFF;
   /* (AI-assisted) a depth write without a >= / > test can leave the depth farther than the early
    * depth data says: that data begins again before the next draw that uses it */
   if (st->zwrite && st->ztest != CTR_TEST_GEQUAL && st->ztest != CTR_TEST_GREATER &&
