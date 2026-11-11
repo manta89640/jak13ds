@@ -1,0 +1,557 @@
+#pragma once
+
+/*!
+ * @file native_bones_vfp.h
+ * (AI-assisted) The bone matrices of pc-new-bones-mtx-calc (Jak 1 and Jak II's natives,
+ * native_bones.cpp) on the 3DS's VFP, shared by both games: the scalar version (moved here from
+ * the two natives unchanged) and (AI-assisted, vfpvec, Nov 11) a short-vector version of its first
+ * part, config.ini vfp_vector (default off; docs/3ds-port/performance.md "2. VFP short vectors").
+ */
+
+#include <cstdint>
+#include <cstdlib>
+
+#if defined(__arm__) && defined(__ARM_FP) && !defined(__aarch64__)
+#define BONES_VFP_ASM 1
+#ifdef __3DS__
+extern "C" int ctr_config_bool(const char* key, int def);  // platform/3ds/port/ctr_port.c
+#endif
+
+namespace native_bones_vfp {
+
+/*!
+ * The same on the 3DS's VFP (ARM11, VFPv2: 32 single registers, no FMA; VMLA / VNMLS round the
+ * product, then the sum, so they give the same bits as the separate operations above). GCC spills
+ * about half of the matrices to the stack in the C++ version (~360 instructions per bone, the
+ * goalc C ~420); here everything stays in registers but tmat0 / tmat1 (32 bytes of scratch), and
+ * independent lanes are interleaved for VFP11's 8-cycle multiply-add latency: ~240 instructions.
+ * Registers: the bone in s16-s31, bind pose rows 0/1 then 2/3 in s0-s7, tmat2/3 in s8-s15, then
+ * tmat0/1 back in s16-s23; the normal matrix in s24-s31, s0; the camera transposed (ct: lane l's
+ * column of cam0..cam3 at ct + 16 * l).
+ */
+inline void bone_mtx_vfp(const float* n, const float* t, float* o, const float* ct, float* scratch) {
+  const uint32_t one = 0x3f800000;  // 1.0f (vf0.w)
+  asm volatile(
+      "vldmia %[n], {s16-s31}\n"
+      "vldmia %[t], {s0-s7}\n"
+      "vmul.f32 s8, s16, s0\n"
+      "vmul.f32 s12, s16, s4\n"
+      "vmul.f32 s9, s17, s0\n"
+      "vmul.f32 s13, s17, s4\n"
+      "vmul.f32 s10, s18, s0\n"
+      "vmul.f32 s14, s18, s4\n"
+      "vmul.f32 s11, s19, s0\n"
+      "vmul.f32 s15, s19, s4\n"
+      "vmla.f32 s8, s20, s1\n"
+      "vmla.f32 s12, s20, s5\n"
+      "vmla.f32 s9, s21, s1\n"
+      "vmla.f32 s13, s21, s5\n"
+      "vmla.f32 s10, s22, s1\n"
+      "vmla.f32 s14, s22, s5\n"
+      "vmla.f32 s11, s23, s1\n"
+      "vmla.f32 s15, s23, s5\n"
+      "vmla.f32 s8, s24, s2\n"
+      "vmla.f32 s12, s24, s6\n"
+      "vmla.f32 s9, s25, s2\n"
+      "vmla.f32 s13, s25, s6\n"
+      "vmla.f32 s10, s26, s2\n"
+      "vmla.f32 s14, s26, s6\n"
+      "vmla.f32 s11, s27, s2\n"
+      "vmla.f32 s15, s27, s6\n"
+      "vmla.f32 s8, s28, s3\n"
+      "vmla.f32 s12, s28, s7\n"
+      "vmla.f32 s9, s29, s3\n"
+      "vmla.f32 s13, s29, s7\n"
+      "vmla.f32 s10, s30, s3\n"
+      "vmla.f32 s14, s30, s7\n"
+      "vmla.f32 s11, s31, s3\n"
+      "vmla.f32 s15, s31, s7\n"
+      "vstmia %[m], {s8-s15}\n"
+      "vldmia %[t2], {s0-s7}\n"
+      "vmul.f32 s8, s16, s0\n"
+      "vmul.f32 s12, s16, s4\n"
+      "vmul.f32 s9, s17, s0\n"
+      "vmul.f32 s13, s17, s4\n"
+      "vmul.f32 s10, s18, s0\n"
+      "vmul.f32 s14, s18, s4\n"
+      "vmul.f32 s11, s19, s0\n"
+      "vmul.f32 s15, s19, s4\n"
+      "vmla.f32 s8, s20, s1\n"
+      "vmla.f32 s12, s20, s5\n"
+      "vmla.f32 s9, s21, s1\n"
+      "vmla.f32 s13, s21, s5\n"
+      "vmla.f32 s10, s22, s1\n"
+      "vmla.f32 s14, s22, s5\n"
+      "vmla.f32 s11, s23, s1\n"
+      "vmla.f32 s15, s23, s5\n"
+      "vmla.f32 s8, s24, s2\n"
+      "vmla.f32 s12, s24, s6\n"
+      "vmla.f32 s9, s25, s2\n"
+      "vmla.f32 s13, s25, s6\n"
+      "vmla.f32 s10, s26, s2\n"
+      "vmla.f32 s14, s26, s6\n"
+      "vmla.f32 s11, s27, s2\n"
+      "vmla.f32 s15, s27, s6\n"
+      "vmla.f32 s8, s28, s3\n"
+      "vmla.f32 s12, s28, s7\n"
+      "vmla.f32 s9, s29, s3\n"
+      "vmla.f32 s13, s29, s7\n"
+      "vmla.f32 s10, s30, s3\n"
+      "vmla.f32 s14, s30, s7\n"
+      "vmla.f32 s11, s31, s3\n"
+      "vmla.f32 s15, s31, s7\n"
+      "vldmia %[m], {s16-s23}\n"
+      "vmul.f32 s24, s9, s22\n"
+      "vmul.f32 s25, s10, s20\n"
+      "vmul.f32 s26, s8, s21\n"
+      "vnmls.f32 s24, s21, s10\n"
+      "vnmls.f32 s25, s22, s8\n"
+      "vnmls.f32 s26, s20, s9\n"
+      "vmul.f32 s27, s17, s10\n"
+      "vmul.f32 s28, s18, s8\n"
+      "vmul.f32 s29, s16, s9\n"
+      "vnmls.f32 s27, s9, s18\n"
+      "vnmls.f32 s28, s10, s16\n"
+      "vnmls.f32 s29, s8, s17\n"
+      "vmul.f32 s30, s21, s18\n"
+      "vmul.f32 s31, s22, s16\n"
+      "vmul.f32 s0, s20, s17\n"
+      "vnmls.f32 s30, s17, s22\n"
+      "vnmls.f32 s31, s18, s20\n"
+      "vnmls.f32 s0, s16, s21\n"
+      "vmul.f32 s1, s24, s16\n"
+      "vmla.f32 s1, s25, s17\n"
+      "vmla.f32 s1, s26, s18\n"
+      "vmov s2, %[one]\n"
+      "vdiv.f32 s1, s2, s1\n"
+      "vmul.f32 s24, s24, s1\n"
+      "vmul.f32 s25, s25, s1\n"
+      "vmul.f32 s26, s26, s1\n"
+      "vmul.f32 s27, s27, s1\n"
+      "vmul.f32 s28, s28, s1\n"
+      "vmul.f32 s29, s29, s1\n"
+      "vmul.f32 s30, s30, s1\n"
+      "vmul.f32 s31, s31, s1\n"
+      "vmul.f32 s0, s0, s1\n"
+      "add r12, %[ct], #0\n"
+      "vldmia r12, {s4-s6}\n"
+      "vmul.f32 s1, s4, s24\n"
+      "vmul.f32 s2, s4, s27\n"
+      "vmul.f32 s3, s4, s30\n"
+      "vmla.f32 s1, s5, s25\n"
+      "vmla.f32 s2, s5, s28\n"
+      "vmla.f32 s3, s5, s31\n"
+      "vmla.f32 s1, s6, s26\n"
+      "vmla.f32 s2, s6, s29\n"
+      "vmla.f32 s3, s6, s0\n"
+      "vstr s1, [%[o], #64]\n"
+      "vstr s2, [%[o], #80]\n"
+      "vstr s3, [%[o], #96]\n"
+      "add r12, %[ct], #16\n"
+      "vldmia r12, {s4-s6}\n"
+      "vmul.f32 s1, s4, s24\n"
+      "vmul.f32 s2, s4, s27\n"
+      "vmul.f32 s3, s4, s30\n"
+      "vmla.f32 s1, s5, s25\n"
+      "vmla.f32 s2, s5, s28\n"
+      "vmla.f32 s3, s5, s31\n"
+      "vmla.f32 s1, s6, s26\n"
+      "vmla.f32 s2, s6, s29\n"
+      "vmla.f32 s3, s6, s0\n"
+      "vstr s1, [%[o], #68]\n"
+      "vstr s2, [%[o], #84]\n"
+      "vstr s3, [%[o], #100]\n"
+      "add r12, %[ct], #32\n"
+      "vldmia r12, {s4-s6}\n"
+      "vmul.f32 s1, s4, s24\n"
+      "vmul.f32 s2, s4, s27\n"
+      "vmul.f32 s3, s4, s30\n"
+      "vmla.f32 s1, s5, s25\n"
+      "vmla.f32 s2, s5, s28\n"
+      "vmla.f32 s3, s5, s31\n"
+      "vmla.f32 s1, s6, s26\n"
+      "vmla.f32 s2, s6, s29\n"
+      "vmla.f32 s3, s6, s0\n"
+      "vstr s1, [%[o], #72]\n"
+      "vstr s2, [%[o], #88]\n"
+      "vstr s3, [%[o], #104]\n"
+      "add r12, %[ct], #48\n"
+      "vldmia r12, {s4-s6}\n"
+      "vmul.f32 s1, s4, s24\n"
+      "vmul.f32 s2, s4, s27\n"
+      "vmul.f32 s3, s4, s30\n"
+      "vmla.f32 s1, s5, s25\n"
+      "vmla.f32 s2, s5, s28\n"
+      "vmla.f32 s3, s5, s31\n"
+      "vmla.f32 s1, s6, s26\n"
+      "vmla.f32 s2, s6, s29\n"
+      "vmla.f32 s3, s6, s0\n"
+      "vstr s1, [%[o], #76]\n"
+      "vstr s2, [%[o], #92]\n"
+      "vstr s3, [%[o], #108]\n"
+      "add r12, %[ct], #0\n"
+      "vldmia r12, {s0-s7}\n"
+      "vmul.f32 s24, s0, s16\n"
+      "vmul.f32 s28, s4, s16\n"
+      "vmul.f32 s25, s0, s20\n"
+      "vmul.f32 s29, s4, s20\n"
+      "vmul.f32 s26, s0, s8\n"
+      "vmul.f32 s30, s4, s8\n"
+      "vmul.f32 s27, s0, s12\n"
+      "vmul.f32 s31, s4, s12\n"
+      "vmla.f32 s24, s1, s17\n"
+      "vmla.f32 s28, s5, s17\n"
+      "vmla.f32 s25, s1, s21\n"
+      "vmla.f32 s29, s5, s21\n"
+      "vmla.f32 s26, s1, s9\n"
+      "vmla.f32 s30, s5, s9\n"
+      "vmla.f32 s27, s1, s13\n"
+      "vmla.f32 s31, s5, s13\n"
+      "vmla.f32 s24, s2, s18\n"
+      "vmla.f32 s28, s6, s18\n"
+      "vmla.f32 s25, s2, s22\n"
+      "vmla.f32 s29, s6, s22\n"
+      "vmla.f32 s26, s2, s10\n"
+      "vmla.f32 s30, s6, s10\n"
+      "vmla.f32 s27, s2, s14\n"
+      "vmla.f32 s31, s6, s14\n"
+      "vmla.f32 s24, s3, s19\n"
+      "vmla.f32 s28, s7, s19\n"
+      "vmla.f32 s25, s3, s23\n"
+      "vmla.f32 s29, s7, s23\n"
+      "vmla.f32 s26, s3, s11\n"
+      "vmla.f32 s30, s7, s11\n"
+      "vmla.f32 s27, s3, s15\n"
+      "vmla.f32 s31, s7, s15\n"
+      "vstr s24, [%[o], #0]\n"
+      "vstr s28, [%[o], #4]\n"
+      "vstr s25, [%[o], #16]\n"
+      "vstr s29, [%[o], #20]\n"
+      "vstr s26, [%[o], #32]\n"
+      "vstr s30, [%[o], #36]\n"
+      "vstr s27, [%[o], #48]\n"
+      "vstr s31, [%[o], #52]\n"
+      "add r12, %[ct], #32\n"
+      "vldmia r12, {s0-s7}\n"
+      "vmul.f32 s24, s0, s16\n"
+      "vmul.f32 s28, s4, s16\n"
+      "vmul.f32 s25, s0, s20\n"
+      "vmul.f32 s29, s4, s20\n"
+      "vmul.f32 s26, s0, s8\n"
+      "vmul.f32 s30, s4, s8\n"
+      "vmul.f32 s27, s0, s12\n"
+      "vmul.f32 s31, s4, s12\n"
+      "vmla.f32 s24, s1, s17\n"
+      "vmla.f32 s28, s5, s17\n"
+      "vmla.f32 s25, s1, s21\n"
+      "vmla.f32 s29, s5, s21\n"
+      "vmla.f32 s26, s1, s9\n"
+      "vmla.f32 s30, s5, s9\n"
+      "vmla.f32 s27, s1, s13\n"
+      "vmla.f32 s31, s5, s13\n"
+      "vmla.f32 s24, s2, s18\n"
+      "vmla.f32 s28, s6, s18\n"
+      "vmla.f32 s25, s2, s22\n"
+      "vmla.f32 s29, s6, s22\n"
+      "vmla.f32 s26, s2, s10\n"
+      "vmla.f32 s30, s6, s10\n"
+      "vmla.f32 s27, s2, s14\n"
+      "vmla.f32 s31, s6, s14\n"
+      "vmla.f32 s24, s3, s19\n"
+      "vmla.f32 s28, s7, s19\n"
+      "vmla.f32 s25, s3, s23\n"
+      "vmla.f32 s29, s7, s23\n"
+      "vmla.f32 s26, s3, s11\n"
+      "vmla.f32 s30, s7, s11\n"
+      "vmla.f32 s27, s3, s15\n"
+      "vmla.f32 s31, s7, s15\n"
+      "vstr s24, [%[o], #8]\n"
+      "vstr s28, [%[o], #12]\n"
+      "vstr s25, [%[o], #24]\n"
+      "vstr s29, [%[o], #28]\n"
+      "vstr s26, [%[o], #40]\n"
+      "vstr s30, [%[o], #44]\n"
+      "vstr s27, [%[o], #56]\n"
+      "vstr s31, [%[o], #60]\n"
+      :
+      : [n] "r"(n), [t] "r"(t), [t2] "r"(t + 8), [o] "r"(o), [ct] "r"(ct), [m] "r"(scratch),
+        [one] "r"(one)
+      : "r12", "memory", "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8", "d9", "d10", "d11",
+        "d12", "d13", "d14", "d15");
+}
+
+/*!
+ * (AI-assisted, vfpvec) The VFP11's short vectors (FPSCR LEN = 3: four lanes, STRIDE 1): with
+ * the destination and the first source in banks 1-3 (s8-s31) and the second source in bank 0
+ * (s0-s7), `vmul.f32 s8, s16, s0` is s8..s11 = s16..s19 * s0, one instruction for the scalar
+ * version's four. The bind pose times the bone (the scalar version's first two blocks, 64
+ * multiplies and multiply-adds) is 16 such instructions, lane by lane the same operations in the
+ * same order (VFPv2 rounds the product, then the sum), so the same bits.
+ *
+ * Pass 1 runs for up to kVecBones bones in one asm loop with LEN set (no compiled code runs while
+ * it is: GCC's code assumes scalar mode) and leaves tmat0..3 (64 bytes per bone) in tm; pass 2 is
+ * the scalar version's rest, from tmat0/1 and tmat2/3 in tm. The FPSCR is written twice per call
+ * of pass 1, not per bone. The kernel saves the FPSCR per thread.
+ */
+constexpr int kVecBones = 64;
+
+//! n >= 1 bones: b (stride bs bytes: Jak 1 96, Jak II 80), the bind poses j (stride 80) -> tm
+//! (64 bytes per bone)
+inline void bone_tmat_vec(const float* b, const float* j, float* tm, int n, uint32_t bs) {
+  uint32_t save, tmp;
+  asm volatile(
+      "vmrs %[save], fpscr\n"
+      "bic %[tmp], %[save], #0x00370000\n"
+      "orr %[tmp], %[tmp], #0x00030000\n"
+      "vmsr fpscr, %[tmp]\n"
+      "1:\n"
+        "vldmia %[b], {s16-s31}\n"
+        "vldmia %[j], {s0-s7}\n"
+        "vmul.f32 s8, s16, s0\n"
+        "vmul.f32 s12, s16, s4\n"
+        "vmla.f32 s8, s20, s1\n"
+        "vmla.f32 s12, s20, s5\n"
+        "vmla.f32 s8, s24, s2\n"
+        "vmla.f32 s12, s24, s6\n"
+        "vmla.f32 s8, s28, s3\n"
+        "vmla.f32 s12, s28, s7\n"
+        "vstmia %[tm]!, {s8-s15}\n"
+        "add %[tmp], %[j], #32\n"
+        "vldmia %[tmp], {s0-s7}\n"
+        "vmul.f32 s8, s16, s0\n"
+        "vmul.f32 s12, s16, s4\n"
+        "vmla.f32 s8, s20, s1\n"
+        "vmla.f32 s12, s20, s5\n"
+        "vmla.f32 s8, s24, s2\n"
+        "vmla.f32 s12, s24, s6\n"
+        "vmla.f32 s8, s28, s3\n"
+        "vmla.f32 s12, s28, s7\n"
+        "vstmia %[tm]!, {s8-s15}\n"
+        "add %[b], %[b], %[bs]\n"
+        "add %[j], %[j], #80\n"
+        "subs %[n], %[n], #1\n"
+        "bne 1b\n"
+      "vmsr fpscr, %[save]\n"
+      : [b] "+r"(b), [j] "+r"(j), [tm] "+r"(tm), [n] "+r"(n), [save] "=&r"(save), [tmp] "=&r"(tmp)
+      : [bs] "r"(bs)
+      : "cc", "memory", "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8", "d9", "d10", "d11",
+        "d12", "d13", "d14", "d15");
+}
+
+//! The scalar version's rest for one bone, from its tmat0..3 (64 bytes) in tm.
+inline void bone_mtx_vfp_rest(const float* tm, float* o, const float* ct) {
+  const uint32_t one = 0x3f800000;  // 1.0f (vf0.w)
+  asm volatile(
+      "vldmia %[t23], {s8-s15}\n"
+      "vldmia %[m], {s16-s23}\n"
+      "vmul.f32 s24, s9, s22\n"
+      "vmul.f32 s25, s10, s20\n"
+      "vmul.f32 s26, s8, s21\n"
+      "vnmls.f32 s24, s21, s10\n"
+      "vnmls.f32 s25, s22, s8\n"
+      "vnmls.f32 s26, s20, s9\n"
+      "vmul.f32 s27, s17, s10\n"
+      "vmul.f32 s28, s18, s8\n"
+      "vmul.f32 s29, s16, s9\n"
+      "vnmls.f32 s27, s9, s18\n"
+      "vnmls.f32 s28, s10, s16\n"
+      "vnmls.f32 s29, s8, s17\n"
+      "vmul.f32 s30, s21, s18\n"
+      "vmul.f32 s31, s22, s16\n"
+      "vmul.f32 s0, s20, s17\n"
+      "vnmls.f32 s30, s17, s22\n"
+      "vnmls.f32 s31, s18, s20\n"
+      "vnmls.f32 s0, s16, s21\n"
+      "vmul.f32 s1, s24, s16\n"
+      "vmla.f32 s1, s25, s17\n"
+      "vmla.f32 s1, s26, s18\n"
+      "vmov s2, %[one]\n"
+      "vdiv.f32 s1, s2, s1\n"
+      "vmul.f32 s24, s24, s1\n"
+      "vmul.f32 s25, s25, s1\n"
+      "vmul.f32 s26, s26, s1\n"
+      "vmul.f32 s27, s27, s1\n"
+      "vmul.f32 s28, s28, s1\n"
+      "vmul.f32 s29, s29, s1\n"
+      "vmul.f32 s30, s30, s1\n"
+      "vmul.f32 s31, s31, s1\n"
+      "vmul.f32 s0, s0, s1\n"
+      "add r12, %[ct], #0\n"
+      "vldmia r12, {s4-s6}\n"
+      "vmul.f32 s1, s4, s24\n"
+      "vmul.f32 s2, s4, s27\n"
+      "vmul.f32 s3, s4, s30\n"
+      "vmla.f32 s1, s5, s25\n"
+      "vmla.f32 s2, s5, s28\n"
+      "vmla.f32 s3, s5, s31\n"
+      "vmla.f32 s1, s6, s26\n"
+      "vmla.f32 s2, s6, s29\n"
+      "vmla.f32 s3, s6, s0\n"
+      "vstr s1, [%[o], #64]\n"
+      "vstr s2, [%[o], #80]\n"
+      "vstr s3, [%[o], #96]\n"
+      "add r12, %[ct], #16\n"
+      "vldmia r12, {s4-s6}\n"
+      "vmul.f32 s1, s4, s24\n"
+      "vmul.f32 s2, s4, s27\n"
+      "vmul.f32 s3, s4, s30\n"
+      "vmla.f32 s1, s5, s25\n"
+      "vmla.f32 s2, s5, s28\n"
+      "vmla.f32 s3, s5, s31\n"
+      "vmla.f32 s1, s6, s26\n"
+      "vmla.f32 s2, s6, s29\n"
+      "vmla.f32 s3, s6, s0\n"
+      "vstr s1, [%[o], #68]\n"
+      "vstr s2, [%[o], #84]\n"
+      "vstr s3, [%[o], #100]\n"
+      "add r12, %[ct], #32\n"
+      "vldmia r12, {s4-s6}\n"
+      "vmul.f32 s1, s4, s24\n"
+      "vmul.f32 s2, s4, s27\n"
+      "vmul.f32 s3, s4, s30\n"
+      "vmla.f32 s1, s5, s25\n"
+      "vmla.f32 s2, s5, s28\n"
+      "vmla.f32 s3, s5, s31\n"
+      "vmla.f32 s1, s6, s26\n"
+      "vmla.f32 s2, s6, s29\n"
+      "vmla.f32 s3, s6, s0\n"
+      "vstr s1, [%[o], #72]\n"
+      "vstr s2, [%[o], #88]\n"
+      "vstr s3, [%[o], #104]\n"
+      "add r12, %[ct], #48\n"
+      "vldmia r12, {s4-s6}\n"
+      "vmul.f32 s1, s4, s24\n"
+      "vmul.f32 s2, s4, s27\n"
+      "vmul.f32 s3, s4, s30\n"
+      "vmla.f32 s1, s5, s25\n"
+      "vmla.f32 s2, s5, s28\n"
+      "vmla.f32 s3, s5, s31\n"
+      "vmla.f32 s1, s6, s26\n"
+      "vmla.f32 s2, s6, s29\n"
+      "vmla.f32 s3, s6, s0\n"
+      "vstr s1, [%[o], #76]\n"
+      "vstr s2, [%[o], #92]\n"
+      "vstr s3, [%[o], #108]\n"
+      "add r12, %[ct], #0\n"
+      "vldmia r12, {s0-s7}\n"
+      "vmul.f32 s24, s0, s16\n"
+      "vmul.f32 s28, s4, s16\n"
+      "vmul.f32 s25, s0, s20\n"
+      "vmul.f32 s29, s4, s20\n"
+      "vmul.f32 s26, s0, s8\n"
+      "vmul.f32 s30, s4, s8\n"
+      "vmul.f32 s27, s0, s12\n"
+      "vmul.f32 s31, s4, s12\n"
+      "vmla.f32 s24, s1, s17\n"
+      "vmla.f32 s28, s5, s17\n"
+      "vmla.f32 s25, s1, s21\n"
+      "vmla.f32 s29, s5, s21\n"
+      "vmla.f32 s26, s1, s9\n"
+      "vmla.f32 s30, s5, s9\n"
+      "vmla.f32 s27, s1, s13\n"
+      "vmla.f32 s31, s5, s13\n"
+      "vmla.f32 s24, s2, s18\n"
+      "vmla.f32 s28, s6, s18\n"
+      "vmla.f32 s25, s2, s22\n"
+      "vmla.f32 s29, s6, s22\n"
+      "vmla.f32 s26, s2, s10\n"
+      "vmla.f32 s30, s6, s10\n"
+      "vmla.f32 s27, s2, s14\n"
+      "vmla.f32 s31, s6, s14\n"
+      "vmla.f32 s24, s3, s19\n"
+      "vmla.f32 s28, s7, s19\n"
+      "vmla.f32 s25, s3, s23\n"
+      "vmla.f32 s29, s7, s23\n"
+      "vmla.f32 s26, s3, s11\n"
+      "vmla.f32 s30, s7, s11\n"
+      "vmla.f32 s27, s3, s15\n"
+      "vmla.f32 s31, s7, s15\n"
+      "vstr s24, [%[o], #0]\n"
+      "vstr s28, [%[o], #4]\n"
+      "vstr s25, [%[o], #16]\n"
+      "vstr s29, [%[o], #20]\n"
+      "vstr s26, [%[o], #32]\n"
+      "vstr s30, [%[o], #36]\n"
+      "vstr s27, [%[o], #48]\n"
+      "vstr s31, [%[o], #52]\n"
+      "add r12, %[ct], #32\n"
+      "vldmia r12, {s0-s7}\n"
+      "vmul.f32 s24, s0, s16\n"
+      "vmul.f32 s28, s4, s16\n"
+      "vmul.f32 s25, s0, s20\n"
+      "vmul.f32 s29, s4, s20\n"
+      "vmul.f32 s26, s0, s8\n"
+      "vmul.f32 s30, s4, s8\n"
+      "vmul.f32 s27, s0, s12\n"
+      "vmul.f32 s31, s4, s12\n"
+      "vmla.f32 s24, s1, s17\n"
+      "vmla.f32 s28, s5, s17\n"
+      "vmla.f32 s25, s1, s21\n"
+      "vmla.f32 s29, s5, s21\n"
+      "vmla.f32 s26, s1, s9\n"
+      "vmla.f32 s30, s5, s9\n"
+      "vmla.f32 s27, s1, s13\n"
+      "vmla.f32 s31, s5, s13\n"
+      "vmla.f32 s24, s2, s18\n"
+      "vmla.f32 s28, s6, s18\n"
+      "vmla.f32 s25, s2, s22\n"
+      "vmla.f32 s29, s6, s22\n"
+      "vmla.f32 s26, s2, s10\n"
+      "vmla.f32 s30, s6, s10\n"
+      "vmla.f32 s27, s2, s14\n"
+      "vmla.f32 s31, s6, s14\n"
+      "vmla.f32 s24, s3, s19\n"
+      "vmla.f32 s28, s7, s19\n"
+      "vmla.f32 s25, s3, s23\n"
+      "vmla.f32 s29, s7, s23\n"
+      "vmla.f32 s26, s3, s11\n"
+      "vmla.f32 s30, s7, s11\n"
+      "vmla.f32 s27, s3, s15\n"
+      "vmla.f32 s31, s7, s15\n"
+      "vstr s24, [%[o], #8]\n"
+      "vstr s28, [%[o], #12]\n"
+      "vstr s25, [%[o], #24]\n"
+      "vstr s29, [%[o], #28]\n"
+      "vstr s26, [%[o], #40]\n"
+      "vstr s30, [%[o], #44]\n"
+      "vstr s27, [%[o], #56]\n"
+      "vstr s31, [%[o], #60]\n"
+      :
+      : [m] "r"(tm), [t23] "r"(tm + 8), [o] "r"(o), [ct] "r"(ct), [one] "r"(one)
+      : "r12", "memory", "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8", "d9", "d10", "d11",
+        "d12", "d13", "d14", "d15");
+}
+
+//! config.ini vfp_vector (3DS, default off); elsewhere env OPENGOAL_VFP_VECTOR=1 (qemu tests)
+inline bool vector_on() {
+  static const bool on = [] {
+#ifdef __3DS__
+    return ctr_config_bool("vfp_vector", 0) != 0;
+#else
+    const char* e = getenv("OPENGOAL_VFP_VECTOR");
+    return e && e[0] == '1';
+#endif
+  }();
+  return on;
+}
+
+//! n bones from b (stride bs bytes) / j into o (stride 128 bytes), as bone_mtx_vfp each, the first
+//! part as short vectors (above)
+inline void bone_mtx_vfp_vec(const float* b, const float* j, float* o, const float* ct, int64_t n,
+                             uint32_t bs) {
+  alignas(8) float tm[kVecBones * 16];
+  while (n > 0) {
+    const int k = n < kVecBones ? (int)n : kVecBones;
+    bone_tmat_vec(b, j, tm, k, bs);
+    for (int i = 0; i < k; i++) {
+      bone_mtx_vfp_rest(tm + 16 * i, o, ct);
+      o += 32;
+    }
+    b += bs / 4 * k;
+    j += 20 * k;
+    n -= k;
+  }
+}
+
+}  // namespace native_bones_vfp
+#endif

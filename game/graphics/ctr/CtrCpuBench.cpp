@@ -301,6 +301,58 @@ uint32_t planes3_signs(uint32_t n) {
   return seen;
 }
 
+}  // namespace
+}  // namespace ctr_cpu_bench
+#include "game/mips2c/native_bones_vfp.h"
+namespace ctr_cpu_bench {
+namespace {
+
+#ifdef BONES_VFP_ASM
+// ---- (AI-assisted, vfpvec) pc-new-bones-mtx-calc's bone matrices: the scalar VFP version against
+// the short-vector one (native_bones_vfp.h), 32 Jak II bones (80 bytes apart) per iteration ----
+constexpr int kBones = 32;
+float g_bone[kBones * 20] __attribute__((aligned(16)));
+float g_joint[kBones * 20] __attribute__((aligned(16)));
+float g_ct[16] __attribute__((aligned(8)));
+float g_bout[kBones * 32] __attribute__((aligned(16)));
+void fill_bones() {
+  uint32_t s = 4242;
+  auto rnd = [&]() {
+    s = s * 1664525u + 1013904223u;
+    return (float)(s >> 8) * (1.f / 16777216.f) * 2.f - 1.f;
+  };
+  for (float& f : g_bone) f = rnd();
+  for (float& f : g_joint) f = rnd();
+  for (float& f : g_ct) f = rnd();
+}
+uint32_t bones_hash() {
+  uint32_t h = 2166136261u;
+  for (int i = 0; i < kBones; i++) {
+    for (int k = 0; k < 28; k++) {  // t-mtx and n-mtx's three rows (the 4th words aren't written)
+      h = (h ^ fbits(g_bout[32 * i + (k < 16 ? k : 16 + 4 * ((k - 16) / 3) + (k - 16) % 3)])) *
+          16777619u;
+    }
+  }
+  return h;
+}
+uint32_t bones_scalar(uint32_t n) {
+  alignas(8) float scratch[8];
+  for (uint32_t r = 0; r < n; r++) {
+    for (int i = 0; i < kBones; i++) {
+      native_bones_vfp::bone_mtx_vfp(g_bone + 20 * i, g_joint + 20 * i, g_bout + 32 * i, g_ct,
+                                     scratch);
+    }
+  }
+  return bones_hash();
+}
+uint32_t bones_vector(uint32_t n) {
+  for (uint32_t r = 0; r < n; r++) {
+    native_bones_vfp::bone_mtx_vfp_vec(g_bone, g_joint, g_bout, g_ct, kBones, 80);
+  }
+  return bones_hash();
+}
+#endif
+
 const Case kCases[] = {
     // name, kernel, iterations on the console, pair
     {"vfp.chain8", vfp_chain, 200000, nullptr},
@@ -319,6 +371,10 @@ const Case kCases[] = {
     {"mem.line256k", mem_line, 20, nullptr},
     {"cull.planes3_branch", planes3_branch, 1000000, nullptr},
     {"cull.planes3_signs", planes3_signs, 1000000, "cull.planes3_branch"},
+#ifdef BONES_VFP_ASM
+    {"bones.mtx_scalar32", bones_scalar, 5000, nullptr},
+    {"bones.mtx_vector32", bones_vector, 5000, "bones.mtx_scalar32"},
+#endif
 };
 
 }  // namespace
@@ -331,6 +387,9 @@ const Case* cases(int* count) {
 int run(double scale, void (*line)(const char* text, void* ctx), void* ctx) {
   fill_tables();
   fill_spheres();
+#ifdef BONES_VFP_ASM
+  fill_bones();
+#endif
   for (uint32_t i = 0; i < kMemWords; i++) {
     g_mem[i] = i * 2654435761u;
   }

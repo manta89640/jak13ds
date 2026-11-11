@@ -1768,3 +1768,21 @@ the 3DS's default NaN a NaN fails as the compare did. ARM code (GCC 13, `-O2`, t
 no `vcmp` / `vmrs` left in the loop, 41 instructions against 39. Bench pair
 `cull.planes3_branch` / `cull.planes3_signs` (3 planes, spheres exactly on a plane and a NaN
 among them): the same checksum on the host and as ARMv6K code under qemu.
+
+### 2. VFP short vectors for the bone matrices (vfpvec)
+
+The VFP11 still has VFPv2's short vectors: with FPSCR LEN = 3 (four lanes), an operation whose
+destination and first source are in s8-s31 and whose second source is in s0-s7 runs on four
+consecutive registers against one scalar, e.g. `vmul.f32 s8, s16, s0` is s8..s11 = s16..s19 * s0.
+pc-new-bones-mtx-calc's hand-scheduled VFP code (Jak 1 and Jak II, now one copy in
+`game/mips2c/native_bones_vfp.h`) starts with the bind pose times the bone: 64 scalar multiplies
+and multiply-adds that are exactly 16 such vector instructions, lane by lane the same operations
+in the same order (VFPv2 rounds the product, then the sum), so the same bits. Pass 1 runs up to
+64 bones in one asm loop with LEN set (no compiled code runs meanwhile: GCC's code assumes scalar
+mode; FPSCR written twice per 64 bones), pass 2 is the scalar code's rest per bone.
+
+`vfp_vector = on` (default off). The VFP still does one lane per cycle, so the gain is in issue
+slots and code size (48 fewer instructions per bone, the FPSCR writes aside): cpu_bench's
+`bones.mtx_scalar32` / `bones.mtx_vector32` price it on a console. Checked under qemu-arm (ARM11
+MPCore): bit-identical output with both FPSCR settings. Not known: whether Azahar (dynarmic)
+emulates short vectors; check a frame there before turning it on.

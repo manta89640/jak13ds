@@ -142,6 +142,7 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"anim_lod_far", "off"}, /* (AI-assisted, j2cuts) Jak II: far citizens on screen too */
     {"merc_lod_scale", "1"},
     {"shadow_count", "0"},   /* (AI-assisted, j2cuts) Jak II: the N nearest shadows, 0: all */
+    {"vfp_vector", "off"},   /* (AI-assisted, vfpvec) bone matrices as VFP short vectors */
     {"ocean", "full"},
     {"shadows", "full"},
     {"depth16", "off"},
