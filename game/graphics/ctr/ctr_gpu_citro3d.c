@@ -10784,3 +10784,87 @@ void ctr_gpu_linear_account_get(ctr_gpu_linear_account* out) {
                      out->tex_target + out->tex_screen + out->tex_copies + out->tex_pending +
                      out->staging + out->blocks);
 }
+
+/* ---------------- (AI-assisted, depthreuse) config.ini depth_reuse ----------------
+ * The top target's depth after what the frame drew so far, copied by the GPU (GX_TextureCopy,
+ * queued after a partial submit of the frame's commands, so after them in the GX queue) into one
+ * linear buffer (240 x 400 x 4 bytes). It is complete once the frame's fence has landed (steady
+ * pacing: the fence copy is queued at the frame end, after it), then reduced on the CPU to 8x8
+ * blocks: the buffer's tile (tx, ty) (8x8 pixels, 64 words) is the screen's block
+ * (ty, 29 - tx) (write_screenshot's mapping: screen (x, y) = buffer (239 - y, x)); a D24S8 word's
+ * depth is its low 24 bits (0 far, the cleared value; larger = closer). Not with D16, block32 or
+ * without the pipeline and steady pacing. One copy at a time. */
+static struct {
+  u32* buf;
+  u32 bytes;
+  int failed;
+  int busy;
+  u32 frame;
+  unsigned seq;
+  float user_q[16], user[16];
+  float zfar[50 * 30], znear[50 * 30];
+} s_dr;
+
+void ctr_gpu_depth_copy(const float user[16]) {
+  if (!g.ready || !g.in_frame || s_dr.failed || s_dr.busy || !s_pipeline || !s_pres.on ||
+      g_depth16 || g_block32 || !g.top) {
+    return;
+  }
+  const C3D_FrameBuf* fb = &g.top->frameBuf;
+  if (fb->width != 240 || fb->height != 400 || fb->depthFmt != GPU_RB_DEPTH24_STENCIL8) {
+    s_dr.failed = 1;
+    printf("[ctr] depth_reuse: the top target is %ux%u, depth format %d: off\n",
+           (unsigned)fb->width, (unsigned)fb->height, (int)fb->depthFmt);
+    return;
+  }
+  if (!s_dr.buf) {
+    s_dr.bytes = 240u * 400u * 4u;
+    s_dr.buf = (u32*)safe_linear_alloc(s_dr.bytes);
+    if (!s_dr.buf) {
+      s_dr.failed = 1;
+      printf("[ctr] depth_reuse: no linear memory for the copy (%u KB): off\n",
+             (unsigned)(s_dr.bytes / 1024));
+      return;
+    }
+    printf("[ctr] depth_reuse: copy buffer %u KB of linear memory\n", (unsigned)(s_dr.bytes / 1024));
+  }
+  pipeline_submit(); /* what is drawn so far, queued before the copy */
+  if (!gx_begin()) {
+    return;
+  }
+  GX_TextureCopy((u32*)fb->depthBuf, 0, s_dr.buf, 0, s_dr.bytes, 8);
+  gx_end();
+  s_dr.busy = 1;
+  s_dr.frame = (u32)g.frame_no;
+  memcpy(s_dr.user_q, user, sizeof(s_dr.user_q));
+}
+
+unsigned ctr_gpu_depth_blocks(float* zfar, float* znear, float user[16]) {
+  if (s_dr.busy && (s32)(s_gt.done_id - s_dr.frame) >= 0) {
+    GSPGPU_InvalidateDataCache(s_dr.buf, s_dr.bytes);
+    const float k = 1.0f / 16777215.0f;
+    for (u32 t = 0; t < 30u * 50u; t++) {
+      const u32* w = s_dr.buf + t * 64u;
+      u32 lo = 0xffffffu, hi = 0;
+      for (int i = 0; i < 64; i++) {
+        const u32 d = w[i] & 0xffffffu;
+        lo = d < lo ? d : lo;
+        hi = d > hi ? d : hi;
+      }
+      const u32 tx = t % 30u, ty = t / 30u;
+      const u32 b = (29u - tx) * 50u + ty;
+      s_dr.zfar[b] = (float)lo * k;
+      s_dr.znear[b] = (float)hi * k;
+    }
+    memcpy(s_dr.user, s_dr.user_q, sizeof(s_dr.user));
+    s_dr.busy = 0;
+    s_dr.seq++;
+  }
+  if (!s_dr.seq) {
+    return 0;
+  }
+  memcpy(zfar, s_dr.zfar, sizeof(s_dr.zfar));
+  memcpy(znear, s_dr.znear, sizeof(s_dr.znear));
+  memcpy(user, s_dr.user, sizeof(s_dr.user));
+  return s_dr.seq;
+}

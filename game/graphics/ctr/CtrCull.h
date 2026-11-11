@@ -13,6 +13,7 @@
  * region it hides; a sphere is hidden when it lies inside all of them.
  */
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -365,6 +366,134 @@ inline int horizon_classify(const Horizon& h, const float* c, float r) {
     any = any || ec - ang < e;
   }
   return all ? 2 : (any ? 1 : 0);
+}
+
+/*
+ * (AI-assisted, depthreuse) The depth of an earlier frame (config.ini `depth_reuse`,
+ * docs/3ds-port/culling.md "4."): the top screen in 8x8 blocks (50 x 30, rows from the top), each
+ * block's farthest and nearest depth as the GPU stored it (0 far .. 1 near: 0.5 (1 + z/w) of the
+ * GL clip space the level renderer draws in), and that frame's camera. A sphere all of whose
+ * points were farther than the farthest depth of every block it covered was hidden then.
+ */
+constexpr int kDepthBX = 50, kDepthBY = 30;
+
+struct DepthSnap {
+  float m[16];  // world -> GL clip, row major: clip_r = m[4r] p.x + m[4r+1] p.y + m[4r+2] p.z + m[4r+3]
+  float eye[3];
+  float zfar[kDepthBX * kDepthBY];
+  float znear[kDepthBX * kDepthBY];
+};
+
+inline void depth_clip(const float* m, const float* p, float* c) {
+  for (int r = 0; r < 4; r++) {
+    c[r] = m[4 * r] * p[0] + m[4 * r + 1] * p[1] + m[4 * r + 2] * p[2] + m[4 * r + 3];
+  }
+}
+
+//! The stored depth of a point at view distance d straight along the view (the w gradient).
+inline float depth_at_distance(const DepthSnap& s, float d) {
+  const float* g = s.m + 12;
+  const float gl = std::sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
+  if (!(gl > 0)) {
+    return 1.f;
+  }
+  const float p[3] = {s.eye[0] + d * g[0] / gl, s.eye[1] + d * g[1] / gl, s.eye[2] + d * g[2] / gl};
+  float c[4];
+  depth_clip(s.m, p, c);
+  return c[3] > 0 ? 0.5f * (1.f + c[2] / c[3]) : 1.f;
+}
+
+/*!
+ * Was the sphere hidden in that frame: on screen there, behind the farthest depth of the blocks it
+ * covered (by `eps`), with nothing in those blocks nearer than stored depth `z_limit` (things near
+ * the camera may have moved since: Jak, an enemy)? 2: behind all of its blocks, 1: behind some of
+ * them (its pieces may be), 0: none (or off screen, or reaching behind the camera).
+ */
+inline int depth_test(const DepthSnap& s, const float* c, float r, float z_limit, float eps) {
+  float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
+  for (int k = 0; k < 8; k++) {
+    const float p[3] = {c[0] + (k & 1 ? r : -r), c[1] + (k & 2 ? r : -r), c[2] + (k & 4 ? r : -r)};
+    float q[4];
+    depth_clip(s.m, p, q);
+    if (!(q[3] > 1e-3f)) {
+      return 0;
+    }
+    const float sx = (q[0] / q[3] + 1.f) * (kDepthBX * 4.f);
+    const float sy = (1.f - q[1] / q[3]) * (kDepthBY * 4.f);
+    x0 = std::fmin(x0, sx);
+    x1 = std::fmax(x1, sx);
+    y0 = std::fmin(y0, sy);
+    y1 = std::fmax(y1, sy);
+  }
+  const int bx0 = std::max(0, (int)std::floor(x0 / 8.f)), bx1 = std::min(kDepthBX - 1, (int)std::floor(x1 / 8.f));
+  const int by0 = std::max(0, (int)std::floor(y0 / 8.f)), by1 = std::min(kDepthBY - 1, (int)std::floor(y1 / 8.f));
+  if (bx0 > bx1 || by0 > by1) {
+    return 0;
+  }
+  // the sphere's nearest point: the least w
+  const float* g = s.m + 12;
+  const float gl = std::sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
+  if (!(gl > 0)) {
+    return 0;
+  }
+  const float p[3] = {c[0] - r * g[0] / gl, c[1] - r * g[1] / gl, c[2] - r * g[2] / gl};
+  float q[4];
+  depth_clip(s.m, p, q);
+  if (!(q[3] > 1e-3f)) {
+    return 0;
+  }
+  const float zn = 0.5f * (1.f + q[2] / q[3]);
+  bool all = true, any = false;
+  for (int by = by0; by <= by1; by++) {
+    for (int bx = bx0; bx <= bx1; bx++) {
+      const int b = by * kDepthBX + bx;
+      const bool h = zn < s.zfar[b] - eps && s.znear[b] < z_limit;
+      all = all && h;
+      any = any || h;
+    }
+  }
+  return all ? 2 : (any ? 1 : 0);
+}
+inline bool depth_hidden(const DepthSnap& s, const float* c, float r, float z_limit, float eps) {
+  return depth_test(s, c, r, z_limit, eps) == 2;
+}
+
+//! The camera position of a world -> clip matrix: where x, y and w are 0.
+inline bool depth_eye(const float* m, float* eye) {
+  const float* a = m;       // x row
+  const float* b = m + 4;   // y row
+  const float* c = m + 12;  // w row
+  const float det = a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) +
+                    a[2] * (b[0] * c[1] - b[1] * c[0]);
+  if (!(std::fabs(det) > 1e-20f)) {
+    return false;
+  }
+  const float r0 = -a[3], r1 = -b[3], r2 = -c[3];
+  eye[0] = (r0 * (b[1] * c[2] - b[2] * c[1]) - a[1] * (r1 * c[2] - b[2] * r2) +
+            a[2] * (r1 * c[1] - b[1] * r2)) / det;
+  eye[1] = (a[0] * (r1 * c[2] - b[2] * r2) - r0 * (b[0] * c[2] - b[2] * c[0]) +
+            a[2] * (b[0] * r2 - r1 * c[0])) / det;
+  eye[2] = (a[0] * (b[1] * r2 - r1 * c[1]) - a[1] * (b[0] * r2 - r1 * c[0]) +
+            r0 * (b[0] * c[1] - b[1] * c[0])) / det;
+  return true;
+}
+
+//! The blocks of a depth buffer of kDepthBX x kDepthBY blocks' pixels (rows from the top).
+inline void depth_blocks(const float* depth, float* zfar, float* znear) {
+  constexpr int w = kDepthBX * 8;
+  for (int by = 0; by < kDepthBY; by++) {
+    for (int bx = 0; bx < kDepthBX; bx++) {
+      float lo = 1e30f, hi = -1e30f;
+      for (int y = by * 8; y < by * 8 + 8; y++) {
+        for (int x = bx * 8; x < bx * 8 + 8; x++) {
+          lo = std::fmin(lo, depth[y * w + x]);
+          hi = std::fmax(hi, depth[y * w + x]);
+        }
+      }
+      zfar[by * kDepthBX + bx] = lo;
+      znear[by * kDepthBX + bx] = hi;
+    }
+  }
 }
 
 }  // namespace ctr_cull

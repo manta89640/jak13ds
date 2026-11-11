@@ -730,6 +730,10 @@ struct CtrLevelData {
     std::vector<ctr_vis_bake::Interval> iv;
   };
   std::unique_ptr<VisBake> vis_bake;
+  // (AI-assisted, depthreuse) per chunk and per run: the depth copy it was last found hidden in and
+  // in how many copies in a row (depth_reuse hides it from the second on)
+  std::vector<u16> dr_chunk_seq, dr_run_seq;
+  std::vector<u8> dr_chunk_streak, dr_run_streak;
   bool tf_morph(size_t ci) const {
     return ci < chunk_tf.size() && chunk_tf[ci] >= 0 && tf_chunks[chunk_tf[ci]].records_offset;
   }
@@ -1623,6 +1627,10 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u32 m_vb_s[2] = {0, 0};
   int m_vb_n = 0;
   u64 m_vb_frames = 0, m_vb_on = 0, m_vb_chunks = 0, m_vb_runs = 0, m_vb_tris = 0;
+  // (AI-assisted, depthreuse) this level draw may use the recent depth (the frame's g_dr), and
+  // statistics: level draws, of them with it, chunks and runs hidden, the runs' triangles
+  bool m_dr_ok = false;
+  u64 m_dr_frames = 0, m_dr_on = 0, m_dr_chunks = 0, m_dr_runs = 0, m_dr_tris = 0;
   void choose_occluders(CtrLevelData& lev, const CtrBackgroundCamera& cam, u64 frame,
                         float draw_dist);
   // kDrawCullCond draws of visible chunks, and of them culled (camera inside)

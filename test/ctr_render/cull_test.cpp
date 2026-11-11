@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <random>
 #include <vector>
 
@@ -429,6 +430,53 @@ void test_vis_bake_intervals() {
   fmt::print("  baked visibility: intervals and view matching\n");
 }
 
+// (AI-assisted, depthreuse) a camera at `eye` looking down -z (the port's clip: z / w = +1 at the
+// near plane), a wall at distance `wall` over the left half of the screen, nothing (0) elsewhere
+void make_depth_scene(float wall, const float* eye, ctr_cull::DepthSnap* s) {
+  const float n = 0.5f, f = 2000.f, fy = 1.f / std::tan(0.5f), fx = fy * 240.f / 400.f;
+  float m[16] = {fx, 0, 0, 0, 0, fy, 0, 0, 0, 0, -(n + f) / (n - f), -2 * n * f / (n - f), 0, 0, -1, 0};
+  for (int r = 0; r < 4; r++) {
+    m[4 * r + 3] -= m[4 * r] * eye[0] + m[4 * r + 1] * eye[1] + m[4 * r + 2] * eye[2];
+  }
+  memcpy(s->m, m, sizeof(m));
+  const float zc = -(n + f) / (n - f) * -wall - 2 * n * f / (n - f);
+  const float zw = 0.5f * (1.f + zc / wall);
+  std::vector<float> depth(400 * 240, 0.f);
+  for (int y = 0; y < 240; y++) {
+    for (int x = 0; x < 200; x++) {
+      depth[y * 400 + x] = zw;
+    }
+  }
+  ctr_cull::depth_blocks(depth.data(), s->zfar, s->znear);
+  check(ctr_cull::depth_eye(s->m, s->eye), "the camera from its matrix");
+  for (int i = 0; i < 3; i++) {
+    check(std::fabs(s->eye[i] - eye[i]) < 1e-2f, "the camera's position from its matrix");
+  }
+}
+
+void test_depth_reuse() {
+  ctr_cull::DepthSnap s;
+  const float eye[3] = {10.f, 2.f, -5.f};
+  make_depth_scene(30.f, eye, &s);
+  const float lim20 = ctr_cull::depth_at_distance(s, 20.f);
+  const float behind[3] = {eye[0] - 12.f, eye[1], eye[2] - 60.f};
+  check(ctr_cull::depth_test(s, behind, 2.f, lim20, 1e-5f) == 2, "behind the wall: hidden");
+  const float right[3] = {eye[0] + 12.f, eye[1], eye[2] - 60.f};
+  check(ctr_cull::depth_test(s, right, 2.f, lim20, 1e-5f) == 0, "where the wall isn't: not");
+  const float front[3] = {eye[0] - 3.f, eye[1], eye[2] - 25.f};
+  check(ctr_cull::depth_test(s, front, 2.f, lim20, 1e-5f) == 0, "in front of the wall: not");
+  const float across[3] = {eye[0], eye[1], eye[2] - 60.f};
+  check(ctr_cull::depth_test(s, across, 6.f, lim20, 1e-5f) == 1, "across the wall's edge: partly");
+  const float behind_cam[3] = {eye[0], eye[1], eye[2] + 10.f};
+  check(ctr_cull::depth_test(s, behind_cam, 2.f, lim20, 1e-5f) == 0, "behind the camera: not");
+  // a wall nearer than the limit (it may be Jak): hides nothing
+  ctr_cull::DepthSnap n;
+  make_depth_scene(10.f, eye, &n);
+  check(ctr_cull::depth_test(n, behind, 2.f, ctr_cull::depth_at_distance(n, 20.f), 1e-5f) == 0,
+        "nothing behind something nearer than the limit");
+  fmt::print("  depth reuse: blocks, partial and near-limit cases\n");
+}
+
 }  // namespace
 
 void run_cull_tests() {
@@ -440,4 +488,5 @@ void run_cull_tests() {
   test_no_box_in_thin_plate();
   test_horizon();
   test_vis_bake_intervals();
+  test_depth_reuse();
 }

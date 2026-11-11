@@ -4063,3 +4063,53 @@ int ctr_gpu_soft_seen_tags(uint32_t* out, int max) {
   }
   return n;
 }
+
+// (AI-assisted, depthreuse) taken at once from the main depth buffer, handed out from the next
+// frame on (a GPU copy is read a frame or two later)
+namespace {
+struct SoftDepthCopy {
+  float zfar[50 * 30], znear[50 * 30], user[16];
+  bool pending = false;
+  unsigned seq = 0;
+  float out_zfar[50 * 30], out_znear[50 * 30], out_user[16];
+  int frame = -1;
+} s_dcopy;
+}  // namespace
+void ctr_gpu_depth_copy(const float user[16]) {
+  if (s_dcopy.pending || g_soft.depth.size() != (size_t)kW * kH) {
+    return;
+  }
+  for (int by = 0; by < 30; by++) {
+    for (int bx = 0; bx < 50; bx++) {
+      float lo = 1e30f, hi = -1e30f;
+      for (int y = by * 8; y < by * 8 + 8; y++) {
+        for (int x = bx * 8; x < bx * 8 + 8; x++) {
+          const float z = g_soft.depth[x + y * kW];
+          lo = std::min(lo, z);
+          hi = std::max(hi, z);
+        }
+      }
+      s_dcopy.zfar[by * 50 + bx] = lo;
+      s_dcopy.znear[by * 50 + bx] = hi;
+    }
+  }
+  memcpy(s_dcopy.user, user, sizeof(s_dcopy.user));
+  s_dcopy.pending = true;
+  s_dcopy.frame = (int)g_soft.frame;
+}
+unsigned ctr_gpu_depth_blocks(float* zfar, float* znear, float user[16]) {
+  if (s_dcopy.pending && (int)g_soft.frame > s_dcopy.frame) {
+    memcpy(s_dcopy.out_zfar, s_dcopy.zfar, sizeof(s_dcopy.zfar));
+    memcpy(s_dcopy.out_znear, s_dcopy.znear, sizeof(s_dcopy.znear));
+    memcpy(s_dcopy.out_user, s_dcopy.user, sizeof(s_dcopy.user));
+    s_dcopy.pending = false;
+    s_dcopy.seq++;
+  }
+  if (!s_dcopy.seq) {
+    return 0;
+  }
+  memcpy(zfar, s_dcopy.out_zfar, sizeof(s_dcopy.out_zfar));
+  memcpy(znear, s_dcopy.out_znear, sizeof(s_dcopy.out_znear));
+  memcpy(user, s_dcopy.out_user, sizeof(s_dcopy.out_user));
+  return s_dcopy.seq;
+}

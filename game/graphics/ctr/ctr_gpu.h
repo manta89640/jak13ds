@@ -948,6 +948,14 @@ typedef struct {
   unsigned int linear_largest;
 } ctr_gpu_stats;
 void ctr_gpu_get_stats(ctr_gpu_stats* out);
+/* (AI-assisted, depthreuse) config.ini depth_reuse (CtrLevel.cpp, docs/3ds-port/culling.md "4."):
+ * the top screen's depth drawn so far, reduced to 8x8 blocks (50 x 30, rows from the top; depth as
+ * the soft backend's z: 0 far .. 1 near), each block's farthest (zfar) and nearest (znear) depth,
+ * with the 16 floats the caller gave (its camera). ctr_gpu_depth_copy: take it now (3DS: a GPU copy
+ * after what is drawn so far, pipeline mode with steady pacing, D24S8, not block32; one at a time).
+ * ctr_gpu_depth_blocks: the newest finished one (its sequence number; 0: none yet). */
+void ctr_gpu_depth_copy(const float user[16]);
+unsigned ctr_gpu_depth_blocks(float* zfar, float* znear, float user[16]);
 #ifndef __3DS__
 /* (AI-assisted) snow-gpu-audit: the renderer the next draws belong to (soft backend statistics) */
 void ctr_gpu_soft_bucket(const char* name);

@@ -15,6 +15,7 @@ ones with converter data need the levels converted again.
 | 1 | `occluders` | runs and chunks behind big solid objects | reconverted levels |
 | 2 | `horizon` | runs and chunks behind hills | reconverted levels |
 | 3 | `title_vis` | on the title flight, every run the camera there never shows | a host bake (`.c3b`) |
+| 4 | `depth_reuse` | runs and chunks a recent frame's depth hid, while the camera holds still | nothing |
 
 ## 1. Occluders: boxes inside closed tie surfaces
 
@@ -166,3 +167,47 @@ geometry the bake's settings didn't draw (bake with the defaults).
 **To check on a console:** bake, copy the .c3b, `title_vis = on`, watch the flight for missing
 pieces (most likely at the start of a loop or after a cut), compare the title's `render ms/frame`
 and triangles with it off.
+
+## 4. The depth of a recent frame
+
+The PICA200 has no occlusion queries, so the depth buffer itself is read back.
+
+**The copy** (`ctr_gpu_depth_copy`, both backends). After the first level drawn in near mode in a
+frame (the level renderer's end, `draw_level`), the depth drawn so far: the level backgrounds, not
+yet the later buckets' models, water and sprites (in Jak 1 a level 0 model bucket comes before
+level 1's background). On the 3DS: a partial submit of the frame's commands, then a `GX_TextureCopy`
+of the 240 x 400 D24S8 buffer into one linear buffer (375 KB, allocated at the first copy; none:
+off), queued after them; it is done once the frame's fence has landed (steady pacing), then
+reduced on the CPU to 8x8 blocks, each block's farthest and nearest depth. The buffer's tile
+(tx, ty) is the screen's block (ty, 29 - tx) (`write_screenshot`'s mapping), a word's depth its low
+24 bits, stored as `0.5 (1 + z / w)` of the level's clip space (`gl_to_pica_mul` with the depth map
+-1, 0: the soft backend's z, 0 far, larger nearer). One copy at a time: a frame or two old. Not with
+`depth16`, `top_block32` or without the pipeline and steady pacing. The host soft backend takes the
+blocks from its depth buffer at once and hands them out from the next frame.
+
+**The test** (`CtrCull.h depth_test`): with the copy's camera, a sphere's screen box (its bounding
+box's corners projected) and its nearest point's depth; hidden when that point is farther than the
+farthest depth of every block of the box and no block has anything nearer than `depth_reuse_min`
+(20 m; Jak, an enemy, a moving platform near the camera may have moved since), spheres grown by
+0.5 m. Off screen or reaching behind the camera: not hidden.
+
+**When:** only while the camera is within 0.25 m and 1 degree of the copy's camera (its position
+from the matrix, `depth_eye`), and a chunk or run is hidden only from the second copy in a row that
+hid it (`depth_reuse_hidden`: per chunk and run the copy and the streak; 3 bytes per run). So it
+works while standing or turning slowly, and a thing that comes out from behind something shows at
+most a frame or two after the copy that saw it. The vista pass's chunks are not tested.
+
+**What can go wrong:** a moving thing farther than 20 m that hid a run (a far enemy, a platform)
+lets the run come back a copy or two late; a blended level draw that writes depth hides what is
+behind it.
+
+The test (`cull_test.cpp`): a wall over half the screen at 30 m: a sphere behind it is hidden, one
+beside it, in front of it or behind the camera is not, one across its edge partly; a wall at 10 m
+hides nothing; the camera's position comes back from its matrix.
+
+**Cost:** 375 KB of linear memory; per copy the GPU copy and a pass over 96k words (1500 tiles);
+per chunk in view a projection of 9 points, per run of chunks partly behind the depth the same.
+
+**To check on a console:** `depth_reuse = on`, stand in village1 and the jungle and turn slowly;
+look for things missing or blinking behind hills and walls when you start moving, and when Jak or
+an enemy walks in front of the scenery.

@@ -254,6 +254,12 @@ struct CtrSettings {
   // .c3l, made on the host with CTR_VIS_BAKE=dir:title) never saw from the nearest cameras of its
   // path are not drawn (docs/3ds-port/culling.md). Off: not yet seen on a console
   bool title_vis = false;
+  // (AI-assisted, depthreuse) level chunks and runs that the depth of a recent frame (the GPU's copy
+  // after the camera's level is drawn) hid in two copies in a row are not drawn, while the camera
+  // stands nearly still (0.25 m, 1 degree) and nothing nearer than depth_reuse_min meters covers
+  // them (docs/3ds-port/culling.md). Off: not yet seen on a console
+  bool depth_reuse = false;
+  float depth_reuse_min = 20.f;
   // (AI-assisted) c3l v17 tie levels of detail: the instance groups that have a near version
   // (geometry 0) are drawn with it within their PS2 distance, else with the far one (geometry 3).
   // off: the far versions only (as before v17)
