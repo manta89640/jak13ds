@@ -216,8 +216,8 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   Bucket* m_last_bucket_ptr = nullptr;
   bool m_hud_dump = false;  // (AI-assisted, fable1) host: this frame's HUD sprites to the log
   float m_corner_reach = 0;
-  // per frame: the corners' texture coordinates ([1]: for the procedural texture, centered on 0)
-  float m_st_out[2][4][2] = {};
+  // per frame: the corners' texture coordinates
+  float m_st_out[4][2] = {};
   // (AI-assisted) game version (see the constructor): GS y to clip y
   bool m_jak2 = false;
   float m_inv_y = 1.f / 112.f;

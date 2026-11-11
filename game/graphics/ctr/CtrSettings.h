@@ -213,8 +213,6 @@ struct CtrSettings {
   // sprite and HUD textures in the smallest 3DS format that holds them (8 / 16 bits per texel),
   // and in reserved VRAM (with vram_textures)
   bool compact_textures = true;
-  // glows (radial gradient textures) from the procedural texture unit: no texels read
-  bool proctex_glows = true;
   // (AI-assisted) blended world sprites drop their alpha 0 fragments (alpha test, where alpha 0
   // adds nothing): no framebuffer traffic for them; the picture is the same. off: no alpha test
   bool sprite_alpha_discard = true;
