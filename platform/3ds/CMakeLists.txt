@@ -220,7 +220,20 @@ file(GLOB OG3DS_MIPS2C_JAK1 ${OG_ROOT}/game/mips2c/jak1_functions/*.cpp)
 # to 2.3x fewer ARM instructions per call than -O2 (test/mips2c_native/run.sh bench), same results
 # (the differential tests pass with NATIVE_EXTRA_FLAGS=-O3).
 file(GLOB OG3DS_MIPS2C_NATIVE ${OG_ROOT}/game/mips2c/jak1_functions/native_*.cpp)
-set_source_files_properties(${OG3DS_MIPS2C_NATIVE} PROPERTIES COMPILE_OPTIONS "-O3")
+# (AI-assisted, sched) optionally unrolled. GCC already schedules for the ARM11 (sched1 with
+# register pressure, the VFP11's 8-cycle latency), but a loop body of four independent float
+# chains waits half its issue slots; unrolled by two there are eight, though only where the
+# compiler knows the loads and stores don't alias (platform/3ds/tools/vfp11_cycles.py on a
+# mat4 x vec4 loop: ~29% fewer cycles a point through __restrict pointers, none through plain
+# ones, which the natives' loops over GOAL memory mostly are). It costs 22% more native code
+# (488 -> 597 KB). The same results (test/mips2c_native/run.sh arm, NATIVE_EXTRA_FLAGS="-O3
+# -funroll-loops": every native test as before). Off until cpu_bench's vfp.xform256* say so.
+option(OG3DS_NATIVE_UNROLL "unroll the native mips2c replacements' loops (-funroll-loops)" OFF)
+set(OG3DS_NATIVE_OPT "-O3")
+if(OG3DS_NATIVE_UNROLL)
+  set(OG3DS_NATIVE_OPT "-O3;-funroll-loops")
+endif()
+set_source_files_properties(${OG3DS_MIPS2C_NATIVE} PROPERTIES COMPILE_OPTIONS "${OG3DS_NATIVE_OPT}")
 set(OG3DS_RUNTIME_SOURCES
   graphics/gfx.cpp
   graphics/display.cpp
@@ -299,7 +312,7 @@ if(OG3DS_GAME STREQUAL "jak2")
   file(GLOB OG3DS_MIPS2C_JAK2 ${OG_ROOT}/game/mips2c/jak2_functions/*.cpp)
   # (AI-assisted) Jak 2's natives (native_*.cpp, native2_*.cpp): -O3 like Jak 1's (see above)
   file(GLOB OG3DS_MIPS2C_NATIVE_JAK2 ${OG_ROOT}/game/mips2c/jak2_functions/native*.cpp)
-  set_source_files_properties(${OG3DS_MIPS2C_NATIVE_JAK2} PROPERTIES COMPILE_OPTIONS "-O3")
+  set_source_files_properties(${OG3DS_MIPS2C_NATIVE_JAK2} PROPERTIES COMPILE_OPTIONS "${OG3DS_NATIVE_OPT}")
   list(APPEND OG3DS_MIPS2C_JAK2 ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_jak2_stubs.cpp)
 endif()
 list(TRANSFORM OG3DS_RUNTIME_SOURCES PREPEND ${OG_ROOT}/game/)

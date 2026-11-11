@@ -1786,3 +1786,28 @@ slots and code size (48 fewer instructions per bone, the FPSCR writes aside): cp
 `bones.mtx_scalar32` / `bones.mtx_vector32` price it on a console. Checked under qemu-arm (ARM11
 MPCore): bit-identical output with both FPSCR settings. Not known: whether Azahar (dynarmic)
 emulates short vectors; check a frame there before turning it on.
+
+### 3. Scheduling for the VFP11's latency (sched)
+
+GCC 13 already runs both scheduling passes for this target at `-O2`, with register pressure
+(`-Q --help=optimizers -march=armv6k -mtune=mpcore`: `-fschedule-insns`, `-fsched-pressure`,
+`-fschedule-insns2` enabled), and `-mtune=mpcore` schedules for the ARM11 (its output differs from
+`-mtune=cortex-a8`). `-fmodulo-sched` and `-O3` leave a mat4 x vec4 loop as it was. What is left:
+a loop body of four independent float chains still waits about half its issue slots for the
+8-cycle results; `-funroll-loops` (which also renames registers, so two iterations' chains
+overlap; `#pragma GCC unroll` alone doesn't) brings that loop from 41 to 29 cycles a point, but
+only when the compiler knows the stores don't alias the next loads (`__restrict`, not inlined
+into code that loses it). The natives' loops over GOAL memory mostly use plain pointers, and
+`-funroll-loops` makes their code 22% larger (488 -> 597 KB, the ARM test build).
+
+- `platform/3ds/tools/vfp11_cycles.py FILE.s FUNCTION LABEL`: an in-order issue / latency model
+  of a loop body in GCC's assembly (VFP arithmetic 8 cycles, divide / square root 19, VFP load 4,
+  `vmrs` waits for the VFP). It doesn't model branches, mispredicts or caches: for straight-line
+  float loops only.
+- CMake option `OG3DS_NATIVE_UNROLL` (default OFF): `-O3 -funroll-loops` for the natives.
+  `test/mips2c_native/run.sh arm` with `NATIVE_EXTRA_FLAGS="-O3 -funroll-loops"`: every native
+  test that passes without it passes with it (60 under qemu-arm, cortex-a8: the harness's
+  Ubuntu libc is ARMv7; `sp-launch-particles-var` fails with and without). The harness links again
+  (`fakes.cpp`: the log's level check and config.ini lookups).
+- cpu_bench `vfp.xform256` / `vfp.xform256_unrolled`: the loop through `__restrict` pointers as
+  compiled and with `-funroll-loops` (the same checksum): the best case, priced on a console.

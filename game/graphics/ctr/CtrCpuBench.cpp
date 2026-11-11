@@ -301,6 +301,63 @@ uint32_t planes3_signs(uint32_t n) {
   return seen;
 }
 
+// ---- (AI-assisted, sched) a mat4 x vec4 loop (sprites, shadows, particles have its shape): as
+// GCC schedules it (four independent chains per point against the VFP's 8-cycle latency) and
+// unrolled by two (eight chains; platform/3ds/tools/vfp11_cycles.py: ~29% fewer cycles a point) ----
+constexpr int kPts = 256;
+float g_pts[kPts * 4] __attribute__((aligned(16)));
+float g_xo[kPts * 4] __attribute__((aligned(16)));
+float g_m[16];
+void fill_points() {
+  for (int i = 0; i < kPts * 4; i++) {
+    g_pts[i] = g_tab[i & (kTab - 1)] - 0.5f;
+  }
+  for (int i = 0; i < 16; i++) {
+    g_m[i] = g_tab[(7 * i + 3) & (kTab - 1)];
+  }
+}
+uint32_t xform_hash() {
+  uint32_t h = 2166136261u;
+  for (int i = 0; i < kPts * 4; i++) {
+    h = (h ^ fbits(g_xo[i])) * 16777619u;
+  }
+  return h;
+}
+// the loop through __restrict pointers (not inlined, so the restrict holds), as GCC compiles it
+// and with -funroll-loops (GCC only: the optimize attribute; -funroll-loops also renames
+// registers, so the two points of a body can overlap, which `#pragma GCC unroll` alone doesn't)
+#define CB_XFORM_LOOP                                                   \
+  for (int i = 0; i < kPts; i++) {                                      \
+    const float x = v[4 * i], y = v[4 * i + 1], z = v[4 * i + 2];       \
+    o[4 * i] = m[0] * x + m[4] * y + m[8] * z + m[12];                  \
+    o[4 * i + 1] = m[1] * x + m[5] * y + m[9] * z + m[13];              \
+    o[4 * i + 2] = m[2] * x + m[6] * y + m[10] * z + m[14];             \
+    o[4 * i + 3] = m[3] * x + m[7] * y + m[11] * z + m[15];             \
+  }
+CB_NOINLINE void xform_once(const float* __restrict m, const float* __restrict v,
+                            float* __restrict o) {
+  CB_XFORM_LOOP
+}
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("unroll-loops")))
+#endif
+CB_NOINLINE void xform_once_unrolled(const float* __restrict m, const float* __restrict v,
+                                     float* __restrict o) {
+  CB_XFORM_LOOP
+}
+uint32_t xform_plain(uint32_t n) {
+  for (uint32_t r = 0; r < n; r++) {
+    xform_once(g_m, g_pts, g_xo);
+  }
+  return xform_hash();
+}
+uint32_t xform_unrolled(uint32_t n) {
+  for (uint32_t r = 0; r < n; r++) {
+    xform_once_unrolled(g_m, g_pts, g_xo);
+  }
+  return xform_hash();
+}
+
 }  // namespace
 }  // namespace ctr_cpu_bench
 #include "game/mips2c/native_bones_vfp.h"
@@ -371,6 +428,8 @@ const Case kCases[] = {
     {"mem.line256k", mem_line, 20, nullptr},
     {"cull.planes3_branch", planes3_branch, 1000000, nullptr},
     {"cull.planes3_signs", planes3_signs, 1000000, "cull.planes3_branch"},
+    {"vfp.xform256", xform_plain, 2000, nullptr},
+    {"vfp.xform256_unrolled", xform_unrolled, 2000, "vfp.xform256"},
 #ifdef BONES_VFP_ASM
     {"bones.mtx_scalar32", bones_scalar, 5000, nullptr},
     {"bones.mtx_vector32", bones_vector, 5000, "bones.mtx_scalar32"},
@@ -387,6 +446,7 @@ const Case* cases(int* count) {
 int run(double scale, void (*line)(const char* text, void* ctx), void* ctx) {
   fill_tables();
   fill_spheres();
+  fill_points();
 #ifdef BONES_VFP_ASM
   fill_bones();
 #endif

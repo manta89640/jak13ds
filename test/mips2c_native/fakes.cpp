@@ -62,7 +62,19 @@ u32 pc_rand() {
 }
 namespace lg::internal {
 void log_message(level, LogTime&, const char*) {}
+// (AI-assisted, sched) the log's level check (log.h, newer than these fakes): nothing is logged
+bool enabled(level) {
+  return false;
+}
 }  // namespace lg::internal
+// (AI-assisted, sched) config.ini (platform/3ds/port/ctr_port.c; the ARM config builds with
+// -D__3DS__): no key set, every native reads its default
+extern "C" int ctr_config_get(const char*, char*, int) {
+  return 0;
+}
+extern "C" int ctr_config_bool(const char*, int def) {
+  return def;
+}
 namespace Mips2C {
 bool native_turned_off(const std::string&) {
   return false;
