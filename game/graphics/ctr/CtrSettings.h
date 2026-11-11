@@ -181,10 +181,6 @@ struct CtrSettings {
   // in gk.log and data/log/bench.txt, platform/3ds/tools/bench_report.py). Its last tests use
   // shaders never run on hardware: a hang there names the test in bench.txt. Hardware only.
   bool pica_bench = false;
-  // (AI-assisted, onebone) merc draws whose palette has one bone with ctr_skin_opt1 (5 blend
-  // instructions per vertex instead of 11; rounding-level differences). Off until pica_bench
-  // B3.skin_opt1 and a console say so (needs shader_opt's program set)
-  bool merc_one_bone = true;
   // (AI-assisted) 3DS hardware features (docs/3ds-port/config_ini.md):
   // sprite and HUD textures in the smallest 3DS format that holds them (8 / 16 bits per texel),
   // and in reserved VRAM (with vram_textures)

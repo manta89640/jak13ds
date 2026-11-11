@@ -467,8 +467,6 @@ void ctr_gpu_note_release(unsigned int release);
 void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* dropped,
                           double* buffer_wait_ms, unsigned int* just_in_time, int* floor);
 void ctr_gpu_set_proctex(int on);
-/* (AI-assisted, onebone) config.ini merc_one_bone: one-bone palettes' draws with ctr_skin_opt1 */
-void ctr_gpu_set_merc_one_bone(int on);
 void ctr_gpu_set_compact_textures(int on);
 /* (AI-assisted) Overlap: hand the draws so far to the GPU in the middle of a frame (after a
  * renderer bucket, when enough draws piled up), so the GPU draws them while the CPU builds the

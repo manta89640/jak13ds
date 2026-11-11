@@ -190,8 +190,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.gpu_perflog = parse_bool(v);  // (AI-assisted)
     } else if (key == "pica_bench") {
       s.pica_bench = parse_bool(v);  // (AI-assisted)
-    } else if (key == "merc_one_bone") {
-      s.merc_one_bone = parse_bool(v);  // (AI-assisted, onebone)
     } else if (key == "compact_textures") {
       s.compact_textures = parse_bool(v);
     } else if (key == "proctex_glows") {

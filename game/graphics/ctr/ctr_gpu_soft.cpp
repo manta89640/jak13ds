@@ -3819,7 +3819,6 @@ void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* drop
 }
 void ctr_gpu_want_detailed_stats(void) {}
 void ctr_gpu_set_proctex(int) {}
-void ctr_gpu_set_merc_one_bone(int) {}  // (AI-assisted, onebone) the soft GPU draws merc its way
 void ctr_gpu_set_compact_textures(int) {}
 int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int /*flags*/) {
   return ctr_gpu_tex_create(w, h, rgba);
