@@ -3922,7 +3922,6 @@ int ctr_gpu_tex_radial(int) {
 void ctr_gpu_set_overlap(int) {}
 void ctr_gpu_set_raw_cmds(int) {}
 void ctr_gpu_set_cmd_dedup(int, int) {}  // (AI-assisted) no command lists here
-void ctr_gpu_set_cmd_dump(int) {}  // (AI-assisted)
 // (AI-assisted, gpu-rt) a pass's level draws, one by one
 void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n) {
   for (int i = 0; i < n; i++) {
@@ -3948,7 +3947,6 @@ void ctr_gpu_phase(int) {}
 int ctr_gpu_breakdown_line(char*, int, const char*) {
   return 0;
 }
-void ctr_gpu_cmd_dump_next(void) {}
 void ctr_gpu_set_asm_tex(int) {}
 void ctr_gpu_set_defer_flush(int) {}
 void ctr_gpu_set_shader_basic(int) {}

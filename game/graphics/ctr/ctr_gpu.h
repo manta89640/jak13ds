@@ -538,11 +538,6 @@ enum {
 void ctr_gpu_set_gpu_breakdown(int on);
 void ctr_gpu_phase(int phase);
 int ctr_gpu_breakdown_line(char* out, int size, const char* label);
-/* (AI-assisted) config.ini cmd_dump: write a frame's GPU command list every 20 s (diagnostic,
- * platform/3ds/tools/cmd_report.py) */
-void ctr_gpu_set_cmd_dump(int on);
-/* (AI-assisted) the next finished frame's command list too (pad script "set cmd_dump on") */
-void ctr_gpu_cmd_dump_next(void);
 /* (AI-assisted) hardware hang bisect (config.ini asm_tex, CtrSettings.h). asm_tex 0: the old per
  * texel texture tiling loops (no LDM/STM, no 64-bit stores). */
 void ctr_gpu_set_asm_tex(int on);

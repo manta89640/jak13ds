@@ -117,7 +117,7 @@ static const ctr_cfg_alias ctr_cfg_aliases[] = {
  * in CtrSettings.h). The callers' own fallbacks only matter without this table. */
 static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"sound", "on"},
-    {"gpu_micro", "on"}, {"gpu_micro_ident", "off"}, /* micro-gpu */
+    {"gpu_micro", "on"}, /* micro-gpu */
     {"sound_core", "auto"}, /* 1 (the system core, with a share of it) */
 #if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
     /* (AI-assisted) Jak II's kernel starts the IOP from the "DVD" without -fakeiso */
@@ -183,7 +183,7 @@ static const char* const ctr_cfg_removed[] = {
     "impostors", "impostor_distance", "impostor_error", "impostor_budget", "impostor_atlas",
     "fine_vis", "fine_vis_kb", "occ_cull", "occ_cull_tris", "occ_cull_dist", "vista_untextured",
     /* renderer strip: removed with their code */
-    "cpu_bench",
+    "gpu_micro_ident", "cmd_dump", "cpu_bench",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

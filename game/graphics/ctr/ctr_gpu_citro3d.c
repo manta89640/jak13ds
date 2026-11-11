@@ -765,9 +765,6 @@ static C3D_ProcTexLut s_proc_map; /* the identity: distance -> color table posit
 static const C3D_ProcTexLut* s_proc_lut_map_gpu;
 static const C3D_ProcTexColorLut* s_proc_lut_color_gpu;
 static u32 s_proc_lut_epoch;
-/* what they were at the frame begin (cmd_dump's prologue: state from frames before) */
-static const C3D_ProcTexLut* s_proc_lut_map_f0;
-static const C3D_ProcTexColorLut* s_proc_lut_color_f0;
 
 static void proc_lut_forget(const C3D_ProcTexColorLut* lut);
 /* the texels of a slot: freed (or given back to the reserved VRAM) */
@@ -1467,9 +1464,7 @@ int ctr_config_bool(const char* key, int def); /* platform/3ds/port */
 
 /* (AI-assisted, micro-gpu) config.ini gpu_micro (default on; off: every micro-gpu change of the
  * command stream and its submission back to the Oct 17 behaviour, for the safe preset):
- * the bits of s_micro. gpu_micro_ident = on (a test): each cmd_dump request dumps a frame with
- * s_micro = 0 and the frame after the next with all on (the same vertex buffer copy), for
- * cmd_report.py --kicks. */
+ * the bits of s_micro. */
 enum {
   MICRO_RESIDENT = 1,   /* shader_resident's one code image */
   MICRO_TEXREGS = 2,    /* texture unit 0: only the registers that change (with cmd_dedup) */
@@ -1487,8 +1482,6 @@ enum {
 static u32 s_micro = MICRO_ALL;
 static u32 s_micro_cfg = MICRO_ALL; /* config.ini gpu_micro's */
 static volatile u32 s_micro_want; /* (AI-assisted, micro-mg) ctr_gpu_set_micro_mask's (bit 31: set) */
-static int s_micro_ident;    /* gpu_micro_ident */
-static int s_micro_ident_st; /* its steps (ctr_gpu_frame_begin) */
 /* the programs' DVLEs as their shbins have them and in the image (res_apply) */
 static struct {
   DVLE_s* dvle;
@@ -2001,11 +1994,9 @@ int ctr_gpu_init(void) {
   printf("[ctr] fog_alpha program: %s\n",
          s_ps[0].fa_ok ? "ready" : (g.mesh_fa_dvlb ? "uniforms don't match, off" : "none for this mesh shader, off"));
   load_opt_set(); /* (AI-assisted) config.ini shader_opt's programs (set 1) */
-  /* (AI-assisted, micro-gpu) config.ini gpu_micro, gpu_micro_ident */
+  /* (AI-assisted, micro-gpu) config.ini gpu_micro */
   s_micro = s_micro_cfg = ctr_config_bool("gpu_micro", 1) ? MICRO_ALL : 0;
-  s_micro_ident = ctr_config_bool("gpu_micro_ident", 0);
-  printf("[ctr] gpu_micro: %s%s\n", s_micro ? "on" : "off",
-         s_micro_ident ? " (gpu_micro_ident: dumps off / on pairs)" : "");
+  printf("[ctr] gpu_micro: %s\n", s_micro ? "on" : "off");
   resident_programs(g.ps); /* (AI-assisted, micro-gpu) shader_resident (gpu_micro) */
   g.cur_prog = PROG_NONE;
   /* (AI-assisted) the procedural texture unit for radial textures (CTR_STATE_PROCTEX): distance
@@ -2243,9 +2234,6 @@ static void res_apply(int on) {
 static void proc_lut_forget(const C3D_ProcTexColorLut* lut) {
   if (s_proc_lut_color_gpu == lut) {
     s_proc_lut_color_gpu = NULL;
-  }
-  if (s_proc_lut_color_f0 == lut) {
-    s_proc_lut_color_f0 = NULL;
   }
   if (__C3D_Context.procTexColorLut == lut) {
     C3D_ProcTexColorLutBind(NULL);
@@ -3599,24 +3587,12 @@ static void pipeline_submit(void) {
   gx_end();
 }
 
-static volatile int s_cmd_dump_next;
-static void proc_lut_snapshot(void);
 void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   if (!g.ready) {
     return;
   }
   apt_gate_enter(); /* (AI-assisted, gpu-home) waits while the HOME Menu or sleep has the GPU */
   anim_slots_frame_begin(); /* (AI-assisted) */
-  if (s_micro_ident_st) {
-    /* (AI-assisted, micro-gpu) gpu_micro_ident: frame k with everything off (dumped), k + 1 on,
-     * k + 2 on (dumped): k and k + 2 draw from the same vertex buffer copy */
-    const int st = s_micro_ident_st;
-    s_micro = st == 1 ? 0 : s_micro_cfg;
-    s_micro_ident_st = st == 3 ? 0 : st + 1;
-    if (st != 2) {
-      s_cmd_dump_next = 1;
-    }
-  }
   if (s_micro_want) {
     /* (AI-assisted, micro-mg) ctr_gpu_set_micro_mask (a test): from this frame on */
     s_micro = s_micro_cfg = s_micro_want & MICRO_ALL;
@@ -3624,7 +3600,6 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
     printf("[ctr] gpu_micro mask 0x%lx\n", (unsigned long)s_micro);
   }
   res_apply((s_micro & MICRO_RESIDENT) != 0); /* (AI-assisted, micro-gpu) */
-  proc_lut_snapshot();
   /* texture combiner constant: R in the low byte */
   g.clear_abgr = 0xff000000u | ((u32)b << 16) | ((u32)gr << 8) | (u32)r;
   s_sky_hook = NULL; /* (AI-assisted) sky_last: a hook left from a frame that didn't end */
@@ -3917,81 +3892,6 @@ static unsigned int linear_largest_block(void) {
   return lo;
 }
 
-/* (AI-assisted) config.ini cmd_dump: a frame's whole GPU command list written to
- * sdmc:/3ds/jak1/data/log/cmd_NN.bin every CMD_DUMP_EVERY frames (at most CMD_DUMP_MAX files), for
- * platform/3ds/tools/cmd_report.py (command words per draw kind, register writes that change
- * nothing). Header: "CMDD", frame number, word count; then the words. A diagnostic: the write
- * stalls the render thread for a moment. */
-#define CMD_DUMP_EVERY 600
-#define CMD_DUMP_MAX 12
-static int s_cmd_dump, s_cmd_dumps;
-void ctr_gpu_set_cmd_dump(int on) {
-  s_cmd_dump = on ? 1 : 0;
-}
-void ctr_gpu_cmd_dump_next(void) {
-  if (s_micro_ident) {
-    /* (AI-assisted, micro-gpu) gpu_micro_ident: the off / on pair (ctr_gpu_frame_begin) */
-    if (!s_micro_ident_st) {
-      s_micro_ident_st = 1;
-    }
-    return;
-  }
-  s_cmd_dump_next = 1;
-}
-static inline u32* raw_w(u32* p, u32 reg, u32 mask, u32 v);
-static inline u32* raw_n(u32* p, u32 reg, const u32* v, u32 n, int seq);
-static void cmd_dump_frame(void) {
-  const int periodic = s_cmd_dump && g.frame_no % CMD_DUMP_EVERY == CMD_DUMP_EVERY / 2;
-  if ((!periodic && !s_cmd_dump_next) || s_cmd_dumps >= CMD_DUMP_MAX * 2) {
-    return;
-  }
-  s_cmd_dump_next = 0;
-  const u32 words = (u32)(gpuCmdBuf + gpuCmdBufOffset - g.cmd_base);
-  char path[64];
-  snprintf(path, sizeof(path), "sdmc:/3ds/jak1/data/log/cmd_%02d.bin", s_cmd_dumps++);
-  FILE* f = fopen(path, "wb");
-  if (!f) {
-    return;
-  }
-  if (s_res_on || s_proc_lut_map_f0 || s_proc_lut_color_f0) {
-    /* (AI-assisted, micro-gpu) GPU memory the frame doesn't write but its draws use, from frames
-     * before (shader_resident's code image, the procedural texture tables as they were at the
-     * frame begin), as the commands that put it there: the file starts with them ("CMDE": a
-     * fourth header word, the prologue's word count; cmd_report.py --kicks runs it before the
-     * frame) */
-    static u32 pro[8 + 512 + 128 + 16 + 3 * 260];
-    u32* p = pro;
-    if (s_res_on) {
-      p = raw_w(p, GPUREG_VSH_CODETRANSFER_CONFIG, 0xF, 0);
-      for (u32 i = 0; i < s_res_dvlp.codeSize; i += 128) {
-        const u32 left = s_res_dvlp.codeSize - i;
-        p = raw_n(p, GPUREG_VSH_CODETRANSFER_DATA, s_res_code + i, left < 128 ? left : 128, 0);
-      }
-      p = raw_w(p, GPUREG_VSH_OPDESCS_CONFIG, 0xF, 0);
-      p = raw_n(p, GPUREG_VSH_OPDESCS_DATA, s_res_desc, s_res_dvlp.opdescSize, 0);
-    }
-    if (s_proc_lut_map_f0) {
-      p = raw_w(p, GPUREG_PROCTEX_LUT, 0xF, (u32)GPU_LUT_RGBMAP << 8);
-      p = raw_n(p, GPUREG_PROCTEX_LUT_DATA0, *s_proc_lut_map_f0, 128, 0);
-    }
-    if (s_proc_lut_color_f0) {
-      p = raw_w(p, GPUREG_PROCTEX_LUT, 0xF, (u32)GPU_LUT_COLOR << 8);
-      p = raw_n(p, GPUREG_PROCTEX_LUT_DATA0, s_proc_lut_color_f0->color, 256, 0);
-      p = raw_w(p, GPUREG_PROCTEX_LUT, 0xF, (u32)GPU_LUT_COLORDIF << 8);
-      p = raw_n(p, GPUREG_PROCTEX_LUT_DATA0, s_proc_lut_color_f0->diff, 256, 0);
-    }
-    const u32 hdr[4] = {0x45444d43u, (u32)g.frame_no, words, (u32)(p - pro)};
-    fwrite(hdr, 4, 4, f);
-    fwrite(pro, 4, (size_t)(p - pro), f);
-  } else {
-    const u32 hdr[3] = {0x44444d43u, (u32)g.frame_no, words};
-    fwrite(hdr, 4, 3, f);
-  }
-  fwrite(g.cmd_base, 4, words, f);
-  fclose(f);
-  printf("[ctr] cmd_dump: frame %d, %lu words -> %s\n", g.frame_no, (unsigned long)words, path);
-}
-
 void ctr_gpu_frame_end(void) {
   if (!g.ready || !g.in_frame) {
     if (g.ready) {
@@ -4028,7 +3928,6 @@ void ctr_gpu_frame_end(void) {
   /* the command words of the whole frame (splits move gpuCmdBuf on; C3D_FrameBegin restarts it) */
   if (!bd) {
     g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base) * 4);
-    cmd_dump_frame();
   }
   /* (AI-assisted) frame_overlap2: 0 the old frame end, 1 the list cleaned before the wait, 2 no
    * wait (the list queued behind the frame the GPU draws) */
@@ -6260,13 +6159,6 @@ static void raw_check_epoch(void) {
     g.last_skin_valid = 0;
     g.skin_bl_valid = 0; /* (AI-assisted) */
   }
-}
-
-/* (AI-assisted, micro-gpu) the procedural texture tables in the GPU at the frame begin (cmd_dump) */
-static void proc_lut_snapshot(void) {
-  const int ok = s_proc_lut_epoch == s_raw.apt_epoch;
-  s_proc_lut_map_f0 = ok ? s_proc_lut_map_gpu : NULL;
-  s_proc_lut_color_f0 = ok ? s_proc_lut_color_gpu : NULL;
 }
 
 /* before a raw draw's uniforms and the draw: citro3d sends what it has pending. (AI-assisted,

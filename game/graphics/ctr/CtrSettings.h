@@ -409,9 +409,6 @@ struct CtrSettings {
   // is >= 0x80 (kDrawAlphaTestDropped / kDrawBlendDropped: they can't change a pixel) stay out; off
   // puts them back. Each frame (gpu_profile = ab). Older files: no such draws
   bool opaque_alpha = true;
-  // (AI-assisted) cmd_dump: a frame's GPU command list to data/log/cmd_NN.bin every 20 s
-  // (platform/3ds/tools/cmd_report.py); diagnostic, off
-  bool cmd_dump = false;
   // (AI-assisted) tex_cache_clear = always | uploads (default): always clears the GPU's texture
   // cache at every texture bind (citro3d's way, ~300 per frame); uploads skips it only for binds
   // that keep a level pool texture and change its sampling settings (switches between level pool

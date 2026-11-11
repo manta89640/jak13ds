@@ -168,10 +168,6 @@ bool pad_set(const char* key, const char* value) {
     return ctr_level_host_cam_path(value);
   }
 #endif
-  if (!strcmp(key, "cmd_dump")) {
-    ctr_gpu_cmd_dump_next();  // (AI-assisted) "set cmd_dump on": the next frame's command list
-    return true;
-  }
   if (!strcmp(key, "gpu_micro_mask")) {
     // (AI-assisted, micro-mg) a test: gpu_micro's changes as bits (old / new in one run)
     ctr_gpu_set_micro_mask((unsigned int)strtoul(value, nullptr, 0));
@@ -1577,7 +1573,6 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_mip_mode(ctr_settings().mipmaps);
   ctr_gpu_set_overlap(ctr_settings().overlap ? 1 : 0);
   ctr_gpu_set_raw_cmds(ctr_settings().raw_cmds ? 1 : 0);
-  ctr_gpu_set_cmd_dump(ctr_settings().cmd_dump ? 1 : 0);  // (AI-assisted)
   ctr_gpu_set_gpu_breakdown(ctr_settings().gpu_breakdown ? 1 : 0);  // (AI-assisted, gpu-rt)
 #ifdef __3DS__
   if (ctr_settings().gpu_perflog) {

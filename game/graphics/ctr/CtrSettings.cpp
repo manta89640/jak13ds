@@ -329,8 +329,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.ocean_tex_half = parse_bool(v);  // (AI-assisted, gpu-rt)
     } else if (key == "opaque_alpha") {
       s.opaque_alpha = parse_bool(v);  // (AI-assisted)
-    } else if (key == "cmd_dump") {
-      s.cmd_dump = parse_bool(v);  // (AI-assisted)
     } else if (key == "tex_cache_clear") {
       s.tex_cache_uploads = v == "uploads";  // (AI-assisted) always | uploads
     } else if (key == "asm_tex") {
@@ -355,7 +353,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
                key == "log_async" || key == "c3l_read_buffer" || key == "text_scale" ||
                key == "text_min_height" ||
                key == "button_art" || key == "preset" || key == "gpu_micro" ||
-               key == "gpu_micro_ident" || key == "vram_probe" ||
+               key == "vram_probe" ||
                ctr_cfg_is_user_alias(key.c_str())) {
       // not the renderer's (preset, particles, text_size: ctr_config_presets.h, applied as the
       // keys they stand for) (platform/3ds/port/ctr_port.c, mips2c_native.cpp, kperf.cpp,
@@ -558,7 +556,7 @@ std::string CtrSettings::summary() const {
       "ocean_tex_half {} fast_clock {} "
       // (AI-assisted) Oct 16: the rest of the keys, so the line holds every setting
       "fog_start {:.2f} overlap {} frame_pacing {} fps_cap {} ocean_texture_rate {} ocean_near_alpha {:.2f} "
-      "shader_basic {} defer_flush {} cmd_dump {} render_watchdog {} stats_period {:.0f}s "
+      "shader_basic {} defer_flush {} render_watchdog {} stats_period {:.0f}s "
       "color_stream {}"
       "{}{}{}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale,
@@ -618,7 +616,7 @@ std::string CtrSettings::summary() const {
       ocean_tex_half ? "on" : "off",
       fast_clock ? "on" : "off", fog_start, overlap ? "on" : "off", steady_pacing ? "steady" : "fast",
       fps_cap, ocean_texture_rate, ocean_near_alpha, shader_basic ? "new" : "old",
-      defer_flush ? "on" : "off", cmd_dump ? "on" : "off", render_watchdog ? "on" : "off",
+      defer_flush ? "on" : "off", render_watchdog ? "on" : "off",
       stats_period, color_stream ? "on" : "off",
       gpu_profile ? " gpu_profile" : "",
       gpu_counters ? " gpu_counters" : "",
