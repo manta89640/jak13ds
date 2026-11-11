@@ -334,8 +334,8 @@ typedef struct {
   u32 tail_off, tail_bytes; /* ctr_gpu_mesh_begin_tail / _ext_tail: at verts + tail_off */
   u32 col_off; /* ctr_gpu_mesh_split_colors: the colors' buffer at verts + col_off (0: none) */
   /* (AI-assisted, vramvtx) vram_vertices: a static mesh (ctr_gpu_mesh_create: merc models) may get
-   * a copy of its vertices in VRAM (vram_verts); vram_state 0 none, 1 copy queued (verts_pa moves
-   * to it from frame vram_frame), 2 in use */
+   * a copy of its vertices in VRAM (vram_verts; vram_want: the bytes to copy, 0: never); vram_state
+   * 0 none, 1 copy queued (verts_pa moves to it from frame vram_frame), 2 in use */
   void* vram_verts;
   int vram_want, vram_state, vram_frame;
   u32 lin_bytes; /* the linear heap's bytes of verts and indices (0: ext) */
@@ -2142,7 +2142,8 @@ void ctr_gpu_exit(void) {
                      g.env_dvlb,  g.clip_dvlb,  g.clip2_dvlb,   g.ocean_dvlb,
                      g.ocean_full_dvlb, g.ocean_full_clip_dvlb, g.ocean_env_dvlb, g.etie_dvlb,
                      g.wind_dvlb, g.skin_mask_dvlb[0], g.skin_mask_dvlb[1], g.etie_fa_dvlb,
-                     g.morph_dvlb[0], g.morph_dvlb[1], g.tmorph_dvlb[0], g.tmorph_dvlb[1]};
+                     g.morph_dvlb[0], g.morph_dvlb[1], g.tmorph_dvlb[0], g.tmorph_dvlb[1],
+                     g.skin1_dvlb};
   for (size_t i = 0; i < sizeof(dvlbs) / sizeof(dvlbs[0]); i++) {
     if (dvlbs[i]) {
       DVLB_Free(dvlbs[i]);
@@ -4605,6 +4606,8 @@ static void vram_copies_lost(int back) {
  * later, when no queued draw reads it). */
 #define VRAM_VTX_RESERVE (1536u * 1024u)
 #define VRAM_VTX_PER_FRAME 8
+#define VRAM_VTX_FRAME_BYTES (256u * 1024u) /* copied per frame (at least one mesh) */
+#define VRAM_VTX_SCAN 512                    /* mesh slots looked at per frame */
 #define VRAM_VTX_DEFER 64
 static int s_vram_vertices;
 static int s_vram_vtx_cursor;
@@ -4630,6 +4633,9 @@ static void vram_vertices_drop(MeshSlot* m) {
   m->vram_state = 0;
 }
 static void vram_vertices_release(int now) {
+  if (!s_vram_vtx_bytes) {
+    return; /* no copy made since the last release */
+  }
   ctr_linear_lock();
   for (int i = 0; i < MAX_MESHES; i++) {
     MeshSlot* m = &g.meshes[i];
@@ -4664,18 +4670,13 @@ static void vram_vertices_step(void) {
     }
   }
   s_vram_vtx_defer_n = kept;
-  if (!s_vram_vertices) {
-    int any = 0;
-    for (int i = 0; i < MAX_MESHES && !any; i++) {
-      any = g.meshes[i].vram_verts != NULL;
-    }
-    if (any) {
-      vram_vertices_release(0);
-    }
+  if (!s_vram_vertices || s_vram_failed) {
+    vram_vertices_release(0);
     return;
   }
   int started = 0;
-  for (int k = 0; k < MAX_MESHES && started < VRAM_VTX_PER_FRAME; k++) {
+  u32 copied = 0;
+  for (int k = 0; k < VRAM_VTX_SCAN && started < VRAM_VTX_PER_FRAME; k++) {
     const int i = (s_vram_vtx_cursor + k) % MAX_MESHES;
     MeshSlot* m = &g.meshes[i];
     if (m->used != 1) {
@@ -4691,10 +4692,13 @@ static void vram_vertices_step(void) {
       continue;
     }
     if (!m->vram_want || m->vram_verts || m->verts_alt || m->ext || m->tail_bytes ||
-        m->col_off || !m->fill_vbytes) {
+        m->col_off) {
       continue;
     }
-    const u32 bytes = (m->fill_vbytes + 15u) & ~15u;
+    const u32 bytes = ((u32)m->vram_want + 15u) & ~15u;
+    if (copied && copied + bytes > VRAM_VTX_FRAME_BYTES) {
+      break;
+    }
     if ((size_t)vramSpaceFree() < bytes + VRAM_VTX_RESERVE) {
       break;
     }
@@ -4714,9 +4718,10 @@ static void vram_vertices_step(void) {
     m->vram_state = 1;
     m->vram_frame = g.frame_no + 1;
     s_vram_vtx_bytes += bytes;
+    copied += bytes;
     started++;
   }
-  s_vram_vtx_cursor = (s_vram_vtx_cursor + 64) % MAX_MESHES;
+  s_vram_vtx_cursor = (s_vram_vtx_cursor + VRAM_VTX_SCAN) % MAX_MESHES;
 }
 
 /* At frame begin, before any draw: copy the pools that want to be in VRAM there, most wanted
@@ -6081,6 +6086,7 @@ static void apt_resume_state(void) {
   g.skin_bl_valid = 0;
   g.bound_tex = NULL;
   s_tex_dirty = 1;
+  vram_vertices_release(1); /* lost with vram_textures off too */
   if (g_vram_textures && !s_vram_failed) {
     vram_copies_lost(1);
   }
@@ -8931,7 +8937,8 @@ int ctr_gpu_mesh_create(const void* verts, int vertex_count, const uint16_t* ind
   memcpy(ix, indices, (size_t)index_count * 2);
   const int done = ctr_gpu_mesh_end(mesh, 1);
   if (done >= 0) {
-    g.meshes[done].vram_want = 1; /* (AI-assisted, vramvtx) never rewritten: may go to VRAM */
+    /* (AI-assisted, vramvtx) never rewritten: may go to VRAM (vram_want: the bytes to copy) */
+    g.meshes[done].vram_want = (int)g.meshes[done].fill_vbytes;
   }
   return done;
 }
@@ -9816,6 +9823,7 @@ int ctr_gpu_skinned_mesh_create(const void* verts, int vertex_count, const uint1
   g.meshes[slot].verts_alt = NULL;
   g.meshes[slot].vbytes = (uint32_t)vbytes;
   g.meshes[slot].alt_frame = -1;
+  g.meshes[slot].vram_want = (int)vbytes; /* vram_vertices: until the first rewrite */
   g.meshes[slot].used = 1;
   return slot;
 }
