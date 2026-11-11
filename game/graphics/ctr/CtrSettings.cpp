@@ -245,8 +245,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.depth_reuse_min = std::clamp(f, 5.f, 500.f);
     } else if (key == "tie_lod") {
       s.tie_lod = parse_bool(v);  // (AI-assisted) c3l v17
-    } else if (key == "color_stream") {
-      s.color_stream = parse_bool(v);
     } else if (key == "streaming") {
       s.streaming = parse_bool(v);  // (AI-assisted, streaming) c3l v19
     } else if (key == "stream_kb") {
@@ -520,8 +518,7 @@ std::string CtrSettings::summary() const {
       "ocean_tex_half {} fast_clock {} "
       // (AI-assisted) Oct 16: the rest of the keys, so the line holds every setting
       "fog_start {:.2f} overlap {} frame_pacing {} fps_cap {} ocean_texture_rate {} ocean_near_alpha {:.2f} "
-      "shader_basic {} defer_flush {} render_watchdog {} stats_period {:.0f}s "
-      "color_stream {}"
+      "shader_basic {} defer_flush {} render_watchdog {} stats_period {:.0f}s"
       "{}{}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale,
       // (AI-assisted) with auto_detail: the range the distances move in
@@ -568,7 +565,7 @@ std::string CtrSettings::summary() const {
       fast_clock ? "on" : "off", fog_start, overlap ? "on" : "off", steady_pacing ? "steady" : "fast",
       fps_cap, ocean_texture_rate, ocean_near_alpha, shader_basic ? "new" : "old",
       defer_flush ? "on" : "off", render_watchdog ? "on" : "off",
-      stats_period, color_stream ? "on" : "off",
+      stats_period,
       gpu_profile ? " gpu_profile" : "",
       gpu_counters ? " gpu_counters" : "",
       gpu_perflog ? " gpu_perflog" : "",

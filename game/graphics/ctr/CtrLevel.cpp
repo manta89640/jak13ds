@@ -1307,7 +1307,7 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
       }
       if (mesh >= 0) {
         MeshBuild mb(mesh);  // (AI-assisted, streammem)
-        const bool split = ctr_settings().color_stream;
+        const bool split = false;  // one interleaved stream (color_stream is gone)
         if (split) {
           ctr_gpu_mesh_split_colors(mesh);
         }
@@ -7688,7 +7688,7 @@ bool CtrLevels::load_file(const fs::path& path,
     }
     if (mesh >= 0) {
       MeshBuild mb(mesh);  // (AI-assisted, streammem)
-      const bool split = ctr_settings().color_stream;
+      const bool split = false;  // one interleaved stream (color_stream is gone)
       if (split) {
         ctr_gpu_mesh_split_colors(mesh);
       }
@@ -10001,7 +10001,7 @@ void CtrLevels::run_stream_job(const Job& job, Done* d, c3l::Reader::Buffers* bu
         break;  // (its piece back below)
       }
       live = mesh;
-      const bool split = ctr_settings().color_stream;
+      const bool split = false;  // one interleaved stream (color_stream is gone)
       if (split) {
         ctr_gpu_mesh_split_colors(mesh);
       }
