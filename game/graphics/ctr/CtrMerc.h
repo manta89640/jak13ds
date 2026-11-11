@@ -65,13 +65,11 @@ class CtrMercRenderer : public CtrBucketRenderer {
     int missing = 0;
     int draws = 0;
     int bad_bones = 0;
-    int env_batches = 0;  // (AI-assisted) envmap_batch: queues drawn
     int env_small = 0;    // (AI-assisted, fidelity2) envmap_min_px: shine draws left out
     // (AI-assisted, shinefold) shine draws over the same triangles as the opaque base draw just
     // before them: the ones a one-pass base + shine draw could replace (performance.md "11.")
     int env_foldable = 0;
     int env_drawn = 0;
-    int sorted_draws = 0;  // (AI-assisted) merc_tex_sort: draws drawn from the queue
     int gen_lod = 0;       // (AI-assisted) merc_gen_lod: models drawn with the generated LOD
     int culled = 0;        // (AI-assisted) cull_merc: draws drawn with back face culling
     int mirrored = 0;      // (AI-assisted) ... marked ones not culled: a bone mirrors
@@ -129,38 +127,6 @@ class CtrMercRenderer : public CtrBucketRenderer {
   static constexpr int kFindSlots = 64;
   FindSlot m_find[kFindSlots];
 
-  // (AI-assisted) config envmap_batch: the envmap draws of the bucket are queued and drawn
-  // together (one skin -> env -> skin program switch pair, and the skin draws keep their uniforms)
-  // at its end, or before a draw that would see them differently: one that blends or doesn't
-  // write depth (the shine adds Cs * Ad after the base it shines on, which the depth test of the
-  // base passes; an opaque draw in front hides it the same way before or after)
-  struct QueuedDraw {
-    ctr_draw_state st;
-    u32 clip, rows, lights;  // offsets in m_qdata
-    u32 rows_f24;            // (AI-assisted) offset in m_qf24 (~0u: none)
-    u32 bones_id;            // (AI-assisted) the palette's number (ctr_gpu_draw_skinned)
-    int palette_count;
-    float fade[4];
-    int mesh;
-    int first_index, index_count;
-    u32 model_rank, draw_index;  // merc_tex_sort: the order they're drawn in
-  };
-  std::vector<float> m_qdata;
-  // (AI-assisted) the queued palettes as skin_rows_f24 words (ctr_gpu_pack_skin_rows_f24)
-  std::vector<uint32_t> m_qf24;
-  std::vector<QueuedDraw> m_q_env;
-  u32 queue_floats(const float* src, int n);
-  void flush_env();
-  // (AI-assisted) config merc_tex_sort: the opaque depth-writing draws of models without blend
-  // shapes or rewritten vertices are queued too and drawn draw by draw across the instances of a
-  // model (draw 0 of every yeti, then draw 1, ...: each instance keeps its own draw order), so a
-  // texture is bound once for all of them. Flushed before a draw that blends or doesn't write
-  // depth, before the queued shine.
-  std::vector<QueuedDraw> m_q_opaque;
-  std::vector<u64> m_q_order;  // (AI-assisted) sort keys (flush_opaque)
-  std::vector<const void*> m_q_models;  // model rank -> model
-  void flush_opaque();
-  void flush_queues();
   // (AI-assisted) merc_gen_lod / envmap_min_px hysteresis: per drawn instance its model, its first
   // bone's place (world, from the frame's level camera; else camera space) and its decisions
   // (kInstUnknown: none yet). An instance takes over the decisions of the nearest unclaimed one of

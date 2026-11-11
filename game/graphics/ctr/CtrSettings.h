@@ -73,13 +73,6 @@ struct CtrSettings {
   // (AI-assisted, fidelity2) envmap_min_px: no shine pass for models smaller than this on the top
   // screen (their bounding sphere's diameter in pixels; 0 = every model). HUD models always keep it
   float envmap_min_px = 0.f;
-  // (AI-assisted) the envmap draws of a merc bucket queued and drawn together at its end (or before
-  // a blended / no depth write draw): one skin -> env shader switch pair instead of one per draw
-  bool envmap_batch = true;
-  // (AI-assisted) a merc bucket's opaque draws of models drawn more than once (crates, yetis, ...)
-  // drawn draw by draw across the instances: one texture bind per draw of the model instead of
-  // per instance, but the bones are uploaded for each draw then
-  bool merc_tex_sort = true;  // (AI-assisted) on: Snowy host stats -7..-45% merc texture binds
   // (AI-assisted) models with only lod0 (the yeti, ...) switch to the converter's generated low LOD
   // (c3l::kMercGenLodSuffix: same vertices, ~40-60% of the triangles) beyond max(25 m, 12.5 x the
   // model's size) x merc_lod_scale. Needs .c3l files from a converter with --gen-lod

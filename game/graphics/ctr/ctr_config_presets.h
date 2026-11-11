@@ -184,7 +184,7 @@ static const char* const ctr_cfg_removed[] = {
     "impostors", "impostor_distance", "impostor_error", "impostor_budget", "impostor_atlas",
     "fine_vis", "fine_vis_kb", "occ_cull", "occ_cull_tris", "occ_cull_dist", "vista_untextured",
     /* models / effects strip: removed with their code */
-    "ocean_near_alpha",
+    "ocean_near_alpha", "envmap_batch", "merc_tex_sort",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

@@ -400,7 +400,6 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     return;
   }
   g_bones.keep();  // (AI-assisted) the snapshot and game memory change before the next frame
-  flush_queues();
   m_snap_valid = false;  // used up: the next frame needs a new snapshot
   // (AI-assisted) the cost of the rewritten vertices, once per level (the first one drawn with
   // them) after a few seconds of updates
@@ -422,12 +421,12 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
   if (rs.log_now && m_stats.models) {
     lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones, {} with the generated low LOD), "
-              "{} draws, {} envmap batches ({} shine draws left out: envmap_min_px; {} drawn, {} "
-              "over their opaque base draw's triangles: foldable), {} draws sorted by texture, {} with back faces culled "
+              "{} draws ({} shine draws left out: envmap_min_px; {} drawn, {} "
+              "over their opaque base draw's triangles: foldable), {} with back faces culled "
               "({} not: mirroring bone), {} palette bones not sent, {} draws with fog",
               m_name, m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.gen_lod,
-              m_stats.draws, m_stats.env_batches, m_stats.env_small, m_stats.env_drawn,
-              m_stats.env_foldable, m_stats.sorted_draws, m_stats.culled,
+              m_stats.draws, m_stats.env_small, m_stats.env_drawn,
+              m_stats.env_foldable, m_stats.culled,
               m_stats.mirrored, m_stats.unsent_bones, m_stats.fogged);
     m_stats = Stats();
   }
@@ -562,83 +561,6 @@ void CtrMercRenderer::note_keira_shadow(const CtrMercModelData& model, u64 frame
   if (m_keira_shadow) {
     ctr_keira::note_shadow_frame(frame, &m_keira_shadow->view, (const float(*)[16])m_rig_mats);
   }
-}
-
-u32 CtrMercRenderer::queue_floats(const float* src, int n) {
-  const u32 at = (u32)m_qdata.size();
-  m_qdata.insert(m_qdata.end(), src, src + n);
-  return at;
-}
-
-void CtrMercRenderer::flush_env() {
-  if (!m_q_env.empty()) {
-    const float* d = m_qdata.data();
-    for (const auto& q : m_q_env) {
-      ctr_gpu_draw_skinned_env(&q.st, d + q.clip, d + q.rows, q.palette_count,
-                               q.rows_f24 == ~0u ? nullptr : m_qf24.data() + q.rows_f24,
-                               q.bones_id, q.fade, q.mesh, q.first_index, q.index_count);
-    }
-    m_stats.env_batches++;
-    m_q_env.clear();
-  }
-}
-
-void CtrMercRenderer::flush_opaque() {
-  if (m_q_opaque.empty()) {
-    return;
-  }
-  const u32 n = (u32)m_q_opaque.size();
-  // by texture (a bind clears the GPU's texture cache: each texture once for all the queued
-  // models), then model (in the order they came), draw and the instances in the order they came
-  // (the queue index). As one 64-bit key per draw (all distinct, so the same order as the
-  // comparison of the four), sorted without touching the queued draws
-  m_q_order.resize(n);
-  bool fits = n < (1u << 18);
-  for (u32 i = 0; i < n; i++) {
-    const auto& q = m_q_opaque[i];
-    const u32 tex = (u32)(q.st.tex + 1);
-    fits = fits && tex < (1u << 16) && q.model_rank < (1u << 14) && q.draw_index < (1u << 16);
-    m_q_order[i] = (u64)tex << 48 | (u64)q.model_rank << 34 | (u64)q.draw_index << 18 | i;
-  }
-  if (fits) {
-    std::sort(m_q_order.begin(), m_q_order.end());
-  } else {
-    // (never: more queued draws, textures, models or draws per model than the key holds)
-    for (u32 i = 0; i < n; i++) {
-      m_q_order[i] = i;
-    }
-    std::sort(m_q_order.begin(), m_q_order.end(), [&](u64 a, u64 b) {
-      const auto& qa = m_q_opaque[a];
-      const auto& qb = m_q_opaque[b];
-      if (qa.st.tex != qb.st.tex) {
-        return qa.st.tex < qb.st.tex;
-      }
-      if (qa.model_rank != qb.model_rank) {
-        return qa.model_rank < qb.model_rank;
-      }
-      if (qa.draw_index != qb.draw_index) {
-        return qa.draw_index < qb.draw_index;
-      }
-      return a < b;
-    });
-  }
-  const float* d = m_qdata.data();
-  for (u64 key : m_q_order) {
-    const auto& q = m_q_opaque[fits ? (u32)(key & 0x3ffff) : (u32)key];
-    ctr_gpu_draw_skinned(&q.st, d + q.clip, d + q.rows, q.palette_count,
-                         q.rows_f24 == ~0u ? nullptr : m_qf24.data() + q.rows_f24, q.bones_id,
-                         d + q.lights, q.mesh, q.first_index, q.index_count);
-  }
-  m_stats.sorted_draws += (int)n;
-  m_q_opaque.clear();
-  m_q_models.clear();
-}
-
-void CtrMercRenderer::flush_queues() {
-  flush_opaque();  // (the bases before their shine)
-  flush_env();
-  m_qdata.clear();
-  m_qf24.clear();
 }
 
 void CtrMercRenderer::apply_blerc(const CtrLevelData& lev,
@@ -1434,22 +1356,13 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   const CtrSettings& cs = ctr_settings();
   const bool cull_merc = cs.cull_merc && !hud_model;
   bool palette_mirrors = false;
-  // (AI-assisted) envmap_batch: this model's clip matrix and current palette in m_qdata (~0u: not
-  // there yet)
-  // merc_tex_sort: not for models whose vertices change per instance (blend shapes, rewritten
-  // vertices: one mesh); their shine is queued too then (its base may be in the queue)
-  const bool tex_sort = cs.merc_tex_sort && !model->blerc_count && model->mod.empty();
-  const bool env_batch = cs.envmap_batch || tex_sort;
-  u32 q_clip = ~0u, q_rows = ~0u, q_lights = ~0u;
-  u32 model_rank = ~0u;
   // (AI-assisted) the palette's number for the GPU (new with every palette made) and its float24
-  // words for skin_rows_f24, made once per palette (not at every upload: the shine pass and the
-  // texture sorted draws upload a palette again after other models' palettes)
+  // words for skin_rows_f24, made once per palette (not at every upload: the shine pass uploads
+  // a palette again)
   u32 palette_id = 0;
   const bool rows_f24 = ctr_gpu_skin_rows_f24_on() != 0;
   uint32_t palette_f24[9 * CTR_MAX_PALETTE];
   bool palette_f24_made = false;
-  u32 q_f24 = ~0u;
   // not HUD models: their rows are changed after they are made
   const bool bone_cache = !hud_model;
   const u32 bone_stamp = bone_cache ? next_bone_rows_stamp() : 0;
@@ -1478,18 +1391,6 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       palette_f24_made = true;
     }
     return palette_f24;
-  };
-  auto queue_f24 = [&](int count) -> u32 {
-    if (!rows_f24) {
-      return ~0u;
-    }
-    if (q_f24 == ~0u) {
-      const uint32_t* w = direct_f24(count);
-      const int n = 9 * std::min<int>(count, CTR_MAX_PALETTE);
-      q_f24 = (u32)m_qf24.size();
-      m_qf24.insert(m_qf24.end(), w, w + n);
-    }
-    return q_f24;
   };
   // (AI-assisted) config merc_gen_lod: the converter's generated low LOD of a model with only lod0
   // (the yeti; (j1ocean) never the pickups: CtrLevel gives those no gen_draws,
@@ -1602,8 +1503,6 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     const bool same_palette = rows_of && rows_of->palette_count == draw.palette_count &&
                               !memcmp(rows_of->palette, draw.palette, draw.palette_count);
     if (!same_palette) {
-      q_rows = ~0u;
-      q_f24 = ~0u;
       palette_id = next_palette_id();
       palette_f24_made = false;
     }
@@ -1723,31 +1622,9 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       }
       // emerc.frag: texture * fade * 2, no alpha test, the envmap mode's blending (adds a shine)
       st.atest = CTR_TEST_ALWAYS;
-      if (env_batch) {
-        if (q_clip == ~0u) {
-          q_clip = queue_floats(clip, 16);
-        }
-        if (q_rows == ~0u) {
-          q_rows = queue_floats(palette_rows, 12 * std::min<int>(draw.palette_count, CTR_MAX_PALETTE));
-        }
-        QueuedDraw q;
-        q.st = st;
-        q.clip = q_clip;
-        q.rows = q_rows;
-        q.rows_f24 = queue_f24(draw.palette_count);
-        q.bones_id = palette_id;
-        q.lights = 0;
-        q.palette_count = draw.palette_count;
-        memcpy(q.fade, fade, sizeof(fade));
-        q.mesh = model->mesh;
-        q.first_index = (int)draw.first_index;
-        q.index_count = (int)draw.index_count;
-        m_q_env.push_back(q);
-      } else {
-        ctr_gpu_draw_skinned_env(&st, clip, palette_rows, draw.palette_count,
-                                 direct_f24(draw.palette_count), palette_id, fade, model->mesh,
-                                 draw.first_index, draw.index_count);
-      }
+      ctr_gpu_draw_skinned_env(&st, clip, palette_rows, draw.palette_count,
+                               direct_f24(draw.palette_count), palette_id, fade, model->mesh,
+                               draw.first_index, draw.index_count);
       m_stats.draws++;
       continue;
     }
@@ -1774,49 +1651,6 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     const bool opaque = st.blend == CTR_BLEND_OFF && st.zwrite && st.ztest == CTR_TEST_GEQUAL;
     if (opaque && n_base_ranges < 32) {  // (AI-assisted, shinefold)
       base_ranges[n_base_ranges++] = (u64)draw.first_index << 32 | draw.index_count;
-    }
-    if (tex_sort && opaque && draw.eye_id == 0xff) {
-      if (q_clip == ~0u) {
-        q_clip = queue_floats(clip, 16);
-      }
-      if (q_rows == ~0u) {
-        q_rows = queue_floats(palette_rows, 12 * std::min<int>(draw.palette_count, CTR_MAX_PALETTE));
-      }
-      if (q_lights == ~0u) {
-        q_lights = queue_floats(light_data, 28);
-      }
-      if (model_rank == ~0u) {
-        auto it = std::find(m_q_models.begin(), m_q_models.end(), (const void*)draws);
-        model_rank = (u32)(it - m_q_models.begin());
-        if (it == m_q_models.end()) {
-          m_q_models.push_back(draws);
-        }
-      }
-      QueuedDraw q;
-      q.st = st;
-      q.clip = q_clip;
-      q.rows = q_rows;
-      q.rows_f24 = queue_f24(draw.palette_count);
-      q.bones_id = palette_id;
-      q.lights = q_lights;
-      q.palette_count = draw.palette_count;
-      memset(q.fade, 0, sizeof(q.fade));
-      q.mesh = model->mesh;
-      q.first_index = (int)draw.first_index;
-      q.index_count = (int)draw.index_count;
-      q.model_rank = model_rank;
-      q.draw_index = (u32)(&draw - draws->data());
-      m_q_opaque.push_back(q);
-      m_stats.draws++;
-      continue;
-    }
-    // (AI-assisted) envmap_batch / merc_tex_sort: the queues before a draw that blends or doesn't
-    // write depth (it would change what the shine adds to, or be covered by it), and before any
-    // draw of a sorted model that isn't queued (an eye: after its face, as in the model)
-    if ((!m_q_env.empty() || !m_q_opaque.empty()) && (!opaque || tex_sort)) {
-      flush_queues();
-      q_clip = q_rows = q_lights = q_f24 = ~0u;
-      model_rank = ~0u;
     }
     ctr_gpu_draw_skinned(&st, clip, palette_rows, draw.palette_count,
                          direct_f24(draw.palette_count), palette_id, light_data, model->mesh,
