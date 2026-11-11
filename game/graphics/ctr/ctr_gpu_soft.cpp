@@ -27,7 +27,6 @@
 #include "game/graphics/ctr/CtrRenderer.h"
 #include "game/graphics/ctr/CtrStream.h"
 #include "game/graphics/ctr/ctr_gpu.h"
-#include "game/graphics/ctr/CtrCull.h"
 
 // (AI-assisted, perfv2) host diagnostic: mesh handle -> what it is (CtrLevel fills it)
 std::map<int, std::string>& ctr_soft_mesh_desc() {
@@ -4019,40 +4018,3 @@ void set_soft_frame_dump(const std::string& dir, int every_nth) {
 
 #endif  // __3DS__
 
-// (AI-assisted, depthreuse) taken at once from the main depth buffer, handed out from the next
-// frame on (a GPU copy is read a frame or two later)
-namespace {
-struct SoftDepthCopy {
-  float zfar[50 * 30], znear[50 * 30], user[16];
-  bool pending = false;
-  unsigned seq = 0;
-  float out_zfar[50 * 30], out_znear[50 * 30], out_user[16];
-  int frame = -1;
-} s_dcopy;
-}  // namespace
-void ctr_gpu_depth_copy(const float user[16]) {
-  if (s_dcopy.pending || g_soft.depth.size() != (size_t)kW * kH) {
-    return;
-  }
-  static_assert(ctr_cull::kDepthBX * 8 == kW && ctr_cull::kDepthBY * 8 == kH, "depth blocks");
-  ctr_cull::depth_blocks(g_soft.depth.data(), s_dcopy.zfar, s_dcopy.znear);
-  memcpy(s_dcopy.user, user, sizeof(s_dcopy.user));
-  s_dcopy.pending = true;
-  s_dcopy.frame = (int)g_soft.frame;
-}
-unsigned ctr_gpu_depth_blocks(float* zfar, float* znear, float user[16]) {
-  if (s_dcopy.pending && (int)g_soft.frame > s_dcopy.frame) {
-    memcpy(s_dcopy.out_zfar, s_dcopy.zfar, sizeof(s_dcopy.zfar));
-    memcpy(s_dcopy.out_znear, s_dcopy.znear, sizeof(s_dcopy.znear));
-    memcpy(s_dcopy.out_user, s_dcopy.user, sizeof(s_dcopy.user));
-    s_dcopy.pending = false;
-    s_dcopy.seq++;
-  }
-  if (!s_dcopy.seq) {
-    return 0;
-  }
-  memcpy(zfar, s_dcopy.out_zfar, sizeof(s_dcopy.out_zfar));
-  memcpy(znear, s_dcopy.out_znear, sizeof(s_dcopy.out_znear));
-  memcpy(user, s_dcopy.out_user, sizeof(s_dcopy.out_user));
-  return s_dcopy.seq;
-}

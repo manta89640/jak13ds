@@ -11482,14 +11482,6 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              (double)m_cull_tris / m_cull_frames, m_cull_frames);
     m_cull_runs = m_cull_tris = m_cull_chunks = m_cull_frames = 0;
   }
-  if (rs.log_now && m_dr_frames) {
-    // (AI-assisted, depthreuse)
-    const double n = (double)m_dr_frames;
-    lg::info("[ctr] {}: depth_reuse usable in {:.0f}% of level draws, hid {:.1f} chunks and {:.1f} "
-             "runs ({:.0f} tris) per level draw ({} level draws)",
-             m_name, 100.0 * m_dr_on / n, m_dr_chunks / n, m_dr_runs / n, m_dr_tris / n, m_dr_frames);
-    m_dr_frames = m_dr_on = m_dr_chunks = m_dr_runs = m_dr_tris = 0;
-  }
   if (rs.log_now && m_cone_frames) {
     // (AI-assisted, facecull)
     const double n = (double)m_cone_frames;
@@ -11617,73 +11609,6 @@ void CtrTfragRenderer::flush_calls(int /*pass*/) {
 
 CtrTfragRenderer::~CtrTfragRenderer() = default;
 
-// (AI-assisted, depthreuse) the newest finished depth copy (ctr_gpu_depth_blocks), looked at once
-// per frame: usable while the camera is within 0.25 m and 1 degree of the camera it was drawn with
-struct DepthReuse {
-  ctr_cull::DepthSnap snap;
-  unsigned seq = 0;
-  u64 frame = ~0ull;  // the frame it was looked at in
-  bool ok = false;
-  float z_limit = 1.f;
-  float move = 0.f;   // this frame: how far the camera is from the copy's (game units)
-  float d_min = 1.f;  // depth_reuse_min (game units)
-  u64 asked = ~0ull;  // the frame a copy was asked for in
-  // the camera of the frame before (a copy is asked for only while the camera is slow)
-  float last_eye[3] = {0, 0, 0}, last_w[3] = {0, 0, 0};
-  u64 last_frame = ~0ull;
-} g_dr;
-// the frame's world -> GL clip matrix (make_clip's, without a chunk's origin and scale)
-void level_clip_matrix(const std::array<math::Vector4f, 4>& R, float y_scale,
-                       const CtrBackgroundCamera& cam, float* m) {
-  for (int c = 0; c < 4; c++) {
-    float t = 0;
-    for (int i = 0; i < 3; i++) {
-      m[4 * c + i] = -R[i][c];
-      t += R[i][c] * cam.trans[i];
-    }
-    m[4 * c + 3] = c < 3 ? t - R[3][c] : t;
-    if (c == 1) {
-      for (int k = 0; k < 4; k++) {
-        m[4 + k] *= y_scale;
-      }
-    }
-  }
-}
-bool depth_reuse_frame(const std::array<math::Vector4f, 4>& R, float y_scale,
-                       const CtrBackgroundCamera& cam, u64 frame) {
-  if (g_dr.frame == frame) {
-    return g_dr.ok;
-  }
-  g_dr.frame = frame;
-  g_dr.ok = false;
-  const unsigned seq = ctr_gpu_depth_blocks(g_dr.snap.zfar, g_dr.snap.znear, g_dr.snap.m);
-  if (!seq) {
-    return false;
-  }
-  if (seq != g_dr.seq) {
-    g_dr.seq = seq;
-    if (!ctr_cull::depth_eye(g_dr.snap.m, g_dr.snap.eye)) {
-      g_dr.seq = 0;
-      return false;
-    }
-    g_dr.z_limit = ctr_cull::depth_at_distance(g_dr.snap, ctr_settings().depth_reuse_min * 4096.f);
-  }
-  float m[16];
-  level_clip_matrix(R, y_scale, cam, m);
-  float d2 = 0, dot = 0, la = 0, lb = 0;
-  for (int i = 0; i < 3; i++) {
-    const float d = g_dr.snap.eye[i] - cam.trans[i];
-    d2 += d * d;
-    dot += m[12 + i] * g_dr.snap.m[12 + i];
-    la += m[12 + i] * m[12 + i];
-    lb += g_dr.snap.m[12 + i] * g_dr.snap.m[12 + i];
-  }
-  constexpr float kMove = 0.25f * 4096.f;
-  g_dr.ok = d2 <= kMove * kMove && la > 0 && lb > 0 && dot / std::sqrt(la * lb) >= 0.99985f;
-  g_dr.move = std::sqrt(d2);
-  g_dr.d_min = ctr_settings().depth_reuse_min * 4096.f;
-  return g_dr.ok;
-}
 // (AI-assisted, sizecull) is something `px` pixels across hidden by min_run_px: below it, or below
 // 1.25x it if it was hidden (*state: 1 hidden)
 // (AI-assisted, fdiv) sphere_px(...) < the limit (1.25x while hidden) as CtrCull.h's
@@ -11694,30 +11619,6 @@ bool small_size(const float* c, float r, const float* eye, const float* fwd, flo
   const bool hide = ctr_cull::sphere_px_below(c, r, eye, fwd, focal, *state ? 1.25f * lim : lim);
   *state = hide ? 1 : 0;
   return hide;
-}
-// the copy's test of a sphere, grown for the camera's move since the copy (parallax against what
-// hides it, at least depth_reuse_min away) and by 0.5 m
-int depth_reuse_test(const float* c, float r, const CtrBackgroundCamera& cam) {
-  const float dx = c[0] - cam.trans[0], dy = c[1] - cam.trans[1], dz = c[2] - cam.trans[2];
-  const float d = std::sqrt(dx * dx + dy * dy + dz * dz) + r;
-  const float g = ctr_cull::depth_grow(d, g_dr.move, g_dr.d_min, 0.5f * 4096.f);
-  return ctr_cull::depth_test(g_dr.snap, c, r + g, g_dr.z_limit, 1e-5f);
-}
-// a test's result t into the streak: hidden by the copy now and in the copy before (two in a row)
-bool depth_reuse_streak(int t, u16* seq, u8* streak) {
-  const u16 s = (u16)g_dr.seq;
-  if (t != 2) {
-    *streak = 0;
-    *seq = s;
-    return false;
-  }
-  if (*seq != s) {
-    *streak = *seq == (u16)(s - 1) && *streak ? (u8)std::min(*streak + 1, 2) : 1;
-    *seq = s;
-  } else if (!*streak) {
-    *streak = 1;
-  }
-  return *streak >= 2;
 }
 
 void CtrTfragRenderer::draw_level(CtrLevelData& lev,
@@ -13173,21 +13074,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     m_sz_frames++;
   }
-  // (AI-assisted, depthreuse) the recent depth for this level draw
-  m_dr_ok = false;
-  if (settings.depth_reuse) {
-    m_dr_ok = depth_reuse_frame(R, kYScale, cam, rs.frame_idx);
-    if (lev.dr_chunk_seq.size() != lev.chunks.size()) {
-      lev.dr_chunk_seq.assign(lev.chunks.size(), 0xffff);
-      lev.dr_chunk_streak.assign(lev.chunks.size(), 0);
-    }
-    if (lev.dr_run_seq.size() != lev.vis_runs.size()) {
-      lev.dr_run_seq.assign(lev.vis_runs.size(), 0xffff);
-      lev.dr_run_streak.assign(lev.vis_runs.size(), 0);
-    }
-    m_dr_frames++;
-    m_dr_on += m_dr_ok;
-  }
   // the run loop's inputs that are the same for every chunk (filled before the chunk loop)
   RunLoopIn run_in;
   float run_po[4], run_pk[4][3];
@@ -13249,17 +13135,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             cross |= acc[i] < s[3] ? 1u << i : 0u;
           }
         }
-      }
-      // (AI-assisted, depthreuse) a chunk the recent depth hid (twice in a row) is not drawn; one
-      // partly behind it has its runs tested (below). Not the vista pass's.
-      bool dr_runs = false;
-      if (m_dr_ok && !vista_chunk && !vista_tier) {
-        const int t = depth_reuse_test(ch.bsphere, ch.bsphere[3], cam);
-        if (depth_reuse_streak(t, &lev.dr_chunk_seq[ci], &lev.dr_chunk_streak[ci])) {
-          m_dr_chunks++;
-          return;
-        }
-        dr_runs = t >= 1;
       }
       // (AI-assisted, sizecull) a chunk smaller than min_run_px is not drawn; the runs of one far
       // enough for a run of 5 cm to be under it are tested (below)
@@ -13379,7 +13254,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                            ? ch.vis_run_count
                            : (lev.chunk_run_count[ci] ? lev.chunk_run_count[ci] : ch.vis_run_count);
       const bool cone_runs = m_cone_on && run_sph && !vista_tier;  // (AI-assisted, facecull)
-      if ((dr_runs || sz_runs || cone_runs) && run_sph &&
+      if ((sz_runs || cone_runs) && run_sph &&
           x_nr) {
         const u32 r0 = lev.chunk_first_run[ci];
         const u32 nr = x_nr;
@@ -13416,13 +13291,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                 m_sz_runs++; hid_by = &m_sz_chunks;
                 m_sz_tris += lev.vis_runs[r].index_count / 3;
               }
-            }
-            if (dr_runs && m_run_shown[r] &&
-                depth_reuse_streak(depth_reuse_test(c, rr, cam), &lev.dr_run_seq[r],
-                                   &lev.dr_run_streak[r])) {
-              m_run_shown[r] = 0;
-              m_dr_runs++; hid_by = &m_dr_chunks;
-              m_dr_tris += lev.vis_runs[r].index_count / 3;
             }
           }
           shown += m_run_shown[r];
@@ -15144,34 +15012,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   ctr_gpu_set_mesh_nofog(0);
   ctr_gpu_cull_reset();  // (AI-assisted) cull_ties
   phase(kPhFlush);
-  // (AI-assisted, depthreuse) the depth after the first level drawn in near mode this frame (before
-  // the models, the water and the sprites of the frame's later buckets)
-  if (settings.depth_reuse && !far_level && g_dr.asked != rs.frame_idx) {
-    g_dr.asked = rs.frame_idx;
-    float m[16];
-    level_clip_matrix(R, kYScale, cam, m);
-    // only while the camera is slow (0.125 m, ~0.5 degree a frame): a copy is used a frame or two
-    // later within 0.25 m and 1 degree of its camera, and each costs a GPU copy and a CPU pass
-    float d2 = 0, dot = 0, la = 0, lb = 0;
-    for (int i = 0; i < 3; i++) {
-      const float d = cam.trans[i] - g_dr.last_eye[i];
-      d2 += d * d;
-      dot += m[12 + i] * g_dr.last_w[i];
-      la += m[12 + i] * m[12 + i];
-      lb += g_dr.last_w[i] * g_dr.last_w[i];
-    }
-    constexpr float kSlow = 0.125f * 4096.f;
-    const bool slow = g_dr.last_frame + 1 == rs.frame_idx && d2 <= kSlow * kSlow && la > 0 &&
-                      lb > 0 && dot / std::sqrt(la * lb) >= 0.99996f;
-    for (int i = 0; i < 3; i++) {
-      g_dr.last_eye[i] = cam.trans[i];
-      g_dr.last_w[i] = m[12 + i];
-    }
-    g_dr.last_frame = rs.frame_idx;
-    if (slow) {
-      ctr_gpu_depth_copy(m);
-    }
-  }
   if (lev.tod) {
     g_tod_frame_ms += tod_ms;
 #if !defined(__3DS__) || defined(CTR_TOD_CHECK_BUILD)

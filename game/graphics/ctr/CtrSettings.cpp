@@ -261,10 +261,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       // (AI-assisted, ps2lodscale) auto | 0.3 .. 1
       s.ps2_lod_scale_auto = v == "auto";
       s.ps2_lod_scale = s.ps2_lod_scale_auto ? 1.f : std::clamp(f, 0.3f, 1.f);
-    } else if (key == "depth_reuse") {
-      s.depth_reuse = parse_bool(v);  // (AI-assisted, depthreuse)
-    } else if (key == "depth_reuse_min") {
-      s.depth_reuse_min = std::clamp(f, 5.f, 500.f);
     } else if (key == "tie_lod") {
       s.tie_lod = parse_bool(v);  // (AI-assisted) c3l v17
     } else if (key == "color_stream") {
