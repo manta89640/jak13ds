@@ -1724,3 +1724,33 @@ runs tested 6526 -> 6806, draws walked 1116 -> 1219; lod and chunks phases +0.00
 chunks hold geometry 2 where they held geometry 0); near chunk data +1.4 MB (village1); heap +0.6
 MB at most (village1's color lists). The tightest pairs (ogre+village2, rolling+village2) keep 2.6-2.9
 MB above the 3 MB reserve (1.6 before). Files +1-7%.
+
+## CPU instruction costs on the console (AI-assisted, cpubench, Nov 11)
+
+(AI-assisted.) Azahar counts about one tick per guest instruction ("The renderers' own CPU
+code" above), so every CPU change so far was priced by its instruction count. What the ARM11 and
+its VFP11 spend beyond that is invisible there:
+
+- the VFP11 issues one single-precision add, multiply or multiply-add per cycle, but a result is
+  ready ~8 cycles later (GCC's vfp11 pipeline model; the VFP11 divider paper: one FMAC per
+  cycle). A chain of dependent operations runs at 1/8 of the rate of independent ones;
+- a float compare that a branch reads (`vcmp` + `vmrs APSR_nzcv`) waits for the VFP pipeline;
+  moving a float's bits to a core register (`vmov`) waits only for that value;
+- `vdiv` / `vsqrt` take 15-19 cycles and can hold up the multiply-add pipeline;
+- ARMv6K has no integer divide instruction: a non-constant `/` or `%` is `__aeabi_idiv`;
+- calls through a register are not predicted like direct calls and returns (to be confirmed by
+  the bench);
+- L1 data cache 16 KB per core, 32-byte lines (New 3DS: a 2 MB L2 behind it).
+
+**`cpu_bench = on`** (CtrCpuBench.h, `preset = bench` too) runs microbenchmarks at boot and writes
+`data/log/cpu_bench.txt`: per case ns and cycles (804 MHz) per iteration, the best of three runs.
+The primitive cases: `vfp.chain8` / `vfp.indep8` (latency against throughput), `vfp.cmp_branch` /
+`vfp.sign_bit` (a branch on a float compare against its sign bit), `vfp.div` / `vfp.mul` /
+`vfp.sqrt`, `int.div_var` / `int.div_const`, `call.direct` / `call.indirect`, `mem.seq256k` /
+`mem.seq256k_pld` / `mem.line256k`. The commits that change kernels add their A (before) and B
+(after) versions as pairs; a pair must give the same checksum (`same as pair`, else `MISMATCH`), so
+a console run also checks the new kernels there. The host's regression test runs every case with
+a few iterations for the checksums; `test/ctr_render/arm/run.sh` builds them as ARMv6K hard-float
+code and runs them under qemu-arm's ARM11 MPCore with the 3DS's flush-to-zero / default NaN
+FPSCR (times mean nothing under qemu).
+

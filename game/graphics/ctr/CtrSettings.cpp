@@ -205,6 +205,8 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.gpu_perflog = parse_bool(v);  // (AI-assisted)
     } else if (key == "pica_bench") {
       s.pica_bench = parse_bool(v);  // (AI-assisted)
+    } else if (key == "cpu_bench") {
+      s.cpu_bench = parse_bool(v);  // (AI-assisted, cpubench)
     } else if (key == "color16") {
       s.color16 = parse_bool(v);
     } else if (key == "early_depth") {
@@ -616,7 +618,9 @@ std::string CtrSettings::summary() const {
       stats_period, color_stream ? "on" : "off",
       gpu_profile ? " gpu_profile" : (gpu_profile_ab ? " gpu_profile ab" : ""),
       gpu_counters ? " gpu_counters" : "",
-      gpu_perflog ? " gpu_perflog" : "", pica_bench ? " pica_bench" : "",
+      gpu_perflog ? " gpu_perflog" : "",
+      pica_bench ? (cpu_bench ? " pica_bench cpu_bench" : " pica_bench")
+                 : (cpu_bench ? " cpu_bench" : ""),
       gpu_breakdown ? " gpu_breakdown" : "",
       depth16 ? " depth16" : "",
       emulator ? " (emulator)" : "");

@@ -189,6 +189,10 @@ struct CtrSettings {
   // in gk.log and data/log/bench.txt, platform/3ds/tools/bench_report.py). Its last tests use
   // shaders never run on hardware: a hang there names the test in bench.txt. Hardware only.
   bool pica_bench = false;
+  // (AI-assisted, cpubench) the CPU microbenchmark at boot, before pica_bench (a few s; `[cpu]`
+  // lines in gk.log and data/log/cpu_bench.txt; CtrCpuBench.h). Azahar's times say nothing (one
+  // tick per instruction): console only.
+  bool cpu_bench = false;
   // (AI-assisted) 3DS hardware features (docs/3ds-port/config_ini.md):
   // 16-bit (RGB565) color buffer and top screen: half the memory traffic of every pixel drawn,
   // blended and cleared. Off by default: without dithering, faint blended layers (waterfall mist,

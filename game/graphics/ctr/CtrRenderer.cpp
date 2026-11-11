@@ -29,7 +29,9 @@
 extern "C" void ctr_boot_mark(const char* step);  // platform/3ds/port/ctr_port.c
 extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_port.c
 #include "game/graphics/ctr/ctr_gpu_bench.h"  // (AI-assisted) gpu_perflog, pica_bench
+#include "platform/3ds/port/ctr_port.h"          // (AI-assisted, cpubench) CTR_SD_DIR
 #endif
+#include "game/graphics/ctr/CtrCpuBench.h"
 #include "game/graphics/ctr/CtrEye.h"
 #include "game/graphics/ctr/CtrLevel.h"
 #include "game/graphics/ctr/CtrRendererJak2.h"
@@ -1794,6 +1796,31 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
                                          ctr_gpu_early_depth_status(), passed ? "on" : "off");
     lg::info("[ctr] {}", line);
     ctr_boot_mark(("8a " + line).c_str());
+  }
+  if (ctr_settings().cpu_bench) {
+    // (AI-assisted, cpubench) the CPU microbenchmark (CtrCpuBench.h), before pica_bench
+    lg::info("[ctr] cpu_bench: CPU microbenchmark before the game starts");
+    ctr_boot_mark("8b cpu_bench");
+    FILE* f = fopen(CTR_SD_DIR "/data/log/cpu_bench.txt", "w");
+    struct Out {
+      FILE* f;
+    } out{f};
+    const int bad = ctr_cpu_bench::run(
+        1.0,
+        [](const char* text, void* ctx) {
+          lg::info("[cpu] {}", text);
+          auto* o = (Out*)ctx;
+          if (o->f) {
+            fprintf(o->f, "%s\n", text);
+            fflush(o->f);
+          }
+        },
+        &out);
+    if (f) {
+      fprintf(f, "mismatches %d\n", bad);
+      fclose(f);
+    }
+    lg::info("[ctr] cpu_bench: done, {} checksum mismatches", bad);
   }
   if (ctr_settings().pica_bench) {
     // (AI-assisted) the GPU microbenchmark, before anything else uses the GPU
