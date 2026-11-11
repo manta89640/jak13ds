@@ -364,7 +364,36 @@ struct B {
   double nopix = 0;  // level mesh triangles on screen without a pixel
   double sub = 0;  // (AI-assisted) level mesh triangles submitted (what the 3DS GPU's vertex stage
                    // gets: before clipping and back face culling; tris counts the drawn ones)
+  // gpumodel: post-vertex cache misses (16 entries, cleared per draw) and x program length,
+  // triangles submitted / reaching setup, textured fragments, fragments reading a second unit
+  double vmiss = 0, vmiss_instr = 0, tri_in = 0, tri_setup = 0, px_tex = 0, px_u2 = 0;
 };
+// gpumodel: one draw's record (env CTR_GPU_MODEL_DRAWS=file, one CSV line per draw)
+struct DrawRec {
+  bool open = false;
+  std::string bucket;
+  int prog = 0, instr = 0, bufs = 0, tex = -1, blend = 0, ztest = 0, zwrite = 0, atest = 0;
+  int bind = 0, stchg = 0;
+  double idx = 0, vmiss = 0, tri_in = 0, tri_setup = 0, px = 0, px_z = 0, px_u2 = 0;
+};
+DrawRec rec;
+FILE* rec_file() {
+  static FILE* f = nullptr;
+  static bool tried = false;
+  if (!tried) {
+    tried = true;
+    const char* p = getenv("CTR_GPU_MODEL_DRAWS");
+    if (p && *p) {
+      f = fopen(p, "w");
+      if (f) {
+        fputs("frame,bucket,prog,instr,bufs,idx,vmiss,tri_in,tri_setup,px,px_z,px_u2,tex,tw,th,"
+              "fmt,mask,blend,ztest,zwrite,atest,bind,stchg\n",
+              f);
+      }
+    }
+  }
+  return f;
+}
 std::map<std::string, B> acc;
 B* cur = &acc["(none)"];
 std::string cur_name = "(none)";
@@ -457,6 +486,39 @@ void tb_drop(int fate, float w) {
     tb_bucket()->fate[tb_band(w)][fate]++;
   }
 }
+// gpumodel: a draw's vertex work (n indices, miss vertices shaded)
+void gm_verts(B* b, int n, int miss) {
+  b->vmiss += miss;
+  b->vmiss_instr += (double)miss * tb_instr;
+  b->tri_in += n / 3;
+  rec.idx += n;
+  rec.vmiss += miss;
+  rec.tri_in += n / 3;
+  rec.instr = tb_instr;
+  rec.bufs = tb_bufs;
+}
+void rec_flush() {
+  if (!rec.open) {
+    return;
+  }
+  rec.open = false;
+  FILE* f = rec_file();
+  if (!f) {
+    return;
+  }
+  int tw = 0, th = 0, fmt = -1, mask = -1;
+  if (rec.tex >= 0 && rec.tex < (int)g_soft.textures.size()) {
+    const SoftTex& t = g_soft.textures[rec.tex];
+    tw = t.w;
+    th = t.h;
+    fmt = t.format;
+    mask = t.mask_format;
+  }
+  fprintf(f, "%d,%s,%d,%d,%d,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+          g_soft.frame, rec.bucket.c_str(), rec.prog, rec.instr, rec.bufs, rec.idx, rec.vmiss,
+          rec.tri_in, rec.tri_setup, rec.px, rec.px_z, rec.px_u2, rec.tex, tw, th, fmt, mask,
+          rec.blend, rec.ztest, rec.zwrite, rec.atest, rec.bind, rec.stchg);
+}
 // an indexed draw: its indices and the vertices it uses (each shaded once at best)
 void tb_verts(const uint16_t* idx, int n) {
   if (!enabled() || n <= 0) {
@@ -477,6 +539,22 @@ void tb_verts(const uint16_t* idx, int n) {
   b->verts += u;
   b->vinstr += (double)u * tb_instr;
   b->vbufs += (double)u * tb_bufs;
+  // gpumodel: the GPU's post-vertex cache (16 entries, FIFO, cleared at every draw)
+  uint16_t fifo[16];
+  int used = 0, at = 0, miss = 0;
+  for (int i = 0; i < n; i++) {
+    bool hit = false;
+    for (int k = 0; k < used && !hit; k++) {
+      hit = fifo[k] == idx[i];
+    }
+    if (!hit) {
+      miss++;
+      fifo[at] = idx[i];
+      at = (at + 1) & 15;
+      used = std::min(used + 1, 16);
+    }
+  }
+  gm_verts(b, n, miss);
 }
 void tb_level_cache(int mesh, const float clip[16], const uint16_t* idx, int n) {
   if (!enabled() || n <= 0) {
@@ -570,6 +648,7 @@ void tb_verts_n(int n) {
     b->verts += n;
     b->vinstr += (double)n * tb_instr;
     b->vbufs += (double)n * tb_bufs;
+    gm_verts(b, n, n);
   }
 }
 // the next draw's vertex program (instructions with its end, shader_stats.py) and buffers
@@ -581,6 +660,18 @@ void draw(const ctr_draw_state& st) {
   early_probe_draw();
   if (!enabled()) return;
   tb_draw_serial++;
+  rec_flush();
+  rec = DrawRec{};
+  rec.open = rec_file() != nullptr;
+  rec.bucket = s_target.rt ? cur_name + "@rt" : cur_name;
+  rec.prog = cur_prog;
+  rec.tex = st.tex;
+  rec.blend = st.blend;
+  rec.ztest = st.ztest;
+  rec.zwrite = st.zwrite;
+  rec.atest = st.atest;
+  rec.bind = st.tex != last_tex;
+  rec.stchg = !last_valid || memcmp(&st, &last_st, sizeof(st)) != 0;
   cur->draws++;
   cur_tp = &tex_px[{cur_name, st.tex}];
   cur_tp->second++;
@@ -1022,6 +1113,14 @@ void shade_pixel(const ctr_draw_state& st,
     b = std::min(b, 255.f) + ec[2] * w;
   }
   if (ss_on) {
+    // gpumodel: texture units read by this fragment
+    const bool u1 = stex >= 0 && stex < (int)g_soft.textures.size() && g_soft.textures[stex].used;
+    const bool u2 = (u1 && g_soft.textures[stex].mask_format >= 0) || s_env.tex >= 0 ||
+                    (env && s_env_tex >= 0);
+    softstats::cur->px_tex += u1;
+    softstats::cur->px_u2 += u2;
+    softstats::rec.px++;
+    softstats::rec.px_u2 += u2;
     softstats::tb_frag++;
     softstats::cur->px++;
     if (!s_target.rt) softstats::od[px + py * kW]++;
@@ -1073,6 +1172,7 @@ void shade_pixel(const ctr_draw_state& st,
     if (softstats::cur_dp) (*softstats::cur_dp)[1]++;
     if (softstats::tri_id) softstats::tri_zpass++;
     softstats::tb_pass++;
+    softstats::rec.px_z++;
     softstats::cur->px_z++;
     if (st.blend != CTR_BLEND_OFF) softstats::cur->px_blend++;
   }
@@ -1227,6 +1327,8 @@ void raster_triangle(const ctr_draw_state& st,
       tbb->fate[tb_band][softstats::TF_OFF]++;
       return;
     }
+    tbb->tri_setup++;
+    softstats::rec.tri_setup++;
     const float a = std::abs(area) * 0.5f;
     tbb->ahist[a < 0.125f ? 0 : a < 0.5f ? 1 : a < 1.f ? 2 : a < 2.f ? 3 : a < 4.f ? 4
                : a < 16.f ? 5 : a < 64.f ? 6 : 7]++;
@@ -1528,6 +1630,7 @@ void ctr_gpu_frame_end(void) {
              s_early.rej / n, s_early.px > 0 ? 100.0 * s_early.rej / s_early.px : 0.0);
     s_early.px = s_early.zfail = s_early.rej = s_early.frames = 0;
   }
+  softstats::rec_flush();  // gpumodel: the frame's last draw
   g_soft.frame++;
   if (softstats::enabled()) {
     // the mesh triangles that own a pixel of the final frame
@@ -1685,6 +1788,32 @@ void ctr_gpu_frame_end(void) {
       tb += "\n[tb] end";
       lg::info("{}", tb);
     }
+    {
+      // gpumodel: the features of the GPU cost model per frame (platform/3ds/tools/gpu_model.py)
+      static const double kTileBytes[softstats::kTbFmt] = {128, 128, 32, 64, 256, 64, 32, 128, 256};
+      std::string gm = fmt::format("[gpumodel] win frame {} frames {}", g_soft.frame, softstats::frames);
+      for (auto& [name, b] : softstats::acc) {
+        if (!b.draws && !b.px && !b.idx) {
+          continue;
+        }
+        double kb1 = 0, kb16 = 0;
+        for (int f = 0; f < softstats::kTbFmt; f++) {
+          kb1 += b.tmiss[0][f] * kTileBytes[f] / 1024.0;
+          kb16 += b.tmiss[1][f] * kTileBytes[f] / 1024.0;
+        }
+        gm += fmt::format(
+            "\n[gpumodel] b {} draws={:.1f} binds={:.1f} stchg={:.1f} progsw={:.1f} unif={:.0f} "
+            "tri_in={:.0f} tri_setup={:.0f} vmiss={:.0f} vinstr={:.0f} vbufs={:.0f} px={:.0f} "
+            "px_tex={:.0f} px_u2={:.0f} px_z={:.0f} px_blend={:.0f} px_atest={:.0f} tex_kb1={:.1f} "
+            "tex_kb16={:.1f} copy_rows={:.1f}",
+            name, b.draws / n, b.tex_changes / n, b.state_changes / n, b.prog_switches / n,
+            b.unif / n, b.tri_in / n, b.tri_setup / n, b.vmiss / n, b.vmiss_instr / n,
+            b.vbufs / n, b.px / n, b.px_tex / n, b.px_u2 / n, b.px_z / n, b.px_blend / n,
+            b.px_atest / n, kb1 / n, kb16 / n, b.copy_rows / n);
+      }
+      gm += "\n[gpumodel] end";
+      lg::info("{}", gm);
+    }
     if (!g_soft.dump_dir.empty()) {
       std::vector<uint8_t> img(400 * 240 * 4);
       for (int i = 0; i < 400 * 240; i++) {
@@ -1771,6 +1900,11 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state*,
     ctr_gpu_soft_bucket((keep + "-envmap").c_str());
     softstats::cur->draws++;
     softstats::cur->tris += index_count_env / 3;
+    // gpumodel: its vertex work (not rasterized here: its fill is missing), ~1.35 vertices per
+    // triangle through ctr_skin_env_opt (33 instructions)
+    softstats::cur->tri_in += index_count_env / 3;
+    softstats::cur->vmiss += index_count_env * 0.45;
+    softstats::cur->vmiss_instr += index_count_env * 0.45 * 33;
     ctr_gpu_soft_bucket(keep.c_str());
   }
 }
@@ -2896,7 +3030,7 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
     return;
   }
   const auto& m = g_soft.meshes[mesh];
-  softstats::tb_prog(11, m.col_off ? 2 : 1);
+  softstats::tb_prog(s_shader_opt ? 10 : 11, m.col_off ? 2 : 1);  // shader_opt: ctr_mesh_opt
   soft_mesh_tris(state, clip, soft_verts(m.verts.data(), m.col_off), m.indices.data(), first_index,
                  index_count);
 }
@@ -3235,6 +3369,8 @@ void ctr_gpu_ocean_env_draw(const ctr_draw_state* state,
   const float* clip = d->clip.m;
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
+  softstats::tb_prog(9, 1);  // gpumodel
+  softstats::tb_verts(ibase + first_index, index_count);
   auto row = [](const float* r, const float* in) {
     return r[0] * in[0] + r[1] * in[1] + r[2] * in[2] + r[3];
   };
@@ -3666,7 +3802,7 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
   const auto& m = g_soft.meshes[mesh];
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
-  softstats::tb_prog(39, 1);
+  softstats::tb_prog(s_shader_opt ? 33 : 39, 1);  // shader_opt: ctr_skin_opt
   softstats::tb_verts(m.indices.data() + first_index, index_count);
   // (AI-assisted, far-fog) merc_fog
   const bool fogged = fog_on() && state && (state->tcc & CTR_TCC_FOG);
