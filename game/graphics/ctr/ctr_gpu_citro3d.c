@@ -11043,8 +11043,8 @@ static struct {
 
 void ctr_gpu_depth_copy(const float user[16]) {
   if (!g.ready || !g.in_frame || s_dr.failed || s_dr.busy || !s_pipeline || !s_pres.on ||
-      g_depth16 || g_block32 || !g.top) {
-    return;
+      g_depth16 || g_block32 || !g.top || s_bd.frame) {
+    return; /* (a gpu_breakdown frame submits its own parts: no copy of ours in between) */
   }
   const C3D_FrameBuf* fb = &g.top->frameBuf;
   if (fb->width != 240 || fb->height != 400 || fb->depthFmt != GPU_RB_DEPTH24_STENCIL8) {
