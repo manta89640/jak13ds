@@ -283,10 +283,6 @@ struct CtrSettings {
   // (AI-assisted) meters: far scenery (lowres_vista, the vista tier) is drawn up to here (the
   // PS2's far clip plane, math-camera f: 10 km)
   float vista_distance = 10000.f;
-  // (AI-assisted) skin_clip_f24: each merc model's clip matrix and lights as float24 uniforms like
-  // the bone rows (skin_rows_f24): 11 words less per model. Not bit-identical (rounding): off until
-  // priced (pica_bench B2.unif_f24 vs B2.unif_f32, the same line as skin_rows_f24)
-  bool skin_clip_f24 = true;
   // (AI-assisted) back faces of closed tie surfaces (c3l v13 draws marked by the converter) are
   // culled. cull_flip: the other screen winding (if the PICA's turns out mirrored). On: no face
   // went missing in Azahar at Sandover, Snowy's fort and start, Fire Canyon (2026-10-11)

@@ -2624,11 +2624,6 @@ void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* drop
 
 static void migrate_small_textures(void);
 
-/* (AI-assisted) config.ini skin_clip_f24: merc clip matrix and lights as float24 too */
-static int s_skin_clip_f24 = 0;
-void ctr_gpu_set_skin_clip_f24(int on) {
-  s_skin_clip_f24 = on ? 1 : 0;
-}
 
 /* ---------------- (AI-assisted) config.ini frame_overlap2 (with the pipeline) ----------------
  * The pipeline's frame end used to wait for the GX queue to empty (C3D_FrameBegin: frame N - 1 and
@@ -7979,20 +7974,20 @@ int ctr_gpu_merc_fog_ready(void) {
  * float24 packing of 4 + 7 vectors, the light scaling): ~750 instructions per draw for the same
  * few instances. Their upload words are kept here per instance (the caller's array, checked by its
  * contents) and only copied into the command list; the words are the same. mode: what the words
- * depend on (raw, skin_clip_f24, the opt program set). */
+ * depend on (raw, the opt program set). */
 #define SKIN_UCACHE 16
 typedef struct {
   const float* key;
   u32 mode;
   float src[16];
-  u32 words[16]; /* 12 (float24) or 16 (f32) */
+  u32 words[16]; /* f32, C3D_FVec order */
   float wrow[4]; /* the w row for skin_fog_rows */
 } SkinClipEnt;
 typedef struct {
   const float* key;
   u32 mode;
   float src[28];
-  u32 words[28]; /* 21 (float24) or 28 (f32) */
+  u32 words[28]; /* f32, C3D_FVec order */
 } SkinLightEnt;
 static SkinClipEnt s_skin_cc[SKIN_UCACHE];
 static SkinLightEnt s_skin_lc[SKIN_UCACHE];
@@ -8010,13 +8005,7 @@ static const SkinClipEnt* skin_clip_words(const float clip[16], u32 mode) {
   skin_clip_matrix(clip, &m);
   skin_opt_scale(&m);
   memcpy(e->wrow, m.r[3].c, sizeof(e->wrow));
-  if (mode & 2) {
-    for (int r = 0; r < 4; r++) {
-      raw_pack_f24(m.r[r].c, e->words + 3 * r);
-    }
-  } else {
-    memcpy(e->words, &m, sizeof(m));
-  }
+  memcpy(e->words, &m, sizeof(m));
   e->key = clip;
   e->mode = mode;
   memcpy(e->src, clip, sizeof(e->src));
@@ -8041,19 +8030,12 @@ static const SkinLightEnt* skin_light_words(const float lights_in[28], u32 mode)
     }
     lights = lopt;
   }
-  if (mode & 2) {
-    for (int i = 0; i < 7; i++) {
-      const float v[4] = {lights[4 * i + 3], lights[4 * i + 2], lights[4 * i + 1], lights[4 * i]};
-      raw_pack_f24(v, e->words + 3 * i);
-    }
-  } else {
-    const u32* l = (const u32*)lights;
-    for (int i = 0; i < 7; i++) {
-      e->words[4 * i] = l[4 * i + 3];
-      e->words[4 * i + 1] = l[4 * i + 2];
-      e->words[4 * i + 2] = l[4 * i + 1];
-      e->words[4 * i + 3] = l[4 * i];
-    }
+  const u32* l = (const u32*)lights;
+  for (int i = 0; i < 7; i++) {
+    e->words[4 * i] = l[4 * i + 3];
+    e->words[4 * i + 1] = l[4 * i + 2];
+    e->words[4 * i + 2] = l[4 * i + 1];
+    e->words[4 * i + 3] = l[4 * i];
   }
   e->key = lights_in;
   e->mode = mode;
@@ -8089,14 +8071,11 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
   const int same_lights = g.skin_bl_valid && words_equal(g.last_skin_lights, lights, 28);
   if (!same_clip && raw) {
     /* (AI-assisted, gpuopt) the words made once per instance (skin_clip_words) */
-    const SkinClipEnt* ce = skin_clip_words(clip, 1u | (s_skin_clip_f24 ? 2u : 0u) |
-                                                      4u);
+    const SkinClipEnt* ce = skin_clip_words(clip, 5u);
     /* (AI-assisted, far-fog) the w row for the fog rows (made again below) */
     memcpy(g.skin_wrow, ce->wrow, sizeof(g.skin_wrow));
     g.skin_mfog_gen = 0;
-    /* (AI-assisted) skin_clip_f24: the matrix as float24 (12 words instead of 16) */
-    raw_end(raw_unif(raw_ptr(), g.ps->uloc_skin_clip, ce->words, s_skin_clip_f24 ? 12 : 16,
-                     s_skin_clip_f24 ? 0 : 1));
+    raw_end(raw_unif(raw_ptr(), g.ps->uloc_skin_clip, ce->words, 16, 1));
     memcpy(g.last_skin_clip, clip, sizeof(g.last_skin_clip));
   } else if (!same_clip) {
     C3D_Mtx m;
@@ -8140,11 +8119,9 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
   }
   if (!same_lights && raw) {
     /* (AI-assisted, gpuopt) the words made once per instance (skin_light_words): shader_opt's
-     * scaled light colors, as float24 with skin_clip_f24 (21 words instead of 28) */
-    const SkinLightEnt* le = skin_light_words(lights, 1u | (s_skin_clip_f24 ? 2u : 0u) |
-                                                          4u);
-    raw_end(raw_unif(raw_ptr(), g.ps->uloc_skin_lights, le->words, s_skin_clip_f24 ? 21 : 28,
-                     s_skin_clip_f24 ? 0 : 1));
+     * scaled light colors */
+    const SkinLightEnt* le = skin_light_words(lights, 5u);
+    raw_end(raw_unif(raw_ptr(), g.ps->uloc_skin_lights, le->words, 28, 1));
     memcpy(g.last_skin_lights, lights, sizeof(g.last_skin_lights));
   } else if (!same_lights) {
     /* (AI-assisted) the light colors and ambient times the vertex color scale */
@@ -8155,16 +8132,7 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
       lopt[i] *= (i & 3) == 3 ? 1.0f / 255.0f : 1.0f / 510.0f;
     }
     lights = lopt;
-    if (raw && s_skin_clip_f24) {
-      /* (AI-assisted) skin_clip_f24: the lights as float24 (21 words instead of 28) */
-      u32 l24[21];
-      for (int i = 0; i < 7; i++) {
-        const float v[4] = {lights[4 * i + 3], lights[4 * i + 2], lights[4 * i + 1],
-                            lights[4 * i]};
-        raw_pack_f24(v, l24 + 3 * i);
-      }
-      raw_end(raw_unif(raw_ptr(), g.ps->uloc_skin_lights, l24, 21, 0));
-    } else if (raw) {
+    if (raw) {
       u32 lv[28];
       const u32* l = (const u32*)lights;
       for (int i = 0; i < 7; i++) {
@@ -8218,8 +8186,8 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
   /* (AI-assisted) The shine pass tests its depth GEQUAL against its own base pass (no depth write),
    * so its positions must be the same bits as ctr_gpu_draw_skinned's: the same program arithmetic
    * (the skin and skin_env programs compute the position alike) on the same uniform values. The
-   * clip matrix and bones therefore go to the GPU exactly as the base pass sends them: raw, as
-   * float24 from raw_f24 with skin_clip_f24 / skin_rows_f24, else as f32. They used to go through
+   * clip matrix and bones therefore go to the GPU exactly as the base pass sends them: f32 words
+   * (skin_clip_words), converted by the GPU. They used to go through
    * citro3d as f32 always, which the GPU converts to float24 itself, while the base pass's were
    * rounded by raw_f24: two conversions that disagree in the last bit moved the shine a few hundred
    * depth units in front of or behind the model, and the whole shine of a model passed or failed
@@ -8235,10 +8203,8 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
   if (raw) {
     /* (AI-assisted, gpuopt) the base pass's words for this instance (skin_clip_words): the same
      * bits, made once */
-    const SkinClipEnt* ce = skin_clip_words(clip, 1u | (s_skin_clip_f24 ? 2u : 0u) |
-                                                      4u);
-    raw_end(raw_unif(raw_ptr(), g.ps->uloc_env_clip, ce->words, s_skin_clip_f24 ? 12 : 16,
-                     s_skin_clip_f24 ? 0 : 1));
+    const SkinClipEnt* ce = skin_clip_words(clip, 5u);
+    raw_end(raw_unif(raw_ptr(), g.ps->uloc_env_clip, ce->words, 16, 1));
     memcpy(g.last_env_clip, clip, sizeof(g.last_env_clip));
   } else {
     C3D_Mtx m;

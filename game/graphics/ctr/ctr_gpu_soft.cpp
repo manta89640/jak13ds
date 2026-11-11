@@ -3717,7 +3717,6 @@ int ctr_gpu_top_histogram(unsigned int counts[256]) {
   }
   return 1;
 }
-void ctr_gpu_set_skin_clip_f24(int) {}  // (AI-assisted)      // (AI-assisted) no uniform formats here
 int ctr_gpu_describe_target(char*, int) {
   return 0;
 }

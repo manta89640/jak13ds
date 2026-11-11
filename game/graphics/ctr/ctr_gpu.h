@@ -390,10 +390,6 @@ void ctr_gpu_set_mip_mode(int mode);
  * read */
 void ctr_gpu_submit_now(void);
 int ctr_gpu_top_histogram(unsigned int counts[256]);
-/* (AI-assisted) config.ini skin_clip_f24: each merc model's clip matrix (12 instead of 16 words)
- * and lights (21 instead of 28) as float24 too. Not bit-identical (rounded to nearest where the GPU
- * converts f32 its own way): edge pixels of models can flip. Each frame. */
-void ctr_gpu_set_skin_clip_f24(int on);
 /* (AI-assisted) one line about the top render target (size, formats, VRAM addresses and banks)
  * for the log; returns its length (0 before ctr_gpu_init) */
 int ctr_gpu_describe_target(char* out, int size);
