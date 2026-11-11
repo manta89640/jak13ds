@@ -258,7 +258,9 @@ uint32_t call_indirect(uint32_t n) {
 // ---- memory: 256 KB read in order, with a prefetch ahead, and one word per 32-byte line ----
 
 constexpr uint32_t kMemWords = 64 * 1024;
-uint32_t g_mem[kMemWords] __attribute__((aligned(32)));
+// allocated by run() only: no 256 KB in .bss (the heap) when cpu_bench is off
+uint32_t* g_mem_buf = nullptr;
+uint32_t* g_mem = nullptr;  // 32-byte aligned in g_mem_buf
 
 uint32_t mem_seq(uint32_t n) {
   uint32_t s = 0;
@@ -652,6 +654,8 @@ int run(double scale, void (*line)(const char* text, void* ctx), void* ctx) {
 #ifdef BONES_VFP_ASM
   fill_bones();
 #endif
+  g_mem_buf = new uint32_t[kMemWords + 8];
+  g_mem = (uint32_t*)(((uintptr_t)g_mem_buf + 31) & ~(uintptr_t)31);
   for (uint32_t i = 0; i < kMemWords; i++) {
     g_mem[i] = i * 2654435761u;
   }
@@ -692,6 +696,14 @@ int run(double scale, void (*line)(const char* text, void* ctx), void* ctx) {
              best, best * 0.804, (unsigned long)check, verdict);
     line(buf, ctx);
   }
+  delete[] g_mem_buf;
+  g_mem_buf = g_mem = nullptr;
+  delete[] g_runs;
+  delete[] g_rsph;
+  delete[] g_rlod;
+  g_runs = nullptr;
+  g_rsph = nullptr;
+  g_rlod = nullptr;
   return mismatches;
 }
 

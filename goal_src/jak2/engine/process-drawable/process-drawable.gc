@@ -495,9 +495,15 @@
   (defconstant ANIM_LOD_FARTHER (meters 70))
   (defconstant ANIM_LOD_JUMP (meters 1.5))
   (define *anim-lod-frame* 0)
-  (define *anim-lod-skipped* (new 'global 'boxed-array handle MATRIX_ENGINE_AMOUNT))
+  ;; execute-math-engine runs twice a frame (the "matrix" process and display-loop-main), each with
+  ;; its own models: a frame count from the call count, a skipped list per call
+  (define *anim-lod-call* 0)
+  (define *anim-lod-skipped-0* (new 'global 'boxed-array handle (/ MATRIX_ENGINE_AMOUNT 2)))
+  (define *anim-lod-skipped-1* (new 'global 'boxed-array handle (/ MATRIX_ENGINE_AMOUNT 2)))
   ;; new boxed-array sets length = the allocated count (like *matrix-engine*): start empty
-  (set! (-> *anim-lod-skipped* length) 0)
+  (set! (-> *anim-lod-skipped-0* length) 0)
+  (set! (-> *anim-lod-skipped-1* length) 0)
+  (define *anim-lod-skipped* *anim-lod-skipped-0*)
   ;; per frame (stats for a debugger or a REPL): joint math skipped, bones moved instead
   (define *anim-lod-skip-count* 0)
   (define *anim-lod-follow-count* 0)
@@ -637,16 +643,14 @@
   (defun anim-lod-math! ((pd process-drawable) (h handle))
     "This frame's joint math for pd, by the animation LOD rules above."
     (cond
-      ((anim-lod-skip? pd)
+      ((and (< (-> *anim-lod-skipped* length) (-> *anim-lod-skipped* allocated-length)) (anim-lod-skip? pd))
        ;; a citizen's bones keep its place while they wait (anim_lod_far)
        (if (anim-lod-can-follow? pd)
            (anim-lod-follow! pd)
            )
        (let ((skipped *anim-lod-skipped*))
-         (when (< (-> skipped length) (-> skipped allocated-length))
-           (set! (-> skipped (-> skipped length)) h)
-           (+! (-> skipped length) 1)
-           )
+         (set! (-> skipped (-> skipped length)) h)
+         (+! (-> skipped length) 1)
          )
        (+! *anim-lod-skip-count* 1)
        )
@@ -668,9 +672,14 @@
     ;; og:preserve-this (AI-assisted) 3DS animation LOD (above): last frame's skipped requests of
     ;; models that didn't ask again
     (#when TARGET_3DS
-      (+! *anim-lod-frame* 1)
-      (set! *anim-lod-skip-count* 0)
-      (set! *anim-lod-follow-count* 0)
+      (+! *anim-lod-call* 1)
+      (set! *anim-lod-frame* (/ *anim-lod-call* 2))
+      (when (zero? (logand *anim-lod-call* 1))
+        (set! *anim-lod-skip-count* 0)
+        (set! *anim-lod-follow-count* 0)
+        )
+      ;; this call's list: its models asked in the same call last frame
+      (set! *anim-lod-skipped* (if (logtest? *anim-lod-call* 1) *anim-lod-skipped-1* *anim-lod-skipped-0*))
       (let ((skipped *anim-lod-skipped*))
         (dotimes (i (-> skipped length))
           (let ((h (-> skipped i)))
