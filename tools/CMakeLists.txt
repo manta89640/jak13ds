@@ -68,8 +68,6 @@ add_executable(ctr_render_regression EXCLUDE_FROM_ALL
         ${CMAKE_SOURCE_DIR}/test/ctr_render/vram_test.cpp
         ${CMAKE_SOURCE_DIR}/test/ctr_render/citadel_test.cpp
         ${CMAKE_SOURCE_DIR}/test/ctr_render/cull_test.cpp
-        ${CMAKE_SOURCE_DIR}/test/ctr_render/cpu_bench_test.cpp
-        ${CMAKE_SOURCE_DIR}/game/graphics/ctr/CtrCpuBench.cpp
         ${CMAKE_SOURCE_DIR}/game/graphics/jak2_texture_remap.cpp
         ${CTR_RENDER_TEST_SOURCES})
 target_link_libraries(ctr_render_regression common)

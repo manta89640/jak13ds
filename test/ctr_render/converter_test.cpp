@@ -8,7 +8,6 @@
 void run_vram_tests();
 void run_citadel_tests();
 void run_cull_tests();
-void run_cpu_bench_tests();  // (AI-assisted, cpubench)
 
 namespace {
 void test_resize() {
@@ -622,7 +621,6 @@ int main() {
   try {
     lg::initialize();
     run_cull_tests();  // (AI-assisted) before run_vram_tests, which fails on this host (Nov 11)
-    run_cpu_bench_tests();
     test_far_copies();
     test_terrain_cull();
     test_face_bins();

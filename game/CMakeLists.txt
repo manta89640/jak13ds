@@ -50,7 +50,6 @@ set(RUNTIME_SOURCE
         graphics/ctr/CtrOceanVuMid.cpp
         graphics/ctr/CtrOceanVuNear.cpp
         graphics/ctr/CtrSettings.cpp
-        graphics/ctr/CtrCpuBench.cpp
         graphics/ctr/CtrShadow.cpp
         graphics/ctr/CtrKeiraRig.cpp
         graphics/ctr/CtrSprite.cpp

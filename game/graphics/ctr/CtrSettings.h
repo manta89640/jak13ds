@@ -189,10 +189,6 @@ struct CtrSettings {
   // in gk.log and data/log/bench.txt, platform/3ds/tools/bench_report.py). Its last tests use
   // shaders never run on hardware: a hang there names the test in bench.txt. Hardware only.
   bool pica_bench = false;
-  // (AI-assisted, cpubench) the CPU microbenchmark at boot, before pica_bench (a few s; `[cpu]`
-  // lines in gk.log and data/log/cpu_bench.txt; CtrCpuBench.h). Azahar's times say nothing (one
-  // tick per instruction): console only.
-  bool cpu_bench = false;
   // (AI-assisted, onebone) merc draws whose palette has one bone with ctr_skin_opt1 (5 blend
   // instructions per vertex instead of 11; rounding-level differences). Off until pica_bench
   // B3.skin_opt1 and a console say so (needs shader_opt's program set)

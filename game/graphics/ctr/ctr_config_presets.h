@@ -50,11 +50,10 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"merc_one_bone", "off"}, {"vfp_vector", "off"},    {"anim_lod_far", "off"},
     {"merc_lod_scale", "1"},  {"shadow_count", "0"},
 };
-/* bench: normal plus the GPU benchmark at boot (~20-60 s, data/log/bench.txt; (AI-assisted,
- * cpubench) the CPU one before it, data/log/cpu_bench.txt), the A/B GPU
+/* bench: normal plus the GPU benchmark at boot (~20-60 s, data/log/bench.txt), the A/B GPU
  * profile, the GSP perf log and the GPU counters (3ds-sdcard-oct12d config-bench.ini) */
 static const ctr_cfg_kv ctr_cfg_preset_bench[] = {
-    {"pica_bench", "on"}, {"cpu_bench", "on"}, {"gpu_profile", "ab"}, {"gpu_perflog", "on"},
+    {"pica_bench", "on"}, {"gpu_profile", "ab"}, {"gpu_perflog", "on"},
     {"gpu_counters", "on"}, {"overlap", "off"},
 };
 /* full: the detail of the builds before the fixed cuts (slower: under 30 fps in busy places) */
@@ -183,6 +182,8 @@ static const char* const ctr_cfg_removed[] = {
      * removed (opt-audit: they cost more than they saved, or no shipped file used them) */
     "impostors", "impostor_distance", "impostor_error", "impostor_budget", "impostor_atlas",
     "fine_vis", "fine_vis_kb", "occ_cull", "occ_cull_tris", "occ_cull_dist", "vista_untextured",
+    /* renderer strip: removed with their code */
+    "cpu_bench",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

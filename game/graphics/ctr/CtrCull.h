@@ -657,7 +657,7 @@ inline float rsqrt_nr(float x) {
 }
 
 //! The test before (AI-assisted, fdiv): a cone_unpack (5 divides and a square root) and three
-//! square roots and a divide. Kept for the tests (cull_test.cpp) and cpu_bench.
+//! square roots and a divide. Kept for the tests (cull_test.cpp).
 inline bool cone_away_ref(uint32_t cone, const float* c, float r, const float* eye) {
   float a[3], ca;
   if (!cone_unpack(cone, a, &ca)) {
