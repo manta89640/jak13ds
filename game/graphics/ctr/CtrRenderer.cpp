@@ -228,6 +228,11 @@ const AbSwitch kAbSwitches[] = {
     {"skin_clip_f24", [](CtrSettings& s, bool on) { s.skin_clip_f24 = on; },
      [](const CtrSettings& s) { return s.skin_clip_f24; }},
     // (AI-assisted, gpu-rt) ocean_tex_half
+    // (AI-assisted, onebone / idx8) the one-bone merc program and u8 quad indices
+    {"merc_one_bone", [](CtrSettings& s, bool on) { s.merc_one_bone = on; },
+     [](const CtrSettings& s) { return s.merc_one_bone; }},
+    {"index_u8", [](CtrSettings& s, bool on) { s.index_u8 = on; },
+     [](const CtrSettings& s) { return s.index_u8; }},
     {"ocean_tex_half", [](CtrSettings& s, bool on) { s.ocean_tex_half = on; },
      [](const CtrSettings& s) { return s.ocean_tex_half; }},
     // (AI-assisted) gpu-conv (Oct 12): c3l v15 alpha tests / blending that can't change a pixel
@@ -762,6 +767,9 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_set_fog_alpha(ctr_settings().fog_alpha ? 1 : 0);
   ctr_gpu_set_tex1_gating(ctr_settings().tex1_gating ? 1 : 0);
   ctr_gpu_set_shader_opt(ctr_settings().shader_opt ? 1 : 0);        // (AI-assisted)
+  // (AI-assisted, onebone / idx8) gpu_profile = ab may switch them between frames
+  ctr_gpu_set_merc_one_bone(ctr_settings().merc_one_bone ? 1 : 0);
+  ctr_gpu_set_index_u8(ctr_settings().index_u8 ? 1 : 0);
   ctr_gpu_set_cmd_dedup(ctr_settings().cmd_dedup ? 1 : 0,           // (AI-assisted)
                         ctr_settings().cmd_dedup_draw ? 1 : 0);
   ctr_gpu_set_raw_cmds(ctr_settings().raw_cmds ? 1 : 0);          // (AI-assisted, hud3)
@@ -1835,7 +1843,6 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_compact_textures(ctr_settings().compact_textures ? 1 : 0);
   ctr_gpu_set_early_depth(ctr_settings().early_depth ? 1 : 0);
   ctr_gpu_set_proctex(ctr_settings().proctex_glows ? 1 : 0);
-  ctr_gpu_set_merc_one_bone(ctr_settings().merc_one_bone ? 1 : 0);  // (AI-assisted, onebone)
   ctr_gpu_set_vram_textures(ctr_settings().vram_textures ? 1 : 0);
   ctr_gpu_set_mip_mode(ctr_settings().mipmaps);
   ctr_gpu_set_overlap(ctr_settings().overlap ? 1 : 0);

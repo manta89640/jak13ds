@@ -1916,3 +1916,14 @@ the three products were rounded three times (float24): the same picture up to ro
   per vertex on a console.
 - Checked: `check_shaders.py` (every output component written once, the hazards the PICA hangs
   on). Not assembled here: picasso is devkitPro's (the 3DS build assembles it).
+
+### 12. 8-bit indices for quad batches (idx8)
+
+Every indexed draw used u16 indices. The PICA also reads u8 ones (GPUREG_INDEXBUFFER_CONFIG bit
+31 clear): half the bytes for a draw of at most 256 vertices. The quad draws (sprites, HUD and
+text through `ctr_gpu_draw_quads`) index a static table (`0 1 3 3 1 2`, + 4 per quad); batches of
+up to 64 quads now can use a 384-byte u8 copy of its start (`config.ini index_u8`, default off),
+in the raw command path (`raw_draw_elements_fmt`: the index format word) and citro3d's
+(`C3D_UNSIGNED_BYTE`). The same triangles. Level and merc draws keep u16 (their chunks and
+models have more vertices). `index_u8` and `merc_one_bone` are applied every frame and are in
+`gpu_profile = ab`'s switch table, which prices each on a console.
