@@ -5934,6 +5934,34 @@ void load_vis_bake(CtrLevelData* lev) {
   }
 }
 
+// (AI-assisted, farcopy) c3l::ExtFarCopy: each chunk's role (read always: without it a level
+// converted with --far-copies would draw its copies over their sources)
+void load_far_copy(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
+  lev->far_role.clear();
+  c3l::ExtHeader eh;
+  if (!hdr.ext_offset || !read_ext_header(f, hdr, &eh) || eh.size < c3l::kExtHeaderFarCopySize) {
+    return;
+  }
+  c3l::ExtFarCopy ef{};
+  if (!f.read(hdr.ext_offset + c3l::kExtHeaderHorizonSize, &ef, sizeof(ef)) || !ef.count) {
+    return;
+  }
+  if (ef.count != lev->chunks.size() || !f.read_array(ef.offset, ef.count, &lev->far_role)) {
+    lev->far_role.clear();
+    lg::error("[ctr] {}: bad far copy table: its far copies are drawn over their sources (convert "
+              "the level again)",
+              lev->name);
+    return;
+  }
+  size_t src = 0, cpy = 0;
+  for (const u8 r : lev->far_role) {
+    src += r == 1;
+    cpy += r == 2;
+  }
+  lg::info("[ctr] {}: far copies: {} source chunks, {} copy chunks ({:.2f} m)", lev->name, src, cpy,
+           ef.error / 4096.f);
+}
+
 // a cond box in world game units
 void cond_box(const CtrLevelData& lev, u32 i, float* lo, float* hi) {
   const auto& b = lev.cond_boxes[i];
@@ -7825,6 +7853,7 @@ bool CtrLevels::load_file(const fs::path& path,
   load_occluders(f, hdr, out);  // (AI-assisted, occluders)
   load_horizon(f, hdr, out);    // (AI-assisted, horizon)
   load_vis_bake(out);           // (AI-assisted, visbake)
+  load_far_copy(f, hdr, out);   // (AI-assisted, farcopy)
   // merc models: one skinned mesh per model
   if (hdr.num_merc_models) {
     std::vector<c3l::MercModel> models;
@@ -11648,6 +11677,14 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              m_name, 100.0 * m_cv_ok / n, m_cv_chunks / n, m_cv_runs / n, m_cv_tris / n, m_cv_frames);
     m_cv_frames = m_cv_ok = m_cv_chunks = m_cv_runs = m_cv_tris = 0;
   }
+  if (rs.log_now && m_fc_frames) {
+    // (AI-assisted, farcopy)
+    const double n = (double)m_fc_frames;
+    lg::info("[ctr] {}: far_copy: {:.1f} copy chunks drawn for {:.1f} source chunks per level draw ({} "
+             "level draws)",
+             m_name, m_fc_copies / n, m_fc_sources / n, m_fc_frames);
+    m_fc_frames = m_fc_copies = m_fc_sources = 0;
+  }
   if (rs.log_now && m_sz_frames) {
     // (AI-assisted, sizecull)
     const double n = (double)m_sz_frames;
@@ -13950,6 +13987,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
 #else
   const bool baking = false;
 #endif
+  // (AI-assisted, farcopy) far_copy: from this distance of a cell's center its copies
+  m_fc_d2 = 0.f;
+  if (settings.far_copy && !lev.far_role.empty()) {
+    const float d = settings.far_copy_distance * 4096.f;
+    m_fc_d2 = d * d;
+    m_fc_frames++;
+  }
   // (AI-assisted, sizecull) min_run_px: this frame's focal length (pixels of the 400-wide top screen
   // per unit of size at unit depth, as tie_lod_px's)
   m_sz_focal = 0.f;
@@ -14026,6 +14070,18 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_ph_emits++;
     const auto& ch = lev.chunks[ci];
     const bool vista_tier = ch.kind == c3l::CHUNK_KIND_VISTA;
+    // (AI-assisted, farcopy) a cell's far copies instead of its sources from far_copy_distance of
+    // its center on (both have it as lod_center: one of them is drawn); off: the sources
+    if (!lev.far_role.empty() && lev.far_role[ci]) {
+      const float dx = ch.lod_center[0] - cam.trans[0], dy = ch.lod_center[1] - cam.trans[1],
+                  dz = ch.lod_center[2] - cam.trans[2];
+      const bool far = m_fc_d2 > 0 && dx * dx + dy * dy + dz * dz >= m_fc_d2;
+      if ((lev.far_role[ci] == 1) == far) {
+        m_fc_sources += far;
+        return;
+      }
+      m_fc_copies += far;
+    }
     const bool sel_last = lev.pop_sel[ci] == pf_last;
     lev.pop_sel[ci] = pf;
     const float cfloor = lev.chunk_floor(ci, std::max<u32>((u32)rs.frame_idx, 1u));

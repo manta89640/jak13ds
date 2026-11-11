@@ -637,6 +637,26 @@ struct ExtHorizon {
 static_assert(sizeof(ExtHorizon) == kExtHeaderHorizonSize - kExtHeaderOccSize);
 
 /*!
+ * (AI-assisted, farcopy) Far copies (ctr_level_converter --far-copies, config.ini `far_copy`,
+ * docs/3ds-port/culling.md "8."): tie geometry with one version (no LOD group, wind, morph, envmap
+ * shine, opening planes, hideable prototype) in chunks of its own (role 1), and a simplified copy of
+ * it in chunks of the same cell (role 2). Both are ordinary tie chunks (lod_tier 0) with the cell's
+ * center as lod_center: the runtime draws a cell's copies instead of its sources while the camera
+ * is at least far_copy_distance from it. u8 role[count] per chunk (0: neither).
+ * ExtHeader::size >= kExtHeaderFarCopySize, then this at ext_offset + kExtHeaderHorizonSize.
+ */
+constexpr uint32_t kExtHeaderFarCopySize = 272;
+struct ExtFarCopy {
+  uint32_t count;   // = the chunk count
+  uint32_t offset;  // u8 role[count], absolute
+  float error;      // the copies' simplification error (game units)
+  uint32_t pad;
+};
+static_assert(sizeof(ExtFarCopy) == kExtHeaderFarCopySize - kExtHeaderHorizonSize);
+// the converter's triangle tiers of the far copies' sources and copies (written as lod_tier 0)
+constexpr uint32_t kFarSourceTier = 5, kFarCopyTier = 6;
+
+/*!
  * (AI-assisted, streaming) v19: a run's bounding sphere in its chunk's quantized units (world =
  * origin + c * scale, radius r * scale): the center of the box of the run's vertices (rounded down)
  * and the length of the larger half of the box per axis, ceil + 1 (as the runtime made them from the

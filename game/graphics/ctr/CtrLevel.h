@@ -742,6 +742,9 @@ struct CtrLevelData {
   std::vector<u8> dr_chunk_streak, dr_run_streak;
   // (AI-assisted, sizecull) per chunk and per run: hidden by min_run_px (1), for its hysteresis
   std::vector<u8> small_chunk, small_run;
+  // (AI-assisted, farcopy) per chunk its c3l::ExtFarCopy role (1 source, 2 copy; empty: none),
+  // read whatever config.ini says (a copy is never drawn along with its sources)
+  std::vector<u8> far_role;
   bool tf_morph(size_t ci) const {
     return ci < chunk_tf.size() && chunk_tf[ci] >= 0 && tf_chunks[chunk_tf[ci]].records_offset;
   }
@@ -1642,6 +1645,10 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   bool m_cv_on = false;
   // (AI-assisted, sizecull) min_run_px this level draw: pixels per game unit at unit depth (0: off),
   // and statistics
+  // (AI-assisted, farcopy) far_copy this level draw: the squared switch distance (game units; 0:
+  // the sources always), and statistics: level draws, copy chunks drawn, source chunks replaced
+  float m_fc_d2 = 0.f;
+  u64 m_fc_frames = 0, m_fc_copies = 0, m_fc_sources = 0;
   float m_sz_focal = 0.f;
   float m_sz_fwd[3] = {0, 0, 1};
   u64 m_sz_frames = 0, m_sz_chunks = 0, m_sz_runs = 0, m_sz_tris = 0;

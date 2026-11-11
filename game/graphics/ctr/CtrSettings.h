@@ -272,6 +272,11 @@ struct CtrSettings {
   // pixels across on the top screen are not drawn; one hidden that way comes back above 1.25x it
   // (docs/3ds-port/culling.md). 0: off (default)
   float min_run_px = 0.f;
+  // (AI-assisted, farcopy) levels converted with --far-copies: a cell's plain tie geometry is drawn
+  // as its simplified copy while the camera is far_copy_distance meters or more from the cell's
+  // center (docs/3ds-port/culling.md). Off: the sources always (the copies never)
+  bool far_copy = false;
+  float far_copy_distance = 150.f;
   bool depth_reuse = false;
   float depth_reuse_min = 20.f;
   // (AI-assisted) c3l v17 tie levels of detail: the instance groups that have a near version
