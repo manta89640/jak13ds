@@ -43,6 +43,7 @@ class CtrMercRenderer : public CtrBucketRenderer {
   /*! Blend shapes: move the model's face vertices for these weights (all 0: the base pose). */
   void apply_blerc(const struct CtrLevelData& lev,
                    const struct CtrMercModelData& model,
+                   int mesh,
                    const float* weights);
   /*! (AI-assisted) Copy the game's vertex data of the model's rewritten effects (c3l v12
    * MercModEffect) to m_mod_bytes: per effect the unpacked vertex count, then per unpacked
@@ -51,9 +52,14 @@ class CtrMercRenderer : public CtrBucketRenderer {
                   const u8* effect_ptrs,
                   int effect_count,
                   const struct CtrMercModelData& model);
-  /*! (AI-assisted) Unpack what gather_mod copied (from m_mod_bytes[pos]) into the model's mesh. */
-  // ys, ns: the ripple y and normal x/z scales taken out of its bones
-  void apply_mod(const struct CtrMercModelData& model, size_t pos, float ys = 1.f, float ns = 1.f);
+  /*! (AI-assisted) Unpack what gather_mod copied (from m_mod_bytes[pos]) into the mesh (the
+   * model's or its instance's copy). ys, ns: the ripple y and normal x/z scales taken out of its
+   * bones */
+  void apply_mod(const struct CtrMercModelData& model,
+                 int mesh,
+                 size_t pos,
+                 float ys = 1.f,
+                 float ns = 1.f);
 
  public:
   /*! Game thread, before the frame is handed to the render thread: copy the bone matrices the
@@ -74,6 +80,7 @@ class CtrMercRenderer : public CtrBucketRenderer {
     int mirrored = 0;      // (AI-assisted) ... marked ones not culled: a bone mirrors
     int unsent_bones = 0;  // (AI-assisted) draws using a bone the game didn't send
     int fogged = 0;        // (AI-assisted, far-fog) merc_fog: draws with the game's fog
+    int vtx_shared = 0;    // instances with rewritten vertices over the copies' limits
   };
 
  private:

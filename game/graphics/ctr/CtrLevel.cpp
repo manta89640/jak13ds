@@ -7948,6 +7948,9 @@ bool CtrLevels::load_file(const fs::path& path,
               lg::warn("[ctr] {}: shadow hulls not closed, not used", md.name);
             }
           }
+          if (md.blerc_count || !md.mod.empty()) {
+            md.indices = mindices;
+          }
           md.mesh = ctr_gpu_skinned_mesh_create(mverts.data(), m.vertex_count, mindices.data(),
                                                 end - first);
           while (md.mesh < 0 &&

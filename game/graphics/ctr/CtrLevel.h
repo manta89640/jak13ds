@@ -107,6 +107,9 @@ struct CtrMercModelData {
   // (AI-assisted) where the mesh's data is in the file, to make it again after a load that ran out
   // of memory: first MercVertex and count, merc index range (index_end 0: not possible)
   u32 file_vertex = 0, vertex_count = 0, index_first = 0, index_end = 0;
+  // models whose vertices are rewritten (blend shapes, mod): the mesh's indices, for the copies of
+  // the instances drawn after the first in a frame (CtrMercRenderer)
+  std::vector<u16> indices;
 };
 
 // The PS2's shine distance of Jak 1's envmapped ties (draw-inline-array-instance-tie): an instance

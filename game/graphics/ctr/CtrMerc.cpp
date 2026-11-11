@@ -423,11 +423,12 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones, {} with the generated low LOD), "
               "{} draws ({} shine draws, {} "
               "over their opaque base draw's triangles: foldable), {} with back faces culled "
-              "({} not: mirroring bone), {} palette bones not sent, {} draws with fog",
+              "({} not: mirroring bone), {} palette bones not sent, {} draws with fog, {} "
+              "instances with rewritten vertices over the copies' limits",
               m_name, m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.gen_lod,
               m_stats.draws, m_stats.env_drawn,
               m_stats.env_foldable, m_stats.culled,
-              m_stats.mirrored, m_stats.unsent_bones, m_stats.fogged);
+              m_stats.mirrored, m_stats.unsent_bones, m_stats.fogged, m_stats.vtx_shared);
     m_stats = Stats();
   }
 }
@@ -564,11 +565,12 @@ void CtrMercRenderer::note_keira_shadow(const CtrMercModelData& model, u64 frame
 
 void CtrMercRenderer::apply_blerc(const CtrLevelData& lev,
                                   const CtrMercModelData& model,
+                                  int mesh,
                                   const float* weights) {
   if (model.scale <= 0.f) {
     return;
   }
-  u8* verts = (u8*)ctr_gpu_mesh_vertices(model.mesh);
+  u8* verts = vtx_vertices(model, mesh, m_levels->set_generation());
   if (!verts) {
     return;
   }
@@ -596,7 +598,7 @@ void CtrMercRenderer::apply_blerc(const CtrLevelData& lev,
     }
   }
   if (lo <= hi) {
-    ctr_gpu_mesh_flush(model.mesh, (int)(lo * sizeof(c3l::MercVertex)),
+    ctr_gpu_mesh_flush(mesh, (int)(lo * sizeof(c3l::MercVertex)),
                        (int)((hi - lo + 1) * sizeof(c3l::MercVertex)));
   }
 }
@@ -665,19 +667,35 @@ bool mod_covers_all(const CtrMercModelData& model) {
 
 // Render thread, per model with rewritten vertices (for the loaded levels' generation): each mod
 // effect's last unpacked vertices (ModV), written again when the game doesn't unpack the effect,
-// so the mesh's buffer taken this frame never keeps an older update of it
+// so the mesh's buffer taken this frame never keeps an older update of it. The GPU reads a mesh's
+// vertices after the frame is built, so instances drawn after the first in a frame each get a
+// copy of the mesh (else all would show the last one's vertices); a few per model, within a
+// memory budget, beyond which they draw the first one's vertices.
 struct VtxModel {
   const CtrMercModelData* model = nullptr;
   std::vector<std::vector<u8>> mod_last;
+  int used = 0, used_last = 0;  // instances this frame and the last one
+  u64 base_frame = ~0ull;       // the frame the model's own mesh was last rewritten in
+  std::vector<int> copies;      // meshes of the 2nd, 3rd... instance
 };
 struct VtxRegistry {
   u32 gen = ~0u;
+  u64 frame = ~0ull;
+  u32 copy_bytes = 0;
   std::vector<VtxModel> models;
 };
 VtxRegistry g_vtx;
+constexpr int kVtxMaxCopies = 3;
+constexpr u32 kVtxCopyBudget = 512u << 10;
 VtxModel& vtx_model(const CtrMercModelData& model, u32 gen) {
   if (g_vtx.gen != gen) {
+    for (auto& m : g_vtx.models) {
+      for (int c : m.copies) {
+        ctr_gpu_mesh_delete(c);
+      }
+    }
     g_vtx.models.clear();
+    g_vtx.copy_bytes = 0;
     g_vtx.gen = gen;
   }
   for (auto& m : g_vtx.models) {
@@ -688,6 +706,53 @@ VtxModel& vtx_model(const CtrMercModelData& model, u32 gen) {
   auto& m = g_vtx.models.emplace_back();
   m.model = &model;
   return m;
+}
+// The model's vertices for a rewrite of the mesh: the model's own mesh marked as rewritten this frame
+u8* vtx_vertices(const CtrMercModelData& model, int mesh, u32 gen) {
+  if (mesh == model.mesh) {
+    vtx_model(model, gen).base_frame = g_vtx.frame;
+  }
+  return (u8*)ctr_gpu_mesh_vertices(mesh);
+}
+// This instance of a model with rewritten vertices: the mesh it rewrites and draws; own: it may
+// rewrite it; always: it must (a copy, or the first instance of a model drawn more than once)
+struct VtxInstance {
+  int mesh;
+  bool own, always;
+};
+VtxInstance vtx_instance(const CtrMercModelData& model, u64 frame, u32 gen) {
+  VtxModel& m = vtx_model(model, gen);
+  if (g_vtx.frame != frame) {
+    g_vtx.frame = frame;
+    for (auto& o : g_vtx.models) {
+      o.used_last = o.used;
+      o.used = 0;
+    }
+  }
+  const int k = m.used++;
+  if (k == 0) {
+    return {model.mesh, true, m.used_last > 1};
+  }
+  if (k - 1 < (int)m.copies.size()) {
+    return {m.copies[k - 1], true, true};
+  }
+  // a new copy, of the model's mesh as the first instance rewrote it this frame (both buffers
+  // then hold the rest of the vertices as made; its moved ones are rewritten for this instance)
+  const u32 need = model.vertex_count * (u32)sizeof(c3l::MercVertex) * 2 + (u32)model.indices.size() * 2;
+  if (k - 1 < kVtxMaxCopies && m.base_frame == frame && model.vertex_count &&
+      !model.indices.empty() && g_vtx.copy_bytes + need <= kVtxCopyBudget) {
+    const void* src = ctr_gpu_mesh_vertices(model.mesh);
+    const int c = src ? ctr_gpu_skinned_mesh_create(src, (int)model.vertex_count,
+                                                    model.indices.data(),
+                                                    (int)model.indices.size())
+                      : -1;
+    if (c >= 0) {
+      m.copies.push_back(c);
+      g_vtx.copy_bytes += need;
+      return {c, true, true};
+    }
+  }
+  return {model.mesh, false, false};
 }
 }  // namespace
 
@@ -738,7 +803,11 @@ void CtrMercRenderer::gather_mod(const u8* ee_mem,
   }
 }
 
-void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos, float ys, float ns) {
+void CtrMercRenderer::apply_mod(const CtrMercModelData& model,
+                                int mesh,
+                                size_t pos,
+                                float ys,
+                                float ns) {
   const double t0 = ctr_gpu_time_ms();
   // the copy is followed to its end before the vertices' other buffer is taken (the loop below
   // gives up where it can't be followed: the buffer would be left half written)
@@ -779,7 +848,7 @@ void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos, float
       }
     }
   }
-  u8* verts = (u8*)ctr_gpu_mesh_vertices(model.mesh);
+  u8* verts = vtx_vertices(model, mesh, m_levels->set_generation());
   if (!verts) {
     return;
   }
@@ -910,7 +979,7 @@ void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos, float
     m_mod_verts += total;
   }
   if (lo <= hi) {
-    ctr_gpu_mesh_flush(model.mesh, (int)(lo * sizeof(c3l::MercVertex)),
+    ctr_gpu_mesh_flush(mesh, (int)(lo * sizeof(c3l::MercVertex)),
                        (int)((hi - lo + 1) * sizeof(c3l::MercVertex)));
   }
   model.mod_checked = true;
@@ -1191,8 +1260,16 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     clip = hud;
   }
 
-  // blend shapes (faces): the game's weights follow the flags (Merc2::handle_pc_model)
-  if (model->blerc_count && model->keira_rig) {
+  // the mesh this instance draws (models with rewritten vertices: see vtx_instance)
+  VtxInstance vi{model->mesh, true, false};
+  if (model->blerc_count || !model->mod.empty()) {
+    vi = vtx_instance(*model, rs.frame_idx, m_levels->set_generation());
+    m_stats.vtx_shared += !vi.own;
+  }
+  const int mesh = vi.mesh;
+  // blend shapes (faces): the game's weights follow the flags (Merc2::handle_pc_model). An
+  // instance over the copies' limits (!own) is drawn with the first instance's vertices
+  if (vi.own && model->blerc_count && model->keira_rig) {
     // (AI-assisted) her face: Jak's weights mapped to her targets, and her blinks
     float weights[c3l::kMercBlercWeights];
     float jak_w[c3l::kMercBlercWeights];
@@ -1201,19 +1278,23 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       memcpy(jak_w, input + 32, sizeof(jak_w));
     }
     const bool any = ctr_keira::face_weights(uses_blerc ? jak_w : nullptr, rs.frame_idx, weights);
-    if (any || model->blerc_moved) {
-      apply_blerc(*lev, *model, weights);
-      model->blerc_moved = any;
+    if (any || model->blerc_moved || vi.always) {
+      apply_blerc(*lev, *model, mesh, weights);
+      if (mesh == model->mesh) {
+        model->blerc_moved = any;
+      }
     }
-  } else if (model->blerc_count) {
+  } else if (vi.own && model->blerc_count) {
     const bool uses_blerc = flags.bitflags & 4;
-    if (uses_blerc || model->blerc_moved) {
+    if (uses_blerc || model->blerc_moved || vi.always) {
       float weights[c3l::kMercBlercWeights] = {};
       if (uses_blerc) {
         memcpy(weights, input + 32, sizeof(weights));
       }
-      apply_blerc(*lev, *model, weights);
-      model->blerc_moved = uses_blerc;
+      apply_blerc(*lev, *model, mesh, weights);
+      if (mesh == model->mesh) {
+        model->blerc_moved = uses_blerc;
+      }
     }
   }
 
@@ -1225,9 +1306,10 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       m_mod_cursor++;
     }
     if (m_snap_valid) {
-      if (m_mod_cursor < m_mod_snaps.size() && m_mod_snaps[m_mod_cursor].ordinal == ordinal) {
+      if (vi.own && m_mod_cursor < m_mod_snaps.size() &&
+          m_mod_snaps[m_mod_cursor].ordinal == ordinal) {
         const ModSnap& ms = m_mod_snaps[m_mod_cursor];
-        apply_mod(*model, ms.pos, ms.ys, ms.ns);
+        apply_mod(*model, mesh, ms.pos, ms.ys, ms.ns);
       }
     } else {
       const int ec = std::min<int>(flags.effect_count, 64);
@@ -1253,7 +1335,9 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
           }
         }
       }
-      apply_mod(*model, 0, ys, ns);
+      if (vi.own) {
+        apply_mod(*model, mesh, 0, ys, ns);
+      }
     }
   }
 
@@ -1619,7 +1703,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       // emerc.frag: texture * fade * 2, no alpha test, the envmap mode's blending (adds a shine)
       st.atest = CTR_TEST_ALWAYS;
       ctr_gpu_draw_skinned_env(&st, clip, palette_rows, draw.palette_count,
-                               direct_f24(draw.palette_count), palette_id, fade, model->mesh,
+                               direct_f24(draw.palette_count), palette_id, fade, mesh,
                                draw.first_index, draw.index_count);
       m_stats.draws++;
       continue;
@@ -1649,7 +1733,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       base_ranges[n_base_ranges++] = (u64)draw.first_index << 32 | draw.index_count;
     }
     ctr_gpu_draw_skinned(&st, clip, palette_rows, draw.palette_count,
-                         direct_f24(draw.palette_count), palette_id, light_data, model->mesh,
+                         direct_f24(draw.palette_count), palette_id, light_data, mesh,
                          draw.first_index, draw.index_count);
     m_stats.draws++;
   }
