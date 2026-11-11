@@ -19,7 +19,6 @@
 #include "common/util/string_util.h"
 
 #include "game/external/discord_jak1.h"
-#include "game/graphics/ctr/CtrButtonArt.h"
 #include "game/graphics/display.h"
 #include "game/graphics/gfx.h"
 #include "game/graphics/sceGraphicsInterface.h"
@@ -825,28 +824,6 @@ void InitMachine_PCPort() {
     memcpy(&bits, &text_min, 4);
     intern_from_c("*pc-3ds-text-min-height*")->value = bits;
   }
-  // (AI-assisted) 3DS button symbols (game/graphics/ctr/CtrButtonArt.h): config.ini button_art
-  // (default on); the progress menu tells where its PS2 button icons are (progress-draw.gc).
-  {
-    bool button_art = false;  // (AI-assisted) off since Oct 12: the user prefers the PS2 symbols for now
-#ifdef __3DS__
-    button_art = ctr_config_bool("button_art", 0);
-#else
-    if (const char* e = getenv("OPENGOAL_BUTTON_ART")) {
-      button_art = atoi(e) != 0;
-    }
-#endif
-    ctr_button_art::set_enabled(button_art);
-    intern_from_c("*pc-3ds-button-art*")->value =
-        button_art ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
-    lg::info("3DS button symbols {} (config.ini button_art)", button_art ? "on" : "off");
-    make_function_symbol_from_c(
-        "pc-3ds-button-texture", +[](u32 button, u32 tbp0, u32 psm) -> u64 {
-          ctr_button_art::register_texture((int)button, tbp0, psm);
-          return 0;
-        });
-  }
-
   make_function_symbol_from_c("pc-discord-rpc-update", update_discord_rpc);
 
   // setup string constants

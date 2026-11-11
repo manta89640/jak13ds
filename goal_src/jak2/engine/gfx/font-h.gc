@@ -702,18 +702,6 @@
     )
   )
 
-;; og:preserve-this 3DS button_art: pad-square is Y (green), pad-triangle X (blue), pad-x B (yellow)
-(#when TARGET_3DS
-  (define-extern *pc-3ds-button-art* symbol)
-  (when *pc-3ds-button-art*
-    (dotimes (j 4)
-      (set! (-> *font-work* color-table 24 color j) (the-as rgba #x804c6510))
-      (set! (-> *font-work* color-table 26 color j) (the-as rgba #x80784a46))
-      (set! (-> *font-work* color-table 27 color j) (the-as rgba #x80337b7f))
-      )
-    )
-  )
-
 (defun font-set-tex0 ((arg0 (pointer gs-tex0)) (arg1 texture) (arg2 int) (arg3 int) (arg4 int))
   "Write the TEX0 parameters for a font"
   (set! (-> arg0 0) (new 'static 'gs-tex0

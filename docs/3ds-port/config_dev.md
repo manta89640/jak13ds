@@ -89,7 +89,6 @@ capital letters only 5 to 7 pixels tall.
 ```ini
 text_scale = 1             # all game text x this (0.5 .. 2); the user key text_size sets it
 text_min_height = 9        # the smallest capital letter height, in pixels of the top screen (0 .. 16; 0 = the PS2's sizes). Text drawn smaller is drawn this big
-button_art = off           # (off by default since Oct 12: the PS2 symbols) on: the PS2 button symbols in the text and the progress menu are drawn as the New 3DS buttons (A red, B yellow, X blue, Y green; by position: circle = A, cross = B, triangle = X, square = Y); off: the PS2 symbols
 ```
 
 - The size applies to all of the game's text: menus, hints, the talk prompts, subtitles, the HUD
@@ -99,17 +98,7 @@ button_art = off           # (off by default since Oct 12: the PS2 symbols) on: 
   that grows wraps within the width of its box and may take lines below it (down to just above
   the bottom of the screen), so nothing is left out.
 - On the PC (`gk --ctr-gfx`, small memory build) the same values come from
-  `OPENGOAL_TEXT_SCALE`, `OPENGOAL_TEXT_MIN_HEIGHT` and `OPENGOAL_BUTTON_ART`.
-- The button symbols are drawn when the textures are read from the game's VRAM, the game files
-  stay as they are (`game/graphics/ctr/CtrButtonArt.h`). Memory: the two font textures that hold
-  the symbols are kept at 32 bits per texel instead of 16 (colors), +256 KB of texture memory for
-  the large font (256x512) and +64 KB for the small one (128x256); the progress menu's four icons
-  (64x64) were 32-bit already. Drawing the symbols takes a few ms once, when the font is first
-  read (`[ctr] 3DS button symbols drawn into the ... font in N ms`).
-- Jak II reads `button_art` too (off by default): the pad symbols' cells of its two western font
-  pages get the font's own capitals (cross B, square Y, triangle X, circle A; L1 L, R1 R, L2 ZL,
-  R2 ZR) in the 3DS buttons' colors; the disc, highlight and shade glyphs stay (the mission icons
-  use them). The pages stay gray, so no more texture memory.
+  `OPENGOAL_TEXT_SCALE` and `OPENGOAL_TEXT_MIN_HEIGHT`. The text shows the PS2 button symbols.
 - The 3DS build's wording (`game/assets/jak1/game_text_3ds.gp`, used by `goal_src/jak1/game.gp`
   when goalc runs with `OPENGOAL_SMALL_MEMORY=1`): the memory card and disc messages say SD card
   and game files, in the seven original languages. The options menus have no graphic options

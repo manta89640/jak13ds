@@ -854,7 +854,6 @@
 (#when TARGET_3DS
   (define-extern *pc-3ds-text-scale* float)
   (define-extern *pc-3ds-text-min-height* float)
-  (define-extern *pc-3ds-button-art* symbol)
   (define-extern get-string-length (function string font-context float))
   ;; capital height in pixels at scale 1: the large font's capitals are 25 of its 32 texel rows,
   ;; drawn 16 lines tall (16 x 240 / 224 pixels); the small font is half as tall
@@ -917,10 +916,4 @@
      of them), down to 6 lines above the bottom of the screen, instead of being left out."
     (if (< 1.0 k)
       (fmax height (fmin (* height k k) (- 218.0 top)))
-      height))
-  ;; the PS2 button glyphs' symbol colors (24 pad-square .. 27 pad-x) are white: the 3DS
-  ;; renderer draws the 3DS buttons in their own colors there (game/graphics/ctr/CtrButtonArt.h)
-  (when *pc-3ds-button-art*
-    (dotimes (i 4)
-      (dotimes (j 4)
-        (set! (-> *font-work* color-table (+ i 24) color j) (the-as rgba #x80808080))))))
+      height)))

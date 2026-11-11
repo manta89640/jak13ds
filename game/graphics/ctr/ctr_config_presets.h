@@ -154,7 +154,6 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"depth16", "off"},
     {"text_scale", "1"},
     {"text_min_height", "9"},
-    {"button_art", "off"},
 };
 
 /* Keys that were removed (with their code): ignored with a note, not an "unknown setting".
@@ -182,6 +181,7 @@ static const char* const ctr_cfg_removed[] = {
     "ocean_near_alpha", "envmap_batch", "merc_tex_sort", "envmap_min_px",
     "max_sprites", "sprite_max_size", "sprite_min_alpha", "particle_fill",
     "proctex_glows", "shadow_casters", "tod_pulse_step",
+    "button_art",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

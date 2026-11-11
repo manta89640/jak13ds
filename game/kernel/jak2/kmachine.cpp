@@ -13,7 +13,6 @@
 #include "common/util/string_util.h"
 
 #include "game/external/discord_jak2.h"
-#include "game/graphics/ctr/CtrButtonArt.h"
 #include "game/graphics/display.h"
 #include "game/graphics/jak2_texture_remap.h"
 #include "game/kernel/common/Symbol4.h"
@@ -869,22 +868,6 @@ void InitMachine_PCPort() {
 #endif
     intern_from_c("*pc-3ds-ocean-full*")->value() =
         ocean_full ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
-  }
-  // config.ini button_art, off by default as Jak 1's (game/graphics/ctr/CtrButtonArt.h)
-  {
-    bool button_art = false;
-#ifdef __3DS__
-    button_art = ctr_config_bool("button_art", 0);
-#else
-    if (const char* e = getenv("OPENGOAL_BUTTON_ART")) {
-      button_art = atoi(e) != 0;
-    }
-#endif
-    ctr_button_art::set_jak2(true);
-    ctr_button_art::set_enabled(button_art);
-    intern_from_c("*pc-3ds-button-art*")->value() =
-        button_art ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
-    lg::info("3DS button symbols {} (config.ini button_art)", button_art ? "on" : "off");
   }
 }
 

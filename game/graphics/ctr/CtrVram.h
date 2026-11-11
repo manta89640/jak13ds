@@ -154,8 +154,6 @@ class CtrVram {
   }
 
   void clear_cache();
-  // (AI-assisted) drop the cached textures ctr_button_art::patch may change
-  void drop_art_textures();
   // Frees the decoded textures no lookup asked for since the last call: the ones kept aside go,
   // and every cached one is kept aside until its next lookup takes it back (no decode). The
   // relocated ones (the font pages) stay. Between frames (no texture of a frame in use).
@@ -325,7 +323,6 @@ class CtrVram {
     const u32 off = m_remap[tex0 & 0x3fff];
     return off <= (tex0 & 0x3fff) ? tex0 - off : tex0;
   }
-  u32 m_art_gen = 0;  // (AI-assisted) ctr_button_art::generation() of the cached textures
   // (AI-assisted) per 16 KB chunk: what it holds (see the top of this file). Page chunks have odd
   // ids, all others even ones from m_next_unique_id.
   static constexpr u32 kChunkCount = 256;
