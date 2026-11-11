@@ -180,6 +180,11 @@ static const char* const ctr_cfg_removed[] = {
      * removed (opt-audit: they cost more than they saved, or no shipped file used them) */
     "impostors", "impostor_distance", "impostor_error", "impostor_budget", "impostor_atlas",
     "fine_vis", "fine_vis_kb", "occ_cull", "occ_cull_tris", "occ_cull_dist", "vista_untextured",
+    /* the level geometry strip: the opt-in culls, ps2_lod_scale and the auto_detail controller */
+    "occluders", "occluder_count", "horizon", "horizon_radius", "title_vis", "cell_vis",
+    "depth_reuse", "depth_reuse_min", "min_run_px", "cone_cull", "far_copy", "far_copy_distance",
+    "cull_terrain", "ps2_lod_scale", "auto_detail", "auto_detail_gpu_ms", "shrub_distance_max",
+    "tie_distance_scale_max", "shrub_scale_max",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */
