@@ -496,4 +496,20 @@ inline void depth_blocks(const float* depth, float* zfar, float* znear) {
   }
 }
 
+/*!
+ * (AI-assisted, sizecull) An upper bound of how many pixels across a sphere looks: `focal` pixels per
+ * unit of size at unit depth, `fwd` the view's unit direction. A sphere of center depth z, distance
+ * d spans at most 2 r f d / (z (z - r)) along the screen (the off-axis stretch d / z included).
+ * Reaching to the camera's plane: huge.
+ */
+inline float sphere_px(const float* c, float r, const float* eye, const float* fwd, float focal) {
+  const float v[3] = {c[0] - eye[0], c[1] - eye[1], c[2] - eye[2]};
+  const float z = dot3(v, fwd);
+  if (!(z - r > 1e-3f * (r + 1.f))) {
+    return 1e30f;
+  }
+  const float d = std::sqrt(dot3(v, v));
+  return 2.f * r * focal * d / (z * (z - r));
+}
+
 }  // namespace ctr_cull

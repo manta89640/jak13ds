@@ -740,6 +740,8 @@ struct CtrLevelData {
   // in how many copies in a row (depth_reuse hides it from the second on)
   std::vector<u16> dr_chunk_seq, dr_run_seq;
   std::vector<u8> dr_chunk_streak, dr_run_streak;
+  // (AI-assisted, sizecull) per chunk and per run: hidden by min_run_px (1), for its hysteresis
+  std::vector<u8> small_chunk, small_run;
   bool tf_morph(size_t ci) const {
     return ci < chunk_tf.size() && chunk_tf[ci] >= 0 && tf_chunks[chunk_tf[ci]].records_offset;
   }
@@ -1638,6 +1640,11 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   bool m_dr_ok = false;
   // (AI-assisted, cellvis) cell_vis this level draw, and statistics
   bool m_cv_on = false;
+  // (AI-assisted, sizecull) min_run_px this level draw: pixels per game unit at unit depth (0: off),
+  // and statistics
+  float m_sz_focal = 0.f;
+  float m_sz_fwd[3] = {0, 0, 1};
+  u64 m_sz_frames = 0, m_sz_chunks = 0, m_sz_runs = 0, m_sz_tris = 0;
   u64 m_cv_frames = 0, m_cv_ok = 0, m_cv_chunks = 0, m_cv_runs = 0, m_cv_tris = 0;
   u64 m_dr_frames = 0, m_dr_on = 0, m_dr_chunks = 0, m_dr_runs = 0, m_dr_tris = 0;
   void choose_occluders(CtrLevelData& lev, const CtrBackgroundCamera& cam, u64 frame,

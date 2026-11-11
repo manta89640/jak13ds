@@ -518,6 +518,37 @@ void test_cell_bins() {
   fmt::print("  cell visibility: {} directions in the bins of their views\n", checked);
 }
 
+// (AI-assisted, sizecull) sphere_px is never less than the extent of the sphere's projected points
+void test_sphere_px() {
+  std::mt19937 rng(11);
+  std::uniform_real_distribution<float> u(-1.f, 1.f);
+  const float f = 400.f;  // pixels per unit at unit depth
+  const float eye[3] = {0, 0, 0}, fwd[3] = {0, 0, 1};
+  int n = 0;
+  for (int iter = 0; iter < 3000; iter++) {
+    const float z = 2.f + 200.f * (u(rng) + 1.f);
+    const float c[3] = {u(rng) * z * 0.7f, u(rng) * z * 0.45f, z};
+    const float r = 0.01f + 3.f * (u(rng) + 1.f);
+    if (z - r < 0.5f) {
+      continue;
+    }
+    float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
+    for (int k = 0; k < 400; k++) {
+      float d[3] = {u(rng), u(rng), u(rng)};
+      const float l = std::sqrt(ctr_cull::dot3(d, d));
+      const float p[3] = {c[0] + d[0] / l * r, c[1] + d[1] / l * r, c[2] + d[2] / l * r};
+      x0 = std::fmin(x0, f * p[0] / p[2]);
+      x1 = std::fmax(x1, f * p[0] / p[2]);
+      y0 = std::fmin(y0, f * p[1] / p[2]);
+      y1 = std::fmax(y1, f * p[1] / p[2]);
+    }
+    const float px = ctr_cull::sphere_px(c, r, eye, fwd, f);
+    check(px >= x1 - x0 && px >= y1 - y0, "a sphere's pixel bound holds its projection");
+    n++;
+  }
+  fmt::print("  sphere size on screen: {} spheres within their bound\n", n);
+}
+
 }  // namespace
 
 void run_cull_tests() {
@@ -531,4 +562,5 @@ void run_cull_tests() {
   test_vis_bake_intervals();
   test_depth_reuse();
   test_cell_bins();
+  test_sphere_px();
 }

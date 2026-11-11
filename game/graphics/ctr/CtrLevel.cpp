@@ -11648,6 +11648,14 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              m_name, 100.0 * m_cv_ok / n, m_cv_chunks / n, m_cv_runs / n, m_cv_tris / n, m_cv_frames);
     m_cv_frames = m_cv_ok = m_cv_chunks = m_cv_runs = m_cv_tris = 0;
   }
+  if (rs.log_now && m_sz_frames) {
+    // (AI-assisted, sizecull)
+    const double n = (double)m_sz_frames;
+    lg::info("[ctr] {}: min_run_px hid {:.1f} chunks and {:.1f} runs ({:.0f} tris) per level draw ({} "
+             "level draws)",
+             m_name, m_sz_chunks / n, m_sz_runs / n, m_sz_tris / n, m_sz_frames);
+    m_sz_frames = m_sz_chunks = m_sz_runs = m_sz_tris = 0;
+  }
   if (rs.log_now && m_vista_frames) {
     lg::info("[ctr] {}: vista {:.1f} chunks {:.0f} tris, low resolution chunks in near mode {:.1f} "
              "per level draw ({} level draws)",
@@ -12266,6 +12274,14 @@ bool depth_reuse_frame(const std::array<math::Vector4f, 4>& R, float y_scale,
   constexpr float kMove = 0.25f * 4096.f;
   g_dr.ok = d2 <= kMove * kMove && la > 0 && lb > 0 && dot / std::sqrt(la * lb) >= 0.99985f;
   return g_dr.ok;
+}
+// (AI-assisted, sizecull) is something `px` pixels across hidden by min_run_px: below it, or below
+// 1.25x it if it was hidden (*state: 1 hidden)
+bool small_size(float px, u8* state) {
+  const float lim = ctr_settings().min_run_px;
+  const bool hide = px < (*state ? 1.25f * lim : lim);
+  *state = hide ? 1 : 0;
+  return hide;
 }
 // hidden by the copy now and in the copy before (a streak of two)
 bool depth_reuse_hidden(const float* c, float r, u16* seq, u8* streak) {
@@ -13934,6 +13950,34 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
 #else
   const bool baking = false;
 #endif
+  // (AI-assisted, sizecull) min_run_px: this frame's focal length (pixels of the 400-wide top screen
+  // per unit of size at unit depth, as tie_lod_px's)
+  m_sz_focal = 0.f;
+  if (settings.min_run_px > 0) {
+    const float pzw = std::abs(cam.perspective[2][3]);
+    m_sz_focal = pzw > 0 ? 200.f * std::abs(cam.fog.x() * cam.perspective[0][0] / 256.f) / pzw : 0.f;
+    // the view's direction: its four planes' (inward) normals summed
+    float fl = 0;
+    for (int c = 0; c < 3; c++) {
+      m_sz_fwd[c] = cam.planes[c][0] + cam.planes[c][1] + cam.planes[c][2] + cam.planes[c][3];
+      fl += m_sz_fwd[c] * m_sz_fwd[c];
+    }
+    if (fl > 0) {
+      fl = 1.f / std::sqrt(fl);
+      for (float& f : m_sz_fwd) {
+        f *= fl;
+      }
+    } else {
+      m_sz_focal = 0.f;
+    }
+    if (lev.small_chunk.size() != lev.chunks.size()) {
+      lev.small_chunk.assign(lev.chunks.size(), 0);
+    }
+    if (lev.small_run.size() != lev.vis_runs.size()) {
+      lev.small_run.assign(lev.vis_runs.size(), 0);
+    }
+    m_sz_frames++;
+  }
   // (AI-assisted, cellvis) cell_vis: the runs seen from the camera's cell this way (lev.cell_bits)
   m_cv_on = false;
   if (settings.cell_vis && lev.cell_bake && !baking && !title_on) {
@@ -14050,6 +14094,21 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         }
         dr_runs = t >= 1;
       }
+      // (AI-assisted, sizecull) a chunk smaller than min_run_px is not drawn; the runs of one far
+      // enough for a run of 5 cm to be under it are tested (below)
+      bool sz_runs = false;
+      if (m_sz_focal > 0) {
+        const float eye[3] = {cam.trans[0], cam.trans[1], cam.trans[2]};
+        if (small_size(ctr_cull::sphere_px(ch.bsphere, ch.bsphere[3], eye, m_sz_fwd, m_sz_focal),
+                       &lev.small_chunk[ci])) {
+          m_sz_chunks++;
+          return;
+        }
+        const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
+                    dz = ch.bsphere[2] - cam.trans[2];
+        const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        sz_runs = d - ch.bsphere[3] > 0.1f * 4096.f * m_sz_focal / settings.min_run_px;
+      }
       const bool straddles = cross != 0;
       bool partly = false;
       bool tmorph = false;  // the tfrag geomorph: near or mid versions shown
@@ -14153,7 +14212,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       const u32 x_nr = vis_test || vista_tier
                            ? ch.vis_run_count
                            : (lev.chunk_run_count[ci] ? lev.chunk_run_count[ci] : ch.vis_run_count);
-      if ((((occ_mask || hz_runs || dr_runs) && run_sph) || m_vb_n || m_cv_on) && x_nr) {
+      if ((((occ_mask || hz_runs || dr_runs || sz_runs) && run_sph) || m_vb_n || m_cv_on) && x_nr) {
         const u32 r0 = lev.chunk_first_run[ci];
         const u32 nr = x_nr;
         if (!runs_valid) {
@@ -14200,6 +14259,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
               m_hz_runs++;
               m_hz_tris += lev.vis_runs[r].index_count / 3;
             }
+            if (sz_runs && m_run_shown[r]) {
+              // (AI-assisted, sizecull)
+              const float eye[3] = {cam.trans[0], cam.trans[1], cam.trans[2]};
+              if (small_size(ctr_cull::sphere_px(c, rr, eye, m_sz_fwd, m_sz_focal), &lev.small_run[r])) {
+                m_run_shown[r] = 0;
+                m_sz_runs++;
+                m_sz_tris += lev.vis_runs[r].index_count / 3;
+              }
+            }
             if (dr_runs && m_run_shown[r] &&
                 depth_reuse_hidden(c, rr, &lev.dr_run_seq[r], &lev.dr_run_streak[r])) {
               m_run_shown[r] = 0;
@@ -14212,7 +14280,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         if (!shown) {
           (occ_mask ? m_occ_chunks
                     : (hz_runs ? m_hz_chunks
-                               : (dr_runs ? m_dr_chunks : (m_cv_on ? m_cv_chunks : m_vb_chunks))))++;
+                               : (dr_runs ? m_dr_chunks
+                                          : (sz_runs ? m_sz_chunks
+                                                     : (m_cv_on ? m_cv_chunks : m_vb_chunks)))))++;
           return;
         }
         partly = partly || shown < nr;

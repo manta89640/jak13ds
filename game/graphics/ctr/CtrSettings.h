@@ -268,6 +268,10 @@ struct CtrSettings {
   // 240-line top screen as it did of the PS2's picture (docs/3ds-port/culling.md). 1: the PS2's
   float ps2_lod_scale = 1.f;
   bool ps2_lod_scale_auto = false;
+  // (AI-assisted, sizecull) level chunks and runs whose bounding sphere is smaller than this many
+  // pixels across on the top screen are not drawn; one hidden that way comes back above 1.25x it
+  // (docs/3ds-port/culling.md). 0: off (default)
+  float min_run_px = 0.f;
   bool depth_reuse = false;
   float depth_reuse_min = 20.f;
   // (AI-assisted) c3l v17 tie levels of detail: the instance groups that have a near version
