@@ -400,7 +400,8 @@ shape (and needs the matching `goal_c_ops.h`):
   analyze calls whose type differs from the function's), other calls are never taken (`gc_nofn`).
 - Not guarded: functions of the C++ runtime (symbols declared in `kernel-defs.gc`, e.g.
   `_format`, `method-set!`), symbols last defined to something that isn't a lambda (`(define
-  format _format)`, mips2c functions), and method calls (the target depends on the object's type).
+  format _format)`, mips2c functions). (AI-assisted, mguard, Nov 11) Method calls are guarded
+  since: see "Guarded method calls" below.
 - Float constants are C constants (`gc_bitsf(0x...)`) instead of loads from static data, and float
   compares are `gc_fcmp(a, b, op)`: when one side is a constant (zero or a normal number), the
   compare is done on the bits in integer registers (signed order for positive constants, unsigned
@@ -417,6 +418,26 @@ fallbacks), `vcmp`/`vmrs` 11,682/11,722 -> 1,780/1,782, direct `bl` 103 -> 22,36
 sites; the static `blx reg` count stays ~55k because each guarded site keeps its fallback). The
 hot path of a guarded call is `cmp` + a predicted `bne` + `bl` (the expected address is a literal,
 often hoisted out of loops). Not measured on hardware yet.
+
+### Guarded method calls (AI-assisted, mguard, Nov 11)
+
+A method call loads the function from the object's type (`(-> obj type method-table id)`) and
+called it through the pointer: a `blx reg` every time. Now it is a `GC_GCALL` too, with the
+expected target being the method the call's static type has when nothing overrides it: the
+nearest type up from it (itself first) for which a `defmethod` of that method id was compiled
+before (`Compiler::m_c_defined_methods`, filled by `compile_defmethod`). The module of the
+defmethod exports the weak alias `gc_d_method_<type>_<id>_<hash>` for its function
+(`CModuleEmitter::add_function`, from the FunctionEnv's `method_of_type_name` / `method_id`), the
+caller references it weakly, and a call on an object of a subtype that overrides it, or a method
+redefined later, takes the indirect fallback, as a stale symbol guard does. The same result
+whichever branch runs (the call site's signature both ways).
+
+Jak II, all 841 files: 58 244 guarded calls (with the symbol guards); 5 533 method aliases.
+Checked: every file compiles to C and the host `.so` modules build; generated modules compile
+for the 3DS (`arm-none-eabi-gcc -DGOALC_STATIC`) and a relocatable link of citizen.o and
+civilian.o resolves the 37 method aliases civilian calls; `OPENGOAL_C_BACKEND=1 goalc-test` (Jak 1
+filter, without the tests that need the runtime here) passes the same 862 tests as before the
+change. Not measured on a console.
 
 ### NaN compares like x86, stack fill hook (ABI version 5)
 

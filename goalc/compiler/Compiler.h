@@ -128,6 +128,10 @@ class Compiler {
   GameVersion m_version;
   emitter::InstructionSet m_instr_set;
   bool m_c_backend = false;
+  // (AI-assisted, mguard) C backend: the (type, method id) pairs a defmethod was compiled for, and
+  // the guard target of the method call being compiled (IR_FunctionCall::set_guard_name)
+  std::set<std::pair<std::string, int>> m_c_defined_methods;
+  std::string m_c_next_call_guard;
   //! (AI-assisted) C backend: symbols that don't hold a function of a compiled module: declared
   //! in kernel-defs.gc (functions of the C++ runtime) or defined to something other than a
   //! lambda, and not defined by a lambda since. Their calls are not guarded direct calls.

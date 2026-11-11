@@ -147,7 +147,8 @@ void IR_FunctionCall::do_codegen_c(CFunctionEmitter& e) {
   // (AI-assisted) calling the value of a global symbol: call its usual function directly when the
   // symbol still holds it (GC_GCALL in goal_c_ops.h).
   const std::string* sym = e.known_symbol(m_func);
-  int guard = sym ? e.module()->guard_target(*sym) : -1;
+  int guard = sym ? e.module()->guard_target(*sym)
+                  : (m_guard_name.empty() ? -1 : e.module()->guard_target(m_guard_name));
   auto f = e.read(m_func);
   auto ret = e.write(m_ret);
   if (guard >= 0) {

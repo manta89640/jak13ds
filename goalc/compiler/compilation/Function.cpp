@@ -558,6 +558,25 @@ Val* Compiler::compile_function_or_method_call(const goos::Object& form, Env* en
       // get the method function pointer
       head = compile_get_method_of_object(form, eval_args.front(), symbol_string(uneval_head), env,
                                           true);
+      // (AI-assisted, mguard) C backend: the method the object's static type has when nothing
+      // overrides it, i.e. the nearest type up from it that a compiled defmethod set it for: the
+      // guarded call (GC_GCALL) calls it directly when the object's type table holds it
+      if (m_c_backend) {
+        MethodInfo mi;
+        std::string t = eval_args.front()->type().base_type();
+        if (m_ts.try_lookup_method(t, symbol_string(uneval_head), &mi)) {
+          for (int depth = 0; depth < 64 && !t.empty(); depth++) {
+            if (m_c_defined_methods.count({t, mi.id})) {
+              m_c_next_call_guard = fmt::format("method:{}:{}", t, mi.id);
+              break;
+            }
+            if (t == "object" || !m_ts.fully_defined_type_exists(t)) {
+              break;
+            }
+            t = m_ts.lookup_type(t)->get_parent();
+          }
+        }
+      }
     }
 
     // convert the head to a GPR (if function, this is already done)
@@ -600,6 +619,9 @@ Val* Compiler::compile_real_function_call(const goos::Object& form,
                                           const TypeSpec* c_abi_view_type) {
   auto fe = env->function_env();
   fe->require_aligned_stack();
+  // (AI-assisted, mguard) the guard target set by the method call that leads here, if any
+  std::string guard_name;
+  guard_name.swap(m_c_next_call_guard);
   TypeSpec return_ts;
   if (function->type().arg_count() == 0) {
     // if the type system doesn't know what the function will return, don't allow it to be called
@@ -655,6 +677,7 @@ Val* Compiler::compile_real_function_call(const goos::Object& form,
   env->emit_ir<IR_RegSet>(form, temp_function, function);
   auto call = std::make_unique<IR_FunctionCall>(temp_function, return_reg, arg_outs, cc.arg_regs,
                                                 cc.return_reg);
+  call->set_guard_name(std::move(guard_name));
   if (m_c_backend && !is_varargs_function(function->type())) {
     // (AI-assisted) the C backend passes arguments whose type is known to fit in 32 bits without
     // their upper half (docs/3ds-port/c_backend.md, ABI version 3). It needs the argument types of

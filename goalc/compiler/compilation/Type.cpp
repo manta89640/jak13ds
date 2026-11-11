@@ -562,6 +562,9 @@ Val* Compiler::compile_defmethod(const goos::Object& form, const goos::Object& _
   new_func_env->method_of_type_name = type_name;
   auto method_info = m_ts.lookup_method(type_name, method_name);
   new_func_env->method_id = method_info.id;
+  if (m_c_backend) {
+    m_c_defined_methods.insert({type_name, method_info.id});  // (AI-assisted, mguard)
+  }
   new_func_env->method_function_type = method_info.type;
 
   // set up arguments

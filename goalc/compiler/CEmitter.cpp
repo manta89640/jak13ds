@@ -706,6 +706,10 @@ CModuleEmitter::CModuleEmitter(std::string obj_name,
 
 void CModuleEmitter::add_function(FunctionEnv* env, int f_idx, int seg) {
   function_seg[f_idx] = seg;
+  // (AI-assisted, mguard) a defmethod's function: the target of guarded method calls
+  if (env->method_id.has_value() && env->method_of_type_name != "#f") {
+    note_define(fmt::format("method:{}:{}", env->method_of_type_name, *env->method_id), f_idx);
+  }
   CFunctionEmitter fe(this, env, f_idx);
   try {
     fe.emit();

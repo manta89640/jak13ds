@@ -163,12 +163,16 @@ class IR_FunctionCall : public IR {
   //! C backend: the argument types of the function as seen by the caller (the type of the
   //! function value, with _type_ substituted for method calls). Empty: unknown (all 64-bit).
   void set_arg_view_types(std::vector<TypeSpec> types) { m_arg_view_types = std::move(types); }
+  //! (AI-assisted, mguard) C backend: a guarded call's target when the function isn't a known
+  //! symbol's value (method calls: "method:<type>:<id>", CModuleEmitter)
+  void set_guard_name(std::string name) { m_guard_name = std::move(name); }
 
  protected:
   const RegVal* m_func = nullptr;
   const RegVal* m_ret = nullptr;
   std::vector<RegVal*> m_args;
   std::vector<TypeSpec> m_arg_view_types;
+  std::string m_guard_name;
   std::vector<emitter::Register> m_arg_regs;
   std::optional<emitter::Register> m_ret_reg;
 };
