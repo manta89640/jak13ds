@@ -844,6 +844,23 @@ void InitMachine_PCPort() {
     memcpy(&bits, &lod_scale, 4);
     intern_from_c("*pc-3ds-merc-lod-scale*")->value() = bits;
   }
+  // (AI-assisted, j2cuts) config.ini shadow_count (default 0: no limit): only the N casters nearest
+  // the camera (and Jak's) get a shadow volume (foreground.gc foreground-shadow, TARGET_3DS).
+  {
+    int count = 0;
+#ifdef __3DS__
+    char v[32];
+    if (ctr_config_get("shadow_count", v, sizeof(v))) {
+      count = std::clamp(atoi(v), 0, 64);
+    }
+    lg::info("shadow volumes: the {} nearest (config.ini shadow_count, 0: no limit)", count);
+#else
+    if (const char* e = getenv("OPENGOAL_SHADOW_COUNT")) {
+      count = std::clamp(atoi(e), 0, 64);
+    }
+#endif
+    intern_from_c("*pc-3ds-shadow-count*")->value() = (u32)count;
+  }
   // config.ini ocean = full: the PS2 ocean's DMA (draw-ocean) for CtrOceanFull instead of
   // ocean-3ds-packet's for CtrOceanRenderer (ocean.gc, TARGET_3DS)
   {

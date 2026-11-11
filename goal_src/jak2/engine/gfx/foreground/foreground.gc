@@ -569,6 +569,62 @@
   (define-extern *pc-3ds-shadow-all?* symbol)
   )
 
+;; og:preserve-this (AI-assisted, j2cuts) 3DS: config.ini shadow_count (kmachine.cpp, 0: no limit):
+;; only the casters nearest the camera get a shadow volume, and Jak always. The limit is the N-th
+;; nearest distance of the casters of the frame before (+ 1 m, so two at about the same distance
+;; don't trade theirs every frame); with fewer than N then, every one. Not with shadows = all.
+(#when TARGET_3DS
+  (define-extern *pc-3ds-shadow-count* int)
+  (define *pc-3ds-shadow-cand* (new 'static 'array float 64))
+  (define *pc-3ds-shadow-cand-n* 0)
+  (define *pc-3ds-shadow-limit* 0.0)
+  (define *pc-3ds-shadow-frame* (the-as uint64 0))
+
+  (defun pc-3ds-shadow-budget? ((dist float) (proc process))
+    "May this caster at dist from the camera have its shadow volume this frame?"
+    (let ((n *pc-3ds-shadow-count*))
+      (if (or (<= n 0) *pc-3ds-shadow-all?*)
+          (return #t)
+          )
+      (let ((frame (-> *display* real-clock integral-frame-counter)))
+        (when (!= frame *pc-3ds-shadow-frame*)
+          (set! *pc-3ds-shadow-frame* frame)
+          (let ((cand *pc-3ds-shadow-cand*)
+                (m *pc-3ds-shadow-cand-n*)
+                )
+            ;; the last frame's distances in order (at most 64: an insertion sort)
+            (let ((i 1))
+              (while (< i m)
+                (let ((v (-> cand i))
+                      (j (+ i -1))
+                      )
+                  (while (and (>= j 0) (< v (-> cand j)))
+                    (set! (-> cand (+ j 1)) (-> cand j))
+                    (+! j -1)
+                    )
+                  (set! (-> cand (+ j 1)) v)
+                  )
+                (+! i 1)
+                )
+              )
+            (set! *pc-3ds-shadow-limit* (if (< m n)
+                                            1000000000000.0
+                                            (+ (-> cand (+ n -1)) 4096.0)
+                                            )
+                  )
+            )
+          (set! *pc-3ds-shadow-cand-n* 0)
+          )
+        )
+      (when (< *pc-3ds-shadow-cand-n* 64)
+        (set! (-> *pc-3ds-shadow-cand* *pc-3ds-shadow-cand-n*) dist)
+        (+! *pc-3ds-shadow-cand-n* 1)
+        )
+      (or (= proc *target*) (<= dist *pc-3ds-shadow-limit*))
+      )
+    )
+  )
+
 ;; ERROR: Unsupported inline assembly instruction kind - [lq ra, 32(v1)]
 (defun foreground-shadow ((draw-ctrl draw-control) (arg1 (inline-array pris-mtx)) (arg2 pointer))
   (local-vars (shadow-settings shadow-settings))
@@ -598,6 +654,15 @@
       (-> draw-ctrl cur-lod)
       (when (not (logtest? t1-5 (shadow-flags disable-fade)))
         (if (< (-> shadow-settings fade-dist) dist)
+            (set! t1-5 (logior t1-5 (shadow-flags disable-draw)))
+            )
+        )
+      ;; og:preserve-this (AI-assisted, j2cuts) 3DS: config.ini shadow_count (above), by the real
+      ;; distance (dist is 0 with shadows = all)
+      (#when TARGET_3DS
+        (if (and (not (logtest? t1-5 (shadow-flags disable-draw)))
+                 (not (pc-3ds-shadow-budget? (-> (scratchpad-object foreground-work) distance w) (-> draw-ctrl process)))
+                 )
             (set! t1-5 (logior t1-5 (shadow-flags disable-draw)))
             )
         )
