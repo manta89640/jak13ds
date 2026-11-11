@@ -1849,3 +1849,15 @@ formulas they replace agree in every case; the cone test's 24 000 views still ha
 run's triangles facing away (5571 culled, as before). cpu_bench pair `cull.cone_sqrt_div` /
 `cull.cone_mul` (ARMv6K: 4 `vdiv` + 4 `vsqrt` against none). The ocean's VU code keeps its
 divides: it reproduces the PS2's arithmetic.
+
+### 6. ARMv6 packed integer instructions (armsimd)
+
+Already there: the sound mixer (`voice.cpp`: SMLAWB, SSAT, QADD16, PKHBT, SMULxy, its own test in
+`test/snd_voice`), the texture conversions (`CtrTexConv.h`: PKHBT / PKHTB, UXTB16, UQADD8, REV),
+the sky's texel blends (`CtrSimd.h`: UQADD8) and the time of day's saturation (USAT). What was
+left byte by byte: the time of day's palette blend (`tod_refresh_colors`, every color whenever the
+time of day moves) loaded each palette's R and B with two `ldrb` and an `orr`, and saturated R,
+G and B one at a time. Now R | B << 16 is one (unaligned) `ldr` and `uxtb16`, and R and B are
+saturated by one `usat16` (`CtrSimd.h` `ctr_rb_of_rgb`, `ctr_sat_rb6`; the color table has 4
+bytes more for the word read at its last triple). The same values; ARMv6K code of the bench's
+copy (4 palettes): 48 -> 41 instructions. cpu_bench pair `tod.blend4_bytes` / `tod.blend4_simd`.

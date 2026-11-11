@@ -86,3 +86,27 @@ static inline uint32_t ctr_gt_bit(float a, float t) {
   return ctr_float_bits(t - a) >> 31;
 }
 
+/* (AI-assisted, armsimd) R | B << 16 of the RGB triple at p. On ARMv6 one (unaligned) ldr and
+ * uxtb16 instead of two ldrb and an orr: it reads the byte after the triple, so the caller's
+ * array has at least one byte more. */
+static inline uint32_t ctr_rb_of_rgb(const uint8_t* p) {
+#if defined(__ARM_FEATURE_SIMD32)
+  uint32_t v;
+  memcpy(&v, p, 4);
+  return __uxtb16(v);
+#else
+  return (uint32_t)p[0] | (uint32_t)p[2] << 16;
+#endif
+}
+
+/* min(255, lo >> 6) | min(255, hi >> 6) << 16 for the halves of rb (each < 65536): on ARMv6 one
+ * usat16 for both instead of a usat each and the shifts between */
+static inline uint32_t ctr_sat_rb6(uint32_t rb) {
+#if defined(__ARM_FEATURE_SIMD32)
+  return (uint32_t)__usat16((int16x2_t)((rb >> 6) & 0x03ff03ffu), 8);
+#else
+  const uint32_t lo = (rb & 0xffffu) >> 6, hi = rb >> 22;
+  return (lo < 255u ? lo : 255u) | (hi < 255u ? hi : 255u) << 16;
+#endif
+}
+

@@ -328,6 +328,50 @@ void fill_spheres() {
 namespace ctr_cpu_bench {
 namespace {
 
+// ---- (AI-assisted, armsimd) the time of day's palette blend (CtrLevel.cpp tod_refresh_colors,
+// 4 palettes): three byte loads and three saturations a color (before) against ldr + uxtb16 for
+// R and B and one usat16 for both ----
+constexpr int kTodColors = 256, kTodPal = 4;
+uint8_t g_tod[kTodColors * kTodPal * 3 + 4];
+uint32_t g_todw[kTodPal] = {40, 90, 100, 26};
+void fill_tod() {
+  for (int i = 0; i < kTodColors * kTodPal * 3 + 4; i++) {
+    g_tod[i] = (uint8_t)(g_itab[i & (kTab - 1)] >> 3);
+  }
+}
+uint32_t tod_bytes(uint32_t n) {
+  uint32_t h = 0;
+  for (uint32_t r = 0; r < n; r++) {
+    for (int c = 0; c < kTodColors; c++) {
+      uint32_t rb = 0, g = 0;
+      for (int k = 0; k < kTodPal; k++) {
+        const uint8_t* x = g_tod + (c * kTodPal + k) * 3;
+        rb += ((uint32_t)x[0] | (uint32_t)x[2] << 16) * g_todw[k];
+        g += (uint32_t)x[1] * g_todw[k];
+      }
+      const uint32_t lo = (rb & 0xffff) >> 6, hi = rb >> 22, gg = g >> 6;
+      h = h * 31 + ((lo < 255 ? lo : 255) | (gg < 255 ? gg : 255) << 8 | (hi < 255 ? hi : 255) << 16);
+    }
+  }
+  return h;
+}
+uint32_t tod_simd(uint32_t n) {
+  uint32_t h = 0;
+  for (uint32_t r = 0; r < n; r++) {
+    for (int c = 0; c < kTodColors; c++) {
+      uint32_t rb = 0, g = 0;
+      for (int k = 0; k < kTodPal; k++) {
+        const uint8_t* x = g_tod + (c * kTodPal + k) * 3;
+        rb += ctr_rb_of_rgb(x) * g_todw[k];
+        g += (uint32_t)x[1] * g_todw[k];
+      }
+      const uint32_t gg = g >> 6;
+      h = h * 31 + (ctr_sat_rb6(rb) | (gg < 255 ? gg : 255) << 8);
+    }
+  }
+  return h;
+}
+
 // ---- (AI-assisted, fdiv) the normal cone test with square roots and divides (before) and with
 // multiplies only (CtrCull.h cone_away), over 512 cones and views ----
 constexpr int kCones = 512;
@@ -527,6 +571,8 @@ const Case kCases[] = {
     {"mem.line256k", mem_line, 20, nullptr},
     {"cull.planes3_branch", planes3_branch, 1000000, nullptr},
     {"cull.planes3_signs", planes3_signs, 1000000, "cull.planes3_branch"},
+    {"tod.blend4_bytes", tod_bytes, 500, nullptr},
+    {"tod.blend4_simd", tod_simd, 500, "tod.blend4_bytes"},
     {"cull.cone_sqrt_div", cones_ref, 300000, nullptr},
     {"cull.cone_mul", cones_mul, 300000, "cull.cone_sqrt_div"},
     {"vfp.xform256", xform_plain, 2000, nullptr},
@@ -549,6 +595,7 @@ int run(double scale, void (*line)(const char* text, void* ctx), void* ctx) {
   fill_spheres();
   fill_points();
   fill_cones();
+  fill_tod();
 #ifdef BONES_VFP_ASM
   fill_bones();
 #endif

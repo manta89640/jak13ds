@@ -2936,11 +2936,12 @@ void tod_refresh_colors(CtrLevelData::Tod& t) {
 #pragma GCC unroll 8
     for (int k = 0; k < N; k++) {
       const u8* x = src + off[k];
-      rb += ((u32)x[0] | (u32)x[2] << 16) * w[k];
+      // (AI-assisted, armsimd) R and B with one ldr + uxtb16, both saturated by one usat16
+      // (CtrSimd.h; t.colors has 4 bytes more than its triples)
+      rb += ctr_rb_of_rgb(x) * w[k];
       g += (u32)x[1] * w[k];
     }
-    const u32 rgba = tod_sat8((rb & 0xffff) >> 6) | tod_sat8(g >> 6) << 8 |
-                     tod_sat8(rb >> 22) << 16 | (kKinds ? aw[ak[c]] : a0);
+    const u32 rgba = ctr_sat_rb6(rb) | tod_sat8(g >> 6) << 8 | (kKinds ? aw[ak[c]] : a0);
     if (kChange) {
       if (rgba != table[c]) {
         cver[c] = ver;
@@ -4996,7 +4997,8 @@ void load_tod_table(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   }
 #endif
   t->color_count = nc;
-  t->colors.resize((size_t)nc * t->palette_count * 3);
+  // (AI-assisted, armsimd) + 4: ctr_rb_of_rgb reads a word at the last triple
+  t->colors.resize((size_t)nc * t->palette_count * 3 + 4);
   t->color_mask.assign(nc + nm, 0);
   t->color_bright.assign(nc + nm, 0);
   if (t->akinds.size() > 1) {
