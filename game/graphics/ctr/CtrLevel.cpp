@@ -11689,6 +11689,13 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              100.0 * m_cond_culled / m_cond_draws, m_cond_draws);
     m_cond_draws = m_cond_culled = 0;
   }
+  if (rs.log_now && m_near_uncull_frames) {
+    lg::info("[ctr] {}: culled draws drawn both sides across the camera's plane: {:.1f} draws, "
+             "{:.0f} triangles per level draw",
+             m_name, (double)m_near_uncull / m_near_uncull_frames,
+             (double)m_near_uncull_tris / m_near_uncull_frames);
+    m_near_uncull = m_near_uncull_tris = m_near_uncull_frames = 0;
+  }
   if (rs.log_now && m_cull_frames) {
     lg::info("[ctr] {}: run culling tested {:.0f} runs, hid {:.0f} chunks and {:.0f} tris per level "
              "draw ({} level draws)",
@@ -15374,6 +15381,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // across chunks: every texture change clears the GPU's texture cache, and the chunks share most
   // of their textures. Then the others (blending, decals) in their order, over the opaque ones.
   // The order is made at load (sorted_draws, ordered_draws): only the visible chunks' draws.
+  for (const auto& [d, tcc] : lev.near_uncull) {
+    lev.draw_states[d].tcc = tcc;
+  }
+  lev.near_uncull.clear();
   if (!lev.cond_draws.empty()) {
     // kDrawCullCond: back faces culled while the camera is inside every opening
     // plane of the draw (they can only be seen through an opening, from outside its plane) and
@@ -15420,6 +15431,47 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       m_cond_draws++;
       m_cond_culled += in;
     }
+  }
+  {
+    // A triangle reaching behind the camera (clip w of both signs) projects with a mirrored corner:
+    // a GPU that decides facing before it clips culls such front faces whole (the near clip
+    // self-test measures it). Culled draws with a run whose sphere crosses the camera's plane
+    // (w = 0, with kCondNearReach to spare) are drawn both sides this frame.
+    const float fw[3] = {-R[0][3], -R[1][3], -R[2][3]};
+    const float fl = std::sqrt(fw[0] * fw[0] + fw[1] * fw[1] + fw[2] * fw[2]);
+    const float px = cam.trans[0], py = cam.trans[1], pz = cam.trans[2];
+    const bool run_sph = lev.run_spheres.size() >= lev.vis_runs.size();
+    auto crosses = [&](float x, float y, float z, float r) {
+      const float w = fw[0] * (x - px) + fw[1] * (y - py) + fw[2] * (z - pz);
+      return std::abs(w) < (r + kCondNearReach) * fl;
+    };
+    for (const auto& vc : m_visible) {
+      const auto& ch = lev.chunks[vc.chunk];
+      if (!crosses(ch.bsphere[0], ch.bsphere[1], ch.bsphere[2], ch.bsphere[3])) {
+        continue;
+      }
+      for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
+        auto& st = lev.draw_states[d];
+        if (!(st.tcc & CTR_TCC_CULL_BACK)) {
+          continue;
+        }
+        bool near = !run_sph || d >= lev.draw_first_run.size();
+        for (u32 r = near ? 0 : lev.draw_first_run[d], re = near ? 0 : r + lev.draw_run_count[d];
+             r < re && !near; r++) {
+          const auto& sp = lev.run_spheres[r];
+          near = sp.r == 0xffff ||
+                 crosses(ch.origin[0] + sp.c[0] * ch.scale, ch.origin[1] + sp.c[1] * ch.scale,
+                         ch.origin[2] + sp.c[2] * ch.scale, sp.r * ch.scale);
+        }
+        if (near) {
+          m_near_uncull_tris += lev.draws[d].index_count / 3;
+          lev.near_uncull.push_back({d, st.tcc});
+          st.tcc = (u8)(st.tcc & ~CTR_TCC_CULL_BACK);
+        }
+      }
+    }
+    m_near_uncull += lev.near_uncull.size();
+    m_near_uncull_frames++;
   }
   if (lev.walk.size() != lev.draws.size()) {
     build_walk(lev);

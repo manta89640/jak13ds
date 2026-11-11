@@ -3832,6 +3832,9 @@ int ctr_gpu_fog_alpha_ready(void) {
 }
 // (AI-assisted) cull_ties: back faces of CTR_TCC_CULL_BACK draws (counter-clockwise front faces
 // on screen, x right / y up; flip: the other way)
+// the soft rasterizer clips at the near plane already
+void ctr_gpu_set_near_clip_default(int) {}
+void ctr_gpu_set_near_clip(int) {}
 void ctr_gpu_set_cull(int enable, int flip) {
   g_soft_cull_enable = enable ? 1 : 0;
   g_soft_cull_flip = flip ? 1 : 0;

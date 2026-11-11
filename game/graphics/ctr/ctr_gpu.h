@@ -137,6 +137,12 @@ int ctr_gpu_shader_opt_ready(void);
 void ctr_gpu_set_tex1_gating(int on);
 int ctr_gpu_fog_alpha_ready(void);
 void ctr_gpu_set_cull(int enable, int flip);
+/* The PICA's user clip plane at the near plane (z >= -w), for every draw: CtrClipTest's boot
+ * self-test turns it on (default) where the GPU's own clipping loses big triangles reaching behind
+ * the camera. set_near_clip: 1 on, 0 off for the frames until -1 (back to the default; the
+ * self-test's cases). Sent at each frame's start. */
+void ctr_gpu_set_near_clip_default(int on);
+void ctr_gpu_set_near_clip(int mode);
 void ctr_gpu_cull_reset(void);
 /* (AI-assisted) 1 if the depth buffer has a stencil part (not config.ini depth16) */
 int ctr_gpu_has_stencil(void);

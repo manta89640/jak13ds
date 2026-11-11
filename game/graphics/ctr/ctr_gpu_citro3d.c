@@ -3447,6 +3447,8 @@ void ctr_gpu_set_skip_color_clear(int on) {
 }
 
 /* the parts of the GPU state a frame starts from (both modes) */
+static int g_near_clip, g_near_clip_mode = -1; /* the self-test's choice; its case (-1: none) */
+static inline u32 raw_f24(float f);
 static void frame_state_reset(void) {
   s_pres.cur_release = s_pres.next_release;
   raw_frame_reset();
@@ -3472,6 +3474,15 @@ static void frame_state_reset(void) {
   } else {
     GPUCMD_AddMaskedWrite(GPUREG_EARLYDEPTH_DATA, 0x7, g_early_clear);
     GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
+  }
+  {
+    /* the user clip plane z + w >= 0 (the near plane) or none (ctr_gpu_set_near_clip_default) */
+    const int on = g_near_clip_mode >= 0 ? g_near_clip_mode : g_near_clip;
+    const u32 coef[4] = {0, 0, raw_f24(1.f), raw_f24(1.f)};
+    GPUCMD_AddWrite(GPUREG_FRAGOP_CLIP, on ? 1 : 0);
+    if (on) {
+      GPUCMD_AddIncrementalWrites(GPUREG_FRAGOP_CLIP_DATA0, coef, 4);
+    }
   }
   C3D_ProcTexBind(0, NULL);
   g.proc_radial = -1;
@@ -5092,6 +5103,12 @@ static int g_cull_enable = 0;
 static int g_fog_alpha = 0;
 static int g_tex1_gating = 0;
 
+void ctr_gpu_set_near_clip_default(int on) {
+  g_near_clip = on ? 1 : 0;
+}
+void ctr_gpu_set_near_clip(int mode) {
+  g_near_clip_mode = mode;
+}
 void ctr_gpu_set_cull(int enable, int flip) {
   g_cull_enable = enable ? 1 : 0;
   g_cull_flip = flip ? 1 : 0;
