@@ -42,6 +42,13 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"particle_fill", "off"}, /* (AI-assisted, perfv2) */
     /* (AI-assisted, fidelity2) the full texture and shine detail */
     {"mip_bias", "0"},   {"envmap_min_px", "0"},
+    /* the Nov 11 options, on by default */
+    {"occluders", "off"},     {"horizon", "off"},       {"title_vis", "off"},
+    {"cell_vis", "off"},      {"ps2_lod_scale", "1"},   {"min_run_px", "0"},
+    {"far_copy", "off"},      {"cull_terrain", "off"},  {"cone_cull", "off"},
+    {"depth_reuse", "off"},   {"vram_vertices", "off"}, {"index_u8", "off"},
+    {"merc_one_bone", "off"}, {"vfp_vector", "off"},    {"anim_lod_far", "off"},
+    {"merc_lod_scale", "1"},  {"shadow_count", "0"},
 };
 /* bench: normal plus the GPU benchmark at boot (~20-60 s, data/log/bench.txt; (AI-assisted,
  * cpubench) the CPU one before it, data/log/cpu_bench.txt), the A/B GPU
@@ -132,17 +139,21 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"io_checksum", "off"},
     {"c3l_read_buffer", "256"},
 #if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
-    {"particle_density", "0.7"}, /* the game thread is Jak II's limit in the city */
-    {"traffic_density", "0.5"},  /* civilians and civilian vehicles (traffic-manager.gc) */
+    /* Jak II's game thread cuts (preset fast's values) are the defaults: the most optimised build */
+    {"particle_density", "0.5"},
+    {"traffic_density", "0.35"}, /* civilians and civilian vehicles (traffic-manager.gc) */
+    {"anim_lod_far", "on"},
+    {"merc_lod_scale", "0.58"},
+    {"shadow_count", "4"},
 #else
     {"particle_density", "1"}, /* (AI-assisted, j1ocean) every particle (was 0.7) */
+    {"anim_lod_far", "off"},
+    {"merc_lod_scale", "1"},
+    {"shadow_count", "0"},
 #endif
     {"shield_density", "1"}, /* Citadel robot cage, 0.125..1 (1: every panel) */
     {"anim_lod", "on"},
-    {"anim_lod_far", "off"}, /* (AI-assisted, j2cuts) Jak II: far citizens on screen too */
-    {"merc_lod_scale", "1"},
-    {"shadow_count", "0"},   /* (AI-assisted, j2cuts) Jak II: the N nearest shadows, 0: all */
-    {"vfp_vector", "off"},   /* (AI-assisted, vfpvec) bone matrices as VFP short vectors */
+    {"vfp_vector", "on"},    /* (AI-assisted, vfpvec) bone matrices as VFP short vectors */
     {"ocean", "full"},
     {"shadows", "full"},
     {"depth16", "off"},
