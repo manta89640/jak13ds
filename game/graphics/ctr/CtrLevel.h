@@ -664,6 +664,8 @@ struct CtrLevelData {
     u16 lo[3], hi[3];
   };
   std::vector<CondDraw> cond_draws;
+  // culled draws drawn both sides this frame (across the camera's plane): draw, its tcc
+  std::vector<std::pair<u32, u8>> near_uncull;
   std::vector<c3l::CullCondPlane> cond_planes;
   std::vector<CondBox> cond_boxes;
   float cond_box_origin[3] = {0, 0, 0};
@@ -1566,6 +1568,8 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_cull_runs = 0, m_cull_tris = 0, m_cull_chunks = 0, m_cull_frames = 0;
   // kDrawCullCond draws of visible chunks, and of them culled (camera inside)
   u64 m_cond_draws = 0, m_cond_culled = 0;
+  // culled draws drawn both sides across the camera's plane (sums over level draws)
+  u64 m_near_uncull = 0, m_near_uncull_tris = 0, m_near_uncull_frames = 0;
   // (AI-assisted) lowres_vista / neighbour_vis: low resolution chunks drawn in near mode, and the
   // vista pass's chunks and triangles (statistics); the levels' detailed areas (per level draw)
   u64 m_lowres_near = 0, m_vista_chunks = 0, m_vista_tris = 0, m_vista_frames = 0;

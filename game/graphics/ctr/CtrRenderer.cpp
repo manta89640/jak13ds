@@ -39,6 +39,7 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #include "game/graphics/ctr/CtrMerc.h"
 #include "game/graphics/ctr/CtrOcean.h"
 #include "game/graphics/ctr/CtrOceanFull.h"
+#include "game/graphics/ctr/CtrClipTest.h"
 #include "game/graphics/ctr/CtrShadow.h"
 #include "game/graphics/ctr/CtrSprite.h"
 #include "game/graphics/ctr/CtrVram.h"
@@ -662,6 +663,9 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
 #ifdef __3DS__
     ctr_boot_mark("9b shadow self-test done");
 #endif
+  }
+  if (m_rs.frame_idx == 4) {
+    ctr_clip_selftest();
   }
   // No sky renderer yet: clear to the fog color from the default GS registers (the same place
   // OpenGLRenderer reads it), which is close to the sky color at the horizon.
