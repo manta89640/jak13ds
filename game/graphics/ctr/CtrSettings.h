@@ -185,9 +185,6 @@ struct CtrSettings {
   // instructions per vertex instead of 11; rounding-level differences). Off until pica_bench
   // B3.skin_opt1 and a console say so (needs shader_opt's program set)
   bool merc_one_bone = true;
-  // (AI-assisted, idx8) quad batches (sprites, HUD, text) of up to 64 quads with u8 indices
-  // instead of u16: half the index reads. Off until gpu_profile = ab prices it on a console
-  bool index_u8 = true;
   // (AI-assisted) 3DS hardware features (docs/3ds-port/config_ini.md):
   // sprite and HUD textures in the smallest 3DS format that holds them (8 / 16 bits per texel),
   // and in reserved VRAM (with vram_textures)

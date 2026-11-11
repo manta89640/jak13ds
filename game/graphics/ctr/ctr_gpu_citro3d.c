@@ -232,7 +232,6 @@ static inline int words_equal(const void* a, const void* b, unsigned n) {
 #define CMD_DRAW_WORDS 384
 /* quads per ctr_gpu_draw_quads batch: 4 vertices each, u16 indices */
 #define QUAD_MAX 4096
-#define QUAD8_MAX 64 /* (AI-assisted, idx8) 4 * 64 vertices: u8 indices reach them all */
 /* texture pool bytes copied to VRAM per frame (a bigger pool alone), and how long a pool stays
  * before one with a higher priority may take its place */
 #define POOL_COPY_BYTES (256u * 1024u)
@@ -479,7 +478,6 @@ static struct {
   TexSlot textures[MAX_TEXTURES];
   TexPool pools[MAX_POOLS];
   uint16_t* quad_indices; /* QUAD_MAX quads: 0 1 3 3 1 2, + 4 per quad */
-  uint8_t* quad_indices8; /* (AI-assisted, idx8) the first QUAD8_MAX quads' as u8 (index_u8) */
   /* texture unit 0 as the GPU has it: bind_texture only binds (and clears the texture cache) when
    * the texture, its memory or its parameters change */
   const C3D_Tex* bound_tex;
@@ -1817,15 +1815,6 @@ int ctr_gpu_init(void) {
     }
   }
   GSPGPU_FlushDataCache(g.quad_indices, QUAD_MAX * 6 * sizeof(uint16_t));
-  /* (AI-assisted, idx8) the same for batches of up to QUAD8_MAX quads with u8 indices: half the
-   * index reads (config.ini index_u8) */
-  g.quad_indices8 = (uint8_t*)linearAlloc(QUAD8_MAX * 6);
-  if (g.quad_indices8) {
-    for (int k = 0; k < QUAD8_MAX * 6; k++) {
-      g.quad_indices8[k] = (uint8_t)g.quad_indices[k];
-    }
-    GSPGPU_FlushDataCache(g.quad_indices8, QUAD8_MAX * 6);
-  }
   for (int i = 0; i < MAX_TEXTURES; i++) {
     g.textures[i].pool = -1;
     g.textures[i].radial = -1;
@@ -1878,10 +1867,6 @@ void ctr_gpu_exit(void) {
     }
   }
   linearFree(g.quad_indices);
-  if (g.quad_indices8) {
-    linearFree(g.quad_indices8); /* (AI-assisted, idx8) */
-    g.quad_indices8 = NULL;
-  }
   for (int i = 0; i < MAX_MESHES; i++) {
     if (g.meshes[i].used) {
       if (!g.meshes[i].ext) { /* (AI-assisted, streaming) the stream arena's: not ours */
@@ -4498,13 +4483,6 @@ void ctr_gpu_set_merc_one_bone(int on) {
   s_merc_one_bone = on ? 1 : 0;
 }
 
-/* (AI-assisted, idx8) config.ini index_u8: quad batches of up to QUAD8_MAX quads (sprites, HUD,
- * text) with u8 indices instead of u16 */
-static int s_index_u8;
-void ctr_gpu_set_index_u8(int on) {
-  s_index_u8 = on ? 1 : 0;
-}
-
 void ctr_gpu_set_compact_textures(int on) {
   g_compact = on ? 1 : 0;
 }
@@ -5053,7 +5031,6 @@ static struct {
   const void* vbuf_va; /* g.vbuf and its physical address */
   u32 vbuf_pa;
   u32 quad_pa;    /* physical address of g.quad_indices */
-  u32 quad8_pa;   /* (AI-assisted, idx8) of g.quad_indices8 */
   /* (AI-assisted) config.ini cmd_dedup: register writes that would give a register the value it
    * has are left out (texture unit 0's type); cmd_dedup_draw: the draw template's primitive mode
    * and vertex offset too. prim: PRIMITIVE_CONFIG's mode byte as the GPU has it, voff0: its
@@ -5552,8 +5529,7 @@ static const u32 kRawArrays[22] = {
 };
 
 /* an indexed triangle list: index_pa = physical address of the first u16 index */
-/* (AI-assisted, idx8) fmt16: BIT(31) for u16 indices (every draw but index_u8's), 0 for u8 */
-static void raw_draw_elements_fmt(u32 index_pa, u32 count, u32 fmt16) {
+static void raw_draw_elements(u32 index_pa, u32 count) {
   u32* p = raw_ptr();
   if (s_raw.dedup_draw && s_raw.prim == GPU_GEOMETRY_PRIM && s_raw.voff0) {
     /* (AI-assisted) cmd_dedup_draw: the GPU has this mode and vertex offset 0 already: the
@@ -5561,7 +5537,7 @@ static void raw_draw_elements_fmt(u32 index_pa, u32 count, u32 fmt16) {
      * post-vertex cache clear */
     p[0] = 1;
     p[1] = RAW_HDR(GPUREG_RESTART_PRIMITIVE, 0xF);
-    p[2] = (index_pa - RAW_BUF_BASE) | fmt16;
+    p[2] = (index_pa - RAW_BUF_BASE) | BIT(31);
     p[3] = RAW_HDR(GPUREG_INDEXBUFFER_CONFIG, 0xF);
     p[4] = count;
     p[5] = RAW_HDR(GPUREG_NUMVERTICES, 0xF);
@@ -5597,7 +5573,7 @@ static void raw_draw_elements_fmt(u32 index_pa, u32 count, u32 fmt16) {
       p[i + 2] = kRawElements[i + 2];
       p[i + 3] = kRawElements[i + 3];
     }
-    p[4] = (index_pa - RAW_BUF_BASE) | fmt16; /* u16 indices (BIT(31)) or u8 */
+    p[4] = (index_pa - RAW_BUF_BASE) | BIT(31); /* u16 indices */
     p[6] = count;
     p += 24;
   }
@@ -5605,9 +5581,6 @@ static void raw_draw_elements_fmt(u32 index_pa, u32 count, u32 fmt16) {
   s_raw.voff0 = 1;
   raw_end(raw_vc_clear(p));
   __C3D_Context.flags |= C3DiF_DrawUsed;
-}
-static void raw_draw_elements(u32 index_pa, u32 count) {
-  raw_draw_elements_fmt(index_pa, count, BIT(31));
 }
 
 /* prim: GPU_TRIANGLES or (AI-assisted) GPU_TRIANGLE_STRIP (ctr_gpu_draw_strip), as C3D_DrawArrays */
@@ -6747,26 +6720,14 @@ static void draw_quads_at(const ctr_draw_state* state, uint8_t* dst, int n) {
     if (!s_raw.quad_pa) {
       s_raw.quad_pa = osConvertVirtToPhys(g.quad_indices);
     }
-    /* (AI-assisted, idx8) index_u8: a batch of up to QUAD8_MAX quads with u8 indices */
-    if (s_index_u8 && n <= QUAD8_MAX && g.quad_indices8) {
-      if (!s_raw.quad8_pa) {
-        s_raw.quad8_pa = osConvertVirtToPhys(g.quad_indices8);
-      }
-      raw_draw_elements_fmt(s_raw.quad8_pa, (u32)n * 6, 0);
-    } else {
-      raw_draw_elements(s_raw.quad_pa, (u32)n * 6);
-    }
+    raw_draw_elements(s_raw.quad_pa, (u32)n * 6);
   } else {
     apply_state(state, 0, 0);
     C3D_BufInfo* buf = C3D_GetBufInfo();
     BufInfo_Init(buf);
     BufInfo_Add(buf, dst, sizeof(ctr_vertex), 3, 0x210);
     /* indices are relative to the buffer: 0 1 3 3 1 2, + 4 per quad */
-    if (s_index_u8 && n <= QUAD8_MAX && g.quad_indices8) {
-      C3D_DrawElements(GPU_TRIANGLES, n * 6, C3D_UNSIGNED_BYTE, g.quad_indices8);
-    } else {
-      C3D_DrawElements(GPU_TRIANGLES, n * 6, C3D_UNSIGNED_SHORT, g.quad_indices);
-    }
+    C3D_DrawElements(GPU_TRIANGLES, n * 6, C3D_UNSIGNED_SHORT, g.quad_indices);
   }
   g.cur.draws++;
   g.cur.triangles += n * 2;
