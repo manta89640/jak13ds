@@ -10569,6 +10569,16 @@ struct ReliefAt {
     return kn;
   }
 };
+// (AI-assisted, ps2lodscale) config.ini ps2_lod_scale: the factor on the PS2's tie and tfrag LOD
+// distances (auto: the PS2's lines over the top screen's 240)
+float ctr_ps2_lod_scale() {
+  const auto& s = ctr_settings();
+  if (s.ps2_lod_scale_auto) {
+    return 240.f / (g_game_version == GameVersion::Jak2 ? 416.f : 448.f);
+  }
+  return s.ps2_lod_scale;
+}
+
 // (AI-assisted, title-popin) a sphere against the view's four planes (the chunk test of emit_chunk)
 bool sphere_in_view(const CtrBackgroundCamera& cam, const float* s) {
   for (int i = 0; i < 4; i++) {
@@ -13283,6 +13293,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // doesn't move it: pulling the switch in made the pops larger); older files: the PS2 distance,
     // pulled in to half while the GPU is busy
     const float k0 = settings.tie_lod ? settings.detail_scale : 0.f;
+    // (AI-assisted, ps2lodscale) the PS2's distances (the floor, the geomorph's planes, older
+    // files' switch) x ps2_lod_scale; the screen-space error rule stays as it is
+    const float k0p = k0 * ctr_ps2_lod_scale();
     // (AI-assisted, streaming: lod_auto, was auto_detail: the chunk loop's auto_detail is above now)
     // (AI-assisted, autodetail) with shape errors: the relief's tie_lod_px at t
     const bool lod_auto = settings.auto_detail && (by_error ? relief.rl.stage[ctr_detail::kTieLodPx] >= 0 : true);
@@ -13290,7 +13303,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if (by_error) {
         return k0 * focal / std::max(relief.at(t).tie_lod_px, 0.25f);
       }
-      return lod_auto ? k0 * (0.5f + 0.5f * std::max(t, 0.f)) : k0;
+      return lod_auto ? k0p * (0.5f + 0.5f * std::max(t, 0.f)) : k0p;
     };
     const float k = k_at(t_pos);
     // (AI-assisted, lodnear) the PS2 floor: by screen-space error alone (4 px of the 400-wide top
@@ -13299,11 +13312,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // to the far-plane. So a group is near within max(error x k, PS2 far-plane x detail_scale):
     // never coarser than the PS2, and where the PS2 distance decides, its far version's error at
     // the switch is under tie_lod_px
-    lev.lod_floor_k = by_error && k > 0 ? k0 / k : 0.f;
+    lev.lod_floor_k = by_error && k > 0 ? k0p / k : 0.f;
     // (AI-assisted, titlemove) the title: no group switches nearer than kTitleLodMin meters
     lev.lod_min_e = title_on && by_error && k > 0 ? title_min * 4096.f / k : 0.f;
     // ring 0: the relief's factor never moves a switch nearer than kNearRingMeters
-    const float k_cfg = by_error ? k0 * focal / std::max(settings.tie_lod_px, 0.25f) : k0;
+    const float k_cfg = by_error ? k0 * focal / std::max(settings.tie_lod_px, 0.25f) : k0p;
     const bool ring_on = by_error && k > 0 && k < k_cfg;
     lev.lod_ring_e = ring_on ? ctr_detail::kNearRingMeters * 4096.f / k : 0.f;
     lev.lod_cfg_ratio = ring_on ? k_cfg / k : 1.f;
@@ -13332,7 +13345,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // the PS2's geomorph (c3l::ExtMorph): its distances x detail_scale, never pulled in by the
     // relief (geometry 3's own vertex colors can't carry geometry 0's lighting: nearer, it shows)
     const bool morph_on = !lev.group_mid.empty();
-    const float kd = k0;
+    const float kd = k0p;
     auto dx2 = [&](const float* c) {
       const float x = c[0] - cx, y = c[1] - cy, z = c[2] - cz;
       return x * x + y * y + z * z;
@@ -13721,7 +13734,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   if (tf_on) {
     const float wv[3] = {-R[0][3], -R[1][3], -R[2][3]};
     const float wl = std::sqrt(wv[0] * wv[0] + wv[1] * wv[1] + wv[2] * wv[2]);
-    const float k = settings.detail_scale * wl;
+    const float k = settings.detail_scale * ctr_ps2_lod_scale() * wl;  // (ps2lodscale)
     const float w2 = lev.tf_dists[0] * k, w1 = lev.tf_dists[1] * k, w0 = lev.tf_dists[2] * k;
     m_tf_band[0] = 1.f / (w0 - w1);
     m_tf_band[1] = 1.f / (w1 - w2);

@@ -249,6 +249,10 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.horizon_radius = std::clamp(f, 16.f, 400.f);
     } else if (key == "title_vis") {
       s.title_vis = parse_bool(v);  // (AI-assisted, visbake)
+    } else if (key == "ps2_lod_scale") {
+      // (AI-assisted, ps2lodscale) auto | 0.3 .. 1
+      s.ps2_lod_scale_auto = v == "auto";
+      s.ps2_lod_scale = s.ps2_lod_scale_auto ? 1.f : std::clamp(f, 0.3f, 1.f);
     } else if (key == "cell_vis") {
       s.cell_vis = parse_bool(v);  // (AI-assisted, cellvis)
     } else if (key == "depth_reuse") {

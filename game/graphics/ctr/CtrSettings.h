@@ -262,6 +262,12 @@ struct CtrSettings {
   // never saw from the camera's cell (8 m) looking the ways the view reaches are not drawn
   // (docs/3ds-port/culling.md). Off: not yet seen on a console
   bool cell_vis = false;
+  // (AI-assisted, ps2lodscale) the PS2's tie and tfrag level of detail distances (its switches and
+  // geomorph bands, not the screen-space error rule) times this: auto = the PS2's lines over the
+  // 3DS's (240 / 448 Jak 1, 240 / 416 Jak II), where a shape error covers as many pixels of the
+  // 240-line top screen as it did of the PS2's picture (docs/3ds-port/culling.md). 1: the PS2's
+  float ps2_lod_scale = 1.f;
+  bool ps2_lod_scale_auto = false;
   bool depth_reuse = false;
   float depth_reuse_min = 20.f;
   // (AI-assisted) c3l v17 tie levels of detail: the instance groups that have a near version
