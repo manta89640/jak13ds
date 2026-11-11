@@ -694,25 +694,25 @@ void CtrTexAnimJak2::fixed_anim(int array, int anim, float time, const u8* vals,
     return;
   }
   const int w = d.w, h = d.h;
-  // only the slots drawn in the last frame (the game sends some, the skull gem and the bomb
-  // gradient, in every level whether a model shows them or not); the base texture until then
-  if (!(ctr_gpu_anim_slots_drawn() & (1ull << slot))) {
-    return;
-  }
   if (!d.out) {
     d.out = &m_outs[def.dest];
   }
+  // made at once the first time the game sends it, so its first draw shows the animation, not
+  // the base texture; then redrawn only while its slot was drawn in the last frame (the game
+  // sends some, the skull gem and the bomb gradient, in every level whether a model shows them
+  // or not), kept while the game sends it
+  if (d.out->tex >= 0 && !(ctr_gpu_anim_slots_drawn() & (1ull << slot))) {
+    d.out->seen_frame = m_frame;
+    return;
+  }
   auto* o = ready(d.out, w, h);
-  // redrawn every kFixedRate frames, if its input changed; at most kFixedPerFrame animations a
-  // frame (the one waiting longest first: the others' turn comes in the next frames)
+  // redrawn every kFixedRate frames, if its input changed
   const size_t n = 4 + (size_t)nvals;
   if (o->tex >= 0 && (m_frame - o->drawn_frame < (u64)kFixedRate ||
-                      m_fixed_this_frame >= kFixedPerFrame ||
                       (o->input.size() == n && !memcmp(o->input.data(), &time, 4) &&
                        !memcmp(o->input.data() + 4, vals, nvals)))) {
     return;
   }
-  m_fixed_this_frame++;
   o->input.resize(n);
   memcpy(o->input.data(), &time, 4);
   memcpy(o->input.data() + 4, vals, nvals);
@@ -912,9 +912,13 @@ void CtrTexAnimJak2::slime(const u8* data, int bytes) {
     n.last_time = t;
   }
   const u64 drawn = ctr_gpu_anim_slots_drawn();
-  if (!((slot >= 0 && (drawn & (1ull << slot))) || (slot2 >= 0 && (drawn & (1ull << slot2))))) {
+  Out& made = m_outs[kSlimeDest];
+  if (made.tex >= 0 &&
+      !((slot >= 0 && (drawn & (1ull << slot))) || (slot2 >= 0 && (drawn & (1ull << slot2))))) {
+    // not drawn: the noise above keeps its time (made at once the first time, as fixed_anim)
+    made.seen_frame = m_outs[kSlimeScrollDest].seen_frame = m_frame;
     m_slot_ms += ctr_gpu_time_ms() - t0;
-    return;  // not drawn: the noise above keeps its time
+    return;
   }
   auto* o1 = out(kSlimeDest, kN, kN);
   auto* o2 = out(kSlimeScrollDest, kN, kN);
@@ -990,7 +994,6 @@ void CtrTexAnimJak2::slime(const u8* data, int bytes) {
 void CtrTexAnimJak2::frame_done() {
   m_snap_valid = false;
   m_frame++;
-  m_fixed_this_frame = 0;
   // idle animations give back their GPU texture and texels
   if ((m_frame & 63) == 0) {
     for (auto& [name, o] : m_outs) {
