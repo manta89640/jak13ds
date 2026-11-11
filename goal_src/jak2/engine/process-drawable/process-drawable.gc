@@ -471,8 +471,221 @@
     )
   )
 
+;; og:preserve-this (AI-assisted) 3DS animation LOD, config.ini anim_lod (default on) and
+;; anim_lod_far (default off), set by the kernel (kmachine.cpp).
+;; anim_lod is Jak 1's rule (goal_src/jak1/engine/common-obs/process-drawable.gc): the joint math of
+;; a model that was not on screen last frame and is ANIM_LOD_DIST or more (plus its bounds) from
+;; both the camera and Jak runs on one frame in 4 only (staggered by pid), so its joints are at
+;; most 3 frames old. Its code, post, collision and sounds still run every frame. A model that
+;; asked once and didn't ask again (a pose set before sleeping) gets its skipped math the next
+;; frame (*anim-lod-skipped*).
+;; anim_lod_far: a citizen (citizen-init-by-other sets pc-anim-lod) that was on screen, ANIM_LOD_FAR
+;; or more from the camera and Jak, gets its joint math every 2nd frame (every 3rd from
+;; ANIM_LOD_FARTHER). On the frames between, and on the frames anim_lod skips while it is off
+;; screen, its bones and origin move by its root's move since its last joint math: its pose and
+;; turn hold, its place doesn't lag. Not when the LOD changed since (the bones were made for
+;; another model), nor after a jump of ANIM_LOD_JUMP or more (a respawn elsewhere).
+;; Never either: Jak and his children (Daxter), movies, models with a prebind or postbind joint
+;; callback (those compute what the logic reads, e.g. look-at), models without a skeleton.
+(#when TARGET_3DS
+  (define-extern *pc-3ds-anim-lod* symbol)
+  (define-extern *pc-3ds-anim-lod-far* symbol)
+  (defconstant ANIM_LOD_DIST (meters 30))
+  (defconstant ANIM_LOD_FAR (meters 40))
+  (defconstant ANIM_LOD_FARTHER (meters 70))
+  (defconstant ANIM_LOD_JUMP (meters 1.5))
+  (define *anim-lod-frame* 0)
+  (define *anim-lod-skipped* (new 'global 'boxed-array handle MATRIX_ENGINE_AMOUNT))
+  ;; new boxed-array sets length = the allocated count (like *matrix-engine*): start empty
+  (set! (-> *anim-lod-skipped* length) 0)
+  ;; per frame (stats for a debugger or a REPL): joint math skipped, bones moved instead
+  (define *anim-lod-skip-count* 0)
+  (define *anim-lod-follow-count* 0)
+
+  (defun anim-lod-queued? ((arr (array handle)) (h handle))
+    "Is h in this frame's matrix engine queue?"
+    (dotimes (i (-> arr length))
+      (if (= (-> arr i) h)
+          (return #t)
+          )
+      )
+    #f
+    )
+
+  (defun anim-lod-allowed? ((pd process-drawable))
+    "May pd's joint math wait? Not Jak or his children, movies, joint callbacks."
+    (and *target*
+         (!= pd *target*)
+         (!= (ppointer->process (-> pd parent)) *target*)
+         (nonzero? (-> pd skel))
+         (not (-> pd skel prebind-function))
+         (not (-> pd skel postbind-function))
+         (not (logtest? (-> *kernel-context* prevent-from-run) (process-mask movie)))
+         )
+    )
+
+  (defun anim-lod-beyond? ((pd process-drawable) (dist float))
+    "Is pd dist or more (plus its bounds) from both the camera and Jak?"
+    (let* ((dc (-> pd draw))
+           (r (+ (-> dc bounds w) dist))
+           (r2 (* r r))
+           )
+      (and (< r2 (vector-vector-distance-squared (-> dc origin) (-> *math-camera* trans)))
+           (< r2 (vector-vector-distance-squared (-> dc origin) (-> *target* root trans)))
+           )
+      )
+    )
+
+  (defun anim-lod-skip? ((pd process-drawable))
+    "anim_lod: skip this frame's joint math for pd (not on screen, far)?"
+    (and *pc-3ds-anim-lod*
+         (nonzero? (logand (+ *anim-lod-frame* (-> pd pid)) 3))
+         (not (logtest? (-> pd draw status) (draw-control-status on-screen)))
+         (anim-lod-allowed? pd)
+         (anim-lod-beyond? pd ANIM_LOD_DIST)
+         )
+    )
+
+  (defun anim-lod-bones-lod ((jc joint-control))
+    "The LOD pd's bones were last made at (anim_lod_far's 2 bits)."
+    (logior (if (logtest? (-> jc status) (joint-control-status pc-anim-lod-lo)) 1 0)
+            (if (logtest? (-> jc status) (joint-control-status pc-anim-lod-hi)) 2 0)
+            )
+    )
+
+  (defun anim-lod-can-follow? ((pd process-drawable))
+    "anim_lod_far: are pd's bones ones that may follow its root (a citizen's, made at its current
+     LOD, not a jump away)?"
+    (let ((jc (-> pd skel))
+          (dc (-> pd draw))
+          )
+      (and *pc-3ds-anim-lod-far*
+           (nonzero? jc)
+           (logtest? (-> jc status) (joint-control-status pc-anim-lod))
+           (logtest? (-> jc status) (joint-control-status pc-anim-valid))
+           (= (anim-lod-bones-lod jc) (-> dc cur-lod))
+           (not (logtest? (-> dc status) (draw-control-status no-draw no-draw-temp)))
+           (= (-> pd node-list data 0 param0) cspace<-transformq!)
+           (= (the-as object (-> pd node-list data 0 param1)) (the-as object (-> pd root)))
+           (< (vector-vector-distance-squared (-> pd root trans) (-> dc skeleton bones 0 transform trans))
+              (* ANIM_LOD_JUMP ANIM_LOD_JUMP)
+              )
+           )
+      )
+    )
+
+  (defun anim-lod-follow? ((pd process-drawable))
+    "anim_lod_far: a far citizen on screen: move its bones with its root this frame instead of its
+     joint math? (Off screen, anim-lod-skip? decides.)"
+    (and *pc-3ds-anim-lod-far*
+         (logtest? (-> pd draw status) (draw-control-status on-screen))
+         (anim-lod-allowed? pd)
+         (anim-lod-beyond? pd ANIM_LOD_FAR)
+         (nonzero? (mod (+ *anim-lod-frame* (-> pd pid)) (if (anim-lod-beyond? pd ANIM_LOD_FARTHER) 3 2)))
+         (anim-lod-can-follow? pd)
+         )
+    )
+
+  (defun anim-lod-follow! ((pd process-drawable))
+    "Move pd's bones and draw origin by its root's move since its last joint math."
+    (let* ((dc (-> pd draw))
+           (sk (-> dc skeleton))
+           (b0 (-> sk bones 0 transform trans))
+           (dx (- (-> pd root trans x) (-> b0 x)))
+           (dy (- (-> pd root trans y) (-> b0 y)))
+           (dz (- (-> pd root trans z) (-> b0 z)))
+           )
+      (dotimes (i (-> sk length))
+        (let ((t (-> sk bones i transform trans)))
+          (+! (-> t x) dx)
+          (+! (-> t y) dy)
+          (+! (-> t z) dz)
+          )
+        )
+      (+! (-> dc origin x) dx)
+      (+! (-> dc origin y) dy)
+      (+! (-> dc origin z) dz)
+      )
+    0
+    (none)
+    )
+
+  (defun anim-lod-joint-math! ((pd process-drawable))
+    "pd's joint math; for anim_lod_far, which LOD the bones are now of."
+    (do-joint-math (-> pd draw) (-> pd node-list) (-> pd skel))
+    (let ((jc (-> pd skel)))
+      (when (and (nonzero? jc) (logtest? (-> jc status) (joint-control-status pc-anim-lod)))
+        (logclear! (-> jc status) (joint-control-status pc-anim-lod-lo pc-anim-lod-hi))
+        (let ((lod (-> pd draw cur-lod)))
+          (if (logtest? lod 1)
+              (logior! (-> jc status) (joint-control-status pc-anim-lod-lo))
+              )
+          (if (logtest? lod 2)
+              (logior! (-> jc status) (joint-control-status pc-anim-lod-hi))
+              )
+          )
+        (if (logtest? (-> pd draw status) (draw-control-status no-draw no-draw-temp))
+            (logclear! (-> jc status) (joint-control-status pc-anim-valid))
+            (logior! (-> jc status) (joint-control-status pc-anim-valid))
+            )
+        )
+      )
+    0
+    (none)
+    )
+
+  (defun anim-lod-math! ((pd process-drawable) (h handle))
+    "This frame's joint math for pd, by the animation LOD rules above."
+    (cond
+      ((anim-lod-skip? pd)
+       ;; a citizen's bones keep its place while they wait (anim_lod_far)
+       (if (anim-lod-can-follow? pd)
+           (anim-lod-follow! pd)
+           )
+       (let ((skipped *anim-lod-skipped*))
+         (when (< (-> skipped length) (-> skipped allocated-length))
+           (set! (-> skipped (-> skipped length)) h)
+           (+! (-> skipped length) 1)
+           )
+         )
+       (+! *anim-lod-skip-count* 1)
+       )
+      ((anim-lod-follow? pd)
+       (anim-lod-follow! pd)
+       (+! *anim-lod-follow-count* 1)
+       )
+      (else
+        (anim-lod-joint-math! pd)
+        )
+      )
+    0
+    (none)
+    )
+  )
+
 (defun execute-math-engine ()
   (let ((gp-0 *matrix-engine*))
+    ;; og:preserve-this (AI-assisted) 3DS animation LOD (above): last frame's skipped requests of
+    ;; models that didn't ask again
+    (#when TARGET_3DS
+      (+! *anim-lod-frame* 1)
+      (set! *anim-lod-skip-count* 0)
+      (set! *anim-lod-follow-count* 0)
+      (let ((skipped *anim-lod-skipped*))
+        (dotimes (i (-> skipped length))
+          (let ((h (-> skipped i)))
+            (when (not (anim-lod-queued? gp-0 h))
+              (let ((pd (the-as process-drawable (handle->process h))))
+                (if pd
+                    (anim-lod-joint-math! pd)
+                    )
+                )
+              )
+            )
+          )
+        (set! (-> skipped length) 0)
+        )
+      )
     (let ((s5-0 (-> gp-0 length)))
       (dotimes (s4-0 s5-0)
         (let ((v1-3 (the-as process-drawable (handle->process (-> gp-0 s4-0)))))
@@ -483,7 +696,7 @@
                       (set! (-> late (-> late length)) (-> gp-0 s4-0))
                       (+! (-> late length) 1)
                       )
-                    (do-joint-math (-> v1-3 draw) (-> v1-3 node-list) (-> v1-3 skel))
+                    (anim-lod-math! v1-3 (-> gp-0 s4-0))
                     )
                 (do-joint-math (-> v1-3 draw) (-> v1-3 node-list) (-> v1-3 skel))
                 )

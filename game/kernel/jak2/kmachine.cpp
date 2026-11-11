@@ -802,6 +802,28 @@ void InitMachine_PCPort() {
     intern_from_c("*pc-3ds-shadow-all?*")->value() =
         all ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
   }
+  // (AI-assisted, j2cuts) config.ini anim_lod (default on, Jak 1's rule) and anim_lod_far (default
+  // off): joint math of far models every 2nd-4th frame (process-drawable.gc execute-math-engine).
+  // Off on other builds unless OPENGOAL_ANIM_LOD is 1 (anim_lod) or 2 (both).
+  {
+    bool anim_lod = false;
+    bool anim_lod_far = false;
+#ifdef __3DS__
+    anim_lod = ctr_config_bool("anim_lod", 1);
+    anim_lod_far = anim_lod && ctr_config_bool("anim_lod_far", 0);
+    lg::info("animation LOD {}{} (config.ini anim_lod, anim_lod_far)", anim_lod ? "on" : "off",
+             anim_lod_far ? ", far citizens too" : "");
+#else
+    if (const char* e = getenv("OPENGOAL_ANIM_LOD")) {
+      anim_lod = atoi(e) >= 1;
+      anim_lod_far = atoi(e) >= 2;
+    }
+#endif
+    intern_from_c("*pc-3ds-anim-lod*")->value() =
+        anim_lod ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
+    intern_from_c("*pc-3ds-anim-lod-far*")->value() =
+        anim_lod_far ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
+  }
   // config.ini ocean = full: the PS2 ocean's DMA (draw-ocean) for CtrOceanFull instead of
   // ocean-3ds-packet's for CtrOceanRenderer (ocean.gc, TARGET_3DS)
   {

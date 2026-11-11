@@ -125,6 +125,7 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
 #endif
     {"shield_density", "1"}, /* Citadel robot cage, 0.125..1 (1: every panel) */
     {"anim_lod", "on"},
+    {"anim_lod_far", "off"}, /* (AI-assisted, j2cuts) Jak II: far citizens on screen too */
     {"merc_lod_scale", "1"},
     {"ocean", "full"},
     {"shadows", "full"},

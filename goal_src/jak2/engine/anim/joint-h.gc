@@ -20,6 +20,12 @@
   (blend-shape-valid       6) ;; 64
   (eye-anim-valid          7) ;; 128
   (eye-anim                8) ;; 256
+  ;; og:preserve-this 3DS: anim_lod_far (process-drawable.gc): a citizen whose bones may follow its
+  ;; root between its joint math; the LOD (2 bits) its bones were last made at, and that they were
+  (pc-anim-lod-lo          10)
+  (pc-anim-lod-hi          11)
+  (pc-anim-valid           12)
+  (pc-anim-lod             13)
   ;; og:preserve-this 3DS: only this model's drawing reads its bones (process-drawable.gc)
   (pc-late-math            15)
   )

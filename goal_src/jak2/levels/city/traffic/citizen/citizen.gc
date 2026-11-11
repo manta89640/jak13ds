@@ -54,6 +54,13 @@
   (clear-focused (-> this focus))
   (set! (-> this enemy-flags) (the-as enemy-flag (logand (enemy-flag drawn-mirrored) (-> this enemy-flags))))
   (logclear! (-> this draw status) (draw-control-status no-draw lod-set))
+  ;; og:preserve-this (AI-assisted) 3DS anim_lod_far: a citizen back from the pool makes its bones
+  ;; afresh before they may follow its root
+  (#when TARGET_3DS
+    (if (nonzero? (-> this skel))
+        (logclear! (-> this skel status) (joint-control-status pc-anim-valid))
+        )
+    )
   (set! (-> this draw death-timer) (the-as uint 0))
   (logior! (-> this root nav-flags) (nav-flags has-root-sphere))
   (let ((v1-28 (-> this root root-prim)))
@@ -671,6 +678,13 @@
       (logior! (-> self flags) (citizen-flag dark-guard))
       )
   (init-enemy! self)
+  ;; og:preserve-this (AI-assisted) 3DS: config.ini anim_lod_far may move this citizen's bones with
+  ;; its root between its joint math while it is far (process-drawable.gc anim-lod-follow?)
+  (#when TARGET_3DS
+    (if (nonzero? (-> self skel))
+        (logior! (-> self skel status) (joint-control-status pc-anim-lod))
+        )
+    )
   (set! (-> self traffic-id) (the-as int (-> arg0 id)))
   (go-inactive self)
   (none)
