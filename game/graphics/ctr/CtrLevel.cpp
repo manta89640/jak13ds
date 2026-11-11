@@ -10802,6 +10802,18 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
   u8* const nomerge_out = in.nomerge_out;
   const bool vista_tier = in.vista_tier;
   for (u32 r = r0; r < r0 + nr; r++) {
+    // (AI-assisted, pld) the ARM11 has no hardware prefetch: 16 runs ahead (4 lines of VisRun and
+    // RunSphere, 2 of RunLod) into the cache, one line per array every 4 runs (a hint: it never
+    // faults past the end)
+    if ((r & 3) == 0) {
+      __builtin_prefetch(runs + r + 16);
+      if (STR) {
+        __builtin_prefetch(spheres + r + 16);
+      }
+      if (LOD) {
+        __builtin_prefetch(run_lod + r + 16);
+      }
+    }
     const c3l::VisRun& run = runs[r];
     bool s = true;
     if (VIS) {

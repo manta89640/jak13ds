@@ -1882,3 +1882,19 @@ other object. (It has no `.text.hot` rule, so GCC's `hot` attribute alone wouldn
   in `.text`; linked with `3dsx.ld`'s text rule, those three blocks come first and contiguous
   (~10 KB), then every `.text.*`. Host builds: no change (the macros are empty). Libraries built
   without `-ffunction-sections` keep their whole `.text` in the same first group, in link order.
+
+### 9. Prefetch in the streaming loops (pld)
+
+The ARM11 has no hardware prefetcher: a loop that walks an array waits for every new 32-byte
+line. `PLD` (a hint: no fault, no change to results, also past the end of an array) asks for a
+line ahead of time.
+
+- The level renderer's per-run loop (`run_loop`): every 4th run, the lines 16 runs ahead of
+  `VisRun` (8 bytes), `RunSphere` (8, when the chunk straddles a plane) and `RunLod` (4).
+- The particle blocks (`sp-process-block-2d` / `-3d` natives, both games): the next particle's
+  144-byte entry (3 lines) and its 48-byte sprite while this one runs.
+
+Checked: the natives' differential tests as ARM code (qemu-arm): sp-process-block-2d / -3d,
+bones, shadow-execute all match their references. cpu_bench pair `mem.runs64k` /
+`mem.runs64k_pld` (the run loop's arrays for 64K runs, 1.25 MB) prices it on a console; the
+primitive pair `mem.seq256k` / `mem.seq256k_pld` too.

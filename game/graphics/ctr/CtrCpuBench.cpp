@@ -549,6 +549,56 @@ uint32_t bones_vector(uint32_t n) {
 }
 #endif
 
+// ---- (AI-assisted, pld) the run loop's walk over its arrays (8-byte runs, 8-byte spheres, 4-byte
+// LOD entries; 64K runs: 1.25 MB, more than the New 3DS's L2 share a frame keeps) without and
+// with a PLD 16 runs ahead (CtrLevel.cpp run_loop) ----
+struct BRun {
+  uint16_t draw, vis;
+  uint32_t count;
+};
+struct BSph {
+  int16_t c[3];
+  uint16_t r;
+};
+constexpr uint32_t kRuns = 64 * 1024;
+BRun* g_runs = nullptr;
+BSph* g_rsph = nullptr;
+uint32_t* g_rlod = nullptr;
+void fill_runs() {
+  if (!g_runs) {
+    g_runs = new BRun[kRuns];
+    g_rsph = new BSph[kRuns];
+    g_rlod = new uint32_t[kRuns];
+  }
+  for (uint32_t i = 0; i < kRuns; i++) {
+    g_runs[i] = {(uint16_t)(i & 7), (uint16_t)(i * 7), (uint32_t)(i % 97) * 3};
+    g_rsph[i] = {{(int16_t)i, (int16_t)(i * 3), (int16_t)(i * 5)}, (uint16_t)(i & 255)};
+    g_rlod[i] = i * 2654435761u;
+  }
+}
+template <bool PLD>
+uint32_t runs_scan(uint32_t n) {
+  uint32_t s = 0;
+  for (uint32_t k = 0; k < n; k++) {
+    for (uint32_t r = 0; r < kRuns; r++) {
+      if (PLD && (r & 3) == 0) {
+        __builtin_prefetch(g_runs + r + 16);
+        __builtin_prefetch(g_rsph + r + 16);
+        __builtin_prefetch(g_rlod + r + 16);
+      }
+      const int v = g_rsph[r].c[0] + g_rsph[r].c[1] - g_rsph[r].c[2] > (int)g_rsph[r].r;
+      s += v ? g_runs[r].count : (g_rlod[r] & 1);
+    }
+  }
+  return s;
+}
+uint32_t runs_plain(uint32_t n) {
+  return runs_scan<false>(n);
+}
+uint32_t runs_pld(uint32_t n) {
+  return runs_scan<true>(n);
+}
+
 const Case kCases[] = {
     // name, kernel, iterations on the console, pair
     {"vfp.chain8", vfp_chain, 200000, nullptr},
@@ -569,6 +619,8 @@ const Case kCases[] = {
     {"mem.seq256k", mem_seq, 20, nullptr},
     {"mem.seq256k_pld", mem_seq_pld, 20, "mem.seq256k"},
     {"mem.line256k", mem_line, 20, nullptr},
+    {"mem.runs64k", runs_plain, 20, nullptr},
+    {"mem.runs64k_pld", runs_pld, 20, "mem.runs64k"},
     {"cull.planes3_branch", planes3_branch, 1000000, nullptr},
     {"cull.planes3_signs", planes3_signs, 1000000, "cull.planes3_branch"},
     {"tod.blend4_bytes", tod_bytes, 500, nullptr},
@@ -596,6 +648,7 @@ int run(double scale, void (*line)(const char* text, void* ctx), void* ctx) {
   fill_points();
   fill_cones();
   fill_tod();
+  fill_runs();
 #ifdef BONES_VFP_ASM
   fill_bones();
 #endif

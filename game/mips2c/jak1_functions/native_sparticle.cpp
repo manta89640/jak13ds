@@ -223,6 +223,13 @@ CTR_HOT u64 sp_process_block_2d_impl(const NativeArgs& args) {
     count--;
     info += 144;
     vec += 48;
+    // (AI-assisted, pld) the ARM11 has no hardware prefetch: the particle two ahead (144 bytes)
+    // and its sprite (48) into the cache while this one runs (a hint: never faults, no effect on
+    // the results)
+    __builtin_prefetch(m.base + (u32)(info + 144));
+    __builtin_prefetch(m.base + (u32)(info + 144 + 64));
+    __builtin_prefetch(m.base + (u32)(info + 144 + 128));
+    __builtin_prefetch(m.base + (u32)(vec + 48));
     index++;
   } while (count != 0);
   return index;
@@ -419,6 +426,13 @@ CTR_HOT u64 sp_process_block_3d_impl(const NativeArgs& args) {
     count--;
     info += 144;
     vec += 48;
+    // (AI-assisted, pld) the ARM11 has no hardware prefetch: the particle two ahead (144 bytes)
+    // and its sprite (48) into the cache while this one runs (a hint: never faults, no effect on
+    // the results)
+    __builtin_prefetch(m.base + (u32)(info + 144));
+    __builtin_prefetch(m.base + (u32)(info + 144 + 64));
+    __builtin_prefetch(m.base + (u32)(info + 144 + 128));
+    __builtin_prefetch(m.base + (u32)(vec + 48));
     index++;
   } while (count != 0);
   return index;
