@@ -259,35 +259,35 @@ struct CtrSettings {
   // (AI-assisted, occluders) level geometry hidden behind the occluder_count biggest occluders near
   // the camera (boxes inside closed tie surfaces, c3l::ExtOcc: levels converted with the current
   // ctr_level_converter) is not drawn (docs/3ds-port/culling.md). Off: not yet seen on a console
-  bool occluders = true;
+  bool occluders = false;
   int occluder_count = 6;
   // (AI-assisted, horizon) level geometry entirely beyond horizon_radius meters and below the
   // terrain's horizon (c3l::ExtHorizon: the hills of the level the camera is over) is not drawn
   // (docs/3ds-port/culling.md). Off: not yet seen on a console
-  bool horizon = true;
+  bool horizon = false;
   float horizon_radius = 64.f;
   // (AI-assisted, visbake) the title screen's flight: the level runs a bake (<level>.c3b next to the
   // .c3l, made on the host with CTR_VIS_BAKE=dir:title) never saw from the nearest cameras of its
   // path are not drawn (docs/3ds-port/culling.md). Off: not yet seen on a console
-  bool title_vis = true;
+  bool title_vis = false;
   // (AI-assisted, cellvis) level runs that a bake (<level>.c3c, CTR_VIS_BAKE=dir:cells on the host)
   // never saw from the camera's cell (8 m) looking the ways the view reaches are not drawn
   // (docs/3ds-port/culling.md). Off: not yet seen on a console
-  bool cell_vis = true;
+  bool cell_vis = false;
   // (AI-assisted, ps2lodscale) the PS2's tie and tfrag level of detail distances (its switches and
   // geomorph bands, not the screen-space error rule) times this: auto = the PS2's lines over the
   // 3DS's (240 / 448 Jak 1, 240 / 416 Jak II), where a shape error covers as many pixels of the
   // 240-line top screen as it did of the PS2's picture (docs/3ds-port/culling.md). 1: the PS2's
   float ps2_lod_scale = 1.f;
-  bool ps2_lod_scale_auto = true;
+  bool ps2_lod_scale_auto = false;
   // (AI-assisted, sizecull) level chunks and runs whose bounding sphere is smaller than this many
   // pixels across on the top screen are not drawn; one hidden that way comes back above 1.25x it
   // (docs/3ds-port/culling.md). 0: off (default)
-  float min_run_px = 1.f;
+  float min_run_px = 0.f;
   // (AI-assisted, farcopy) levels converted with --far-copies: a cell's plain tie geometry is drawn
   // as its simplified copy while the camera is far_copy_distance meters or more from the cell's
   // center (docs/3ds-port/culling.md). Off: the sources always (the copies never)
-  bool far_copy = true;
+  bool far_copy = false;
   float far_copy_distance = 150.f;
   // (AI-assisted, terraincull) back faces of the terrain the converter marked (c3l::kDrawCullTerrain,
   // --terrain-cull: ground whose underside the camera can't get to) are culled, with cull_ties'
@@ -297,12 +297,12 @@ struct CtrSettings {
   // whose every triangle faces away from the camera (its normal cone and sphere) is not sent to the
   // GPU at all (it would cull all of it: the same picture, less vertex work). Needs cull_ties.
   // Off (docs/3ds-port/culling.md)
-  bool cone_cull = true;
+  bool cone_cull = false;
   // (AI-assisted, depthreuse) level chunks and runs that the depth of a recent frame (the GPU's copy
   // after the camera's level is drawn) hid in two copies in a row are not drawn, while the camera
   // stands nearly still (0.25 m, 1 degree) and nothing nearer than depth_reuse_min meters covers
   // them (docs/3ds-port/culling.md). Off: not yet seen on a console
-  bool depth_reuse = true;
+  bool depth_reuse = false;
   float depth_reuse_min = 20.f;
   // (AI-assisted) c3l v17 tie levels of detail: the instance groups that have a near version
   // (geometry 0) are drawn with it within their PS2 distance, else with the far one (geometry 3).
