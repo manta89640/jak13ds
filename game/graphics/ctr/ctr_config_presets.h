@@ -59,7 +59,7 @@ static const ctr_cfg_kv ctr_cfg_preset_bench[] = {
 /* full: the detail of the builds before the fixed cuts (slower: under 30 fps in busy places) */
 static const ctr_cfg_kv ctr_cfg_preset_full[] = {
     {"auto_detail", "off"},    {"traffic_density", "1"},
-    {"particle_density", "1"}, {"shadows", "all"},
+    {"particle_density", "1"},
 };
 /* (AI-assisted, j2cuts) fast: normal plus Jak II's behaviour-changing cuts of the game thread
  * (jak2_perf.md "Behaviour-changing cuts"): far citizens' joint math at 15 / 10 Hz, lower detail

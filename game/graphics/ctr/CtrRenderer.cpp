@@ -130,7 +130,7 @@ const AbSwitch kAbSwitches[] = {
     // computes them)
     {"shadows",
      [](CtrSettings& s, bool on) {
-       s.shadows = on ? CtrSettings::ShadowMode::Full : CtrSettings::ShadowMode::Blob;
+       s.shadows = on ? CtrSettings::ShadowMode::Full : CtrSettings::ShadowMode::Off;
      },
      [](const CtrSettings& s) { return s.shadows == CtrSettings::ShadowMode::Full; }},
     {"envmap", [](CtrSettings& s, bool on) { s.envmap = on; },
@@ -558,8 +558,7 @@ CtrRenderer::CtrRenderer()
     set(BucketId::MERC_EYES_AFTER_PRIS, std::move(eyes));
   }
   // (AI-assisted) config.ini shadows = full: the game's shadow volumes (CtrShadow: stencil passes,
-  // after the level and most merc buckets, before the ocean whose stencil marks it leaves at 0).
-  // Else the bucket is skipped: with blob the game draws Jak's fake shadow instead.
+  // after the level and most merc buckets, before the ocean). Else the bucket is skipped.
   if (ctr_settings().shadows == CtrSettings::ShadowMode::Full) {
     if (ctr_gpu_has_stencil()) {
       set(BucketId::SHADOW, std::make_unique<CtrShadowRenderer>("shadow", (int)BucketId::SHADOW));

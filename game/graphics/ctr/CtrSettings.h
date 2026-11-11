@@ -82,13 +82,12 @@ struct CtrSettings {
   // room, and distort sprites under 8 pixels are left out (no copy at all when none is left).
   // full: every frame with distort sprites copies the whole screen into linear memory (as before)
   bool distort_copy_rows = true;
-  // (AI-assisted) config shadows = full | blob | off (on = full). full: the game's shadow volumes
-  // (Jak, enemies, objects; the game runs shadow-execute-all, CtrShadow draws them with the stencil
-  // buffer); blob: a dark spot under Jak only (the game's fake shadow, no volumes); off: none.
-  // full needs the stencil buffer: with depth16 it is blob (the game applies the same rule).
-  enum class ShadowMode { Off, Blob, Full };
+  // config shadows = full | off (on = full). full: the game's shadow volumes (Jak, enemies,
+  // objects; the game runs shadow-execute-all, CtrShadow draws them with the stencil buffer).
+  // full needs the stencil buffer: with depth16 it is off (the game applies the same rule).
+  enum class ShadowMode { Off, Full };
   ShadowMode shadows = ShadowMode::Full;
-  bool shadows_full_wanted = false;  // full in config.ini, blob because of depth16 (for the log)
+  bool shadows_full_wanted = false;  // full in config.ini, off because of depth16 (for the log)
   // the sky (time of day sky texture, clouds); off: the screen is cleared to the fog color
   bool sky = true;
   // (AI-assisted) the clouds over the sky (one added pass over the sky's part of the screen)
@@ -201,8 +200,8 @@ struct CtrSettings {
   // on: that target always (a test; early depth still needs its self-test)
   int top_block32 = 0;  // off: on hardware, game frames lose blocks with block32 early depth
   // (AI-assisted) 16-bit depth buffer instead of 24-bit + stencil: half the depth traffic, but
-  // 256x coarser depth (z-fighting far away) and no stencil (shadows = full becomes blob, the
-  // ocean = waves marks are left out). Off by default.
+  // 256x coarser depth (z-fighting far away) and no stencil (shadows = full becomes off). Off by
+  // default.
   bool depth16 = false;
   // sprite and HUD textures in the smallest 3DS format that holds them (8 / 16 bits per texel),
   // and in reserved VRAM (with vram_textures)

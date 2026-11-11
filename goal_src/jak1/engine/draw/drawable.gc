@@ -20,7 +20,7 @@
   (define-extern *pc-3ds-ocean-full* symbol))
 
 ;; (AI-assisted) set by the kernel from config.ini shadows (kmachine.cpp InitMachine_PCPort):
-;; 'full (the shadow volumes, shadow-execute-all), 'blob (draw-target-blob-shadow-3ds) or 'off
+;; 'full (the shadow volumes, shadow-execute-all) or 'off
 (#when TARGET_3DS
   (define-extern *pc-3ds-shadows* symbol))
 
@@ -768,31 +768,6 @@
 
 (define *generic-effect-mode* 0)
 
-;; (AI-assisted) 3DS, config.ini shadows = blob (and full with depth16 = on, which has no stencil
-;; buffer for the shadow volumes): no shadow volumes (shadow-execute-all is skipped below). Jak
-;; gets a blob shadow instead, one of the game's fake shadows (a soft dark dot on the ground below
-;; him, smaller the higher he is, none above 12 m), so a jump shows where it will land. The sprite
-;; renderer draws it.
-(#when TARGET_3DS
-  (define-extern compute-and-draw-shadow (function vector vector vector vector float float none))
-  (defun draw-target-blob-shadow-3ds ()
-    (let ((tgt *target*))
-      (when (and tgt
-                 (nonzero? (-> tgt control))
-                 (not (logtest? (-> tgt draw status) (draw-status hidden))))
-        (let ((ground (new 'stack-no-clear 'vector))
-              (up (new 'stack-no-clear 'vector)))
-          (set! (-> ground quad) (-> tgt control shadow-pos quad))
-          (set-vector! up 0.0 1.0 0.0 0.0)
-          (compute-and-draw-shadow (-> tgt control trans)
-                                   ground
-                                   up
-                                   (the-as vector (meters 0.75))
-                                   (meters 12)
-                                   (the-as float 0)))))
-    0
-    (none)))
-
 (defun real-main-draw-hook ()
   "The main drawing function. This dispatches all renderers and is called directly from the display-loop
   in main.gc"
@@ -967,15 +942,12 @@
         (shadow-execute-all gp-9 *shadow-queue*)))
     ;; (AI-assisted) 3DS: the shadows follow config.ini shadows (*pc-3ds-shadows*): full = the
     ;; shadow volumes like on the PS2 (shadow-execute is native code there, the 3DS renderer
-    ;; draws the shadow bucket with the stencil buffer), blob = Jak's blob shadow, off = none.
+    ;; draws the shadow bucket with the stencil buffer), off = none.
     ;; The objects' shadow packets are made by draw-bones-shadow either way.
     (#when TARGET_3DS
-      (case *pc-3ds-shadows*
-        (('full)
-         (with-profiler "shadow"
-           (shadow-execute-all gp-9 *shadow-queue*)))
-        (('blob)
-         (draw-target-blob-shadow-3ds))))
+      (when (= *pc-3ds-shadows* 'full)
+        (with-profiler "shadow"
+          (shadow-execute-all gp-9 *shadow-queue*))))
     (with-profiler "eyes"
       (update-eyes)))
   ;; sprite draw

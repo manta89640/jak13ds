@@ -47,7 +47,7 @@ void apply_rules(CtrSettings& s) {
   // the shadow volumes need the stencil buffer, which the 16-bit depth buffer doesn't have
   // (kmachine.cpp's choice of what the game builds follows the same rule)
   if (s.shadows == CtrSettings::ShadowMode::Full && s.depth16) {
-    s.shadows = CtrSettings::ShadowMode::Blob;
+    s.shadows = CtrSettings::ShadowMode::Off;
     s.shadows_full_wanted = true;
   }
   // (AI-assisted) early_depth = sky: the early test is for the sky drawn last
@@ -125,16 +125,14 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
     } else if (key == "distort_copy") {
       s.distort_copy_rows = v != "full";  // (AI-assisted) rows | full
     } else if (key == "shadows") {
-      // (AI-assisted) full | blob | off (on = full)
+      // full | off (on = full; the removed all = full, blob = off)
       if (v == "full" || v == "all" || parse_bool(v)) {
         s.shadows = CtrSettings::ShadowMode::Full;
-      } else if (v == "blob") {
-        s.shadows = CtrSettings::ShadowMode::Blob;
-      } else if (v == "off" || v == "0" || v == "false" || v == "no") {
+      } else if (v == "blob" || v == "off" || v == "0" || v == "false" || v == "no") {
         s.shadows = CtrSettings::ShadowMode::Off;
       } else {
         if (!s_quiet) {
-          lg::warn("[ctr] {}:{}: shadows = {}: expected full, all, blob or off", path.string(), n, v);
+          lg::warn("[ctr] {}:{}: shadows = {}: expected full or off", path.string(), n, v);
         }
       }
     } else if (key == "sky") {
@@ -556,11 +554,10 @@ std::string CtrSettings::summary() const {
       skip_clear ? "on" : "off", distort ? "on" : "off", distort_copy_rows ? "rows" : "full",
       envmap ? "on" : "off",
       merc_gen_lod ? "on" : "off", merc_lod_scale,
-      // (AI-assisted) with depth16, full falls back to blob (no stencil)
-      shadows == ShadowMode::Full   ? "full"
-      : shadows == ShadowMode::Blob ? (shadows_full_wanted ? "blob (full needs the stencil: depth16)"
-                                                           : "blob")
-                                    : "off",
+      // with depth16, full falls back to off (no stencil)
+      shadows == ShadowMode::Full ? "full"
+      : shadows_full_wanted       ? "off (full needs the stencil: depth16)"
+                                  : "off",
       rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), mip_bias,
       skin_rows_f24 ? "on" : "off", skin_clip_f24 ? "on" : "off", color16 ? "on" : "off",

@@ -776,22 +776,17 @@ void InitMachine_PCPort() {
         on ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
   });
 #endif
-  // config.ini shadows: only full draws Jak II's shadow volumes (CtrShadowJak2;
-  // Jak II has no blob shadow, so blob is off), and only with the stencil buffer (not depth16 =
-  // on). Otherwise the game doesn't make them either (drawable.gc, TARGET_3DS: no
-  // shadow-execute-all). Other builds: always.
-  // shadows = all: every caster at any distance (the PC port's extended shadows); full: the
-  // PS2's distances (foreground.gc, citizen.gc, vehicle.gc, mountain-obs.gc)
+  // config.ini shadows: full draws Jak II's shadow volumes (CtrShadowJak2) at the PS2's
+  // distances, only with the stencil buffer (not depth16 = on); off: the game doesn't make them
+  // either (drawable.gc, TARGET_3DS: no shadow-execute-all). Other builds: always.
   {
     bool volumes = true;
-    bool all = false;
 #ifdef __3DS__
     char v[32];
     if (ctr_config_get("shadows", v, sizeof(v))) {
       const std::string sh(v);
       volumes = !(sh == "blob" || sh == "off" || sh == "0" || sh == "no" || sh == "false" ||
                   sh == "none");
-      all = sh == "all";
     }
     if (volumes && ctr_config_bool("depth16", 0)) {
       volumes = false;
@@ -799,8 +794,6 @@ void InitMachine_PCPort() {
 #endif
     intern_from_c("*pc-3ds-shadow-volumes?*")->value() =
         volumes ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
-    intern_from_c("*pc-3ds-shadow-all?*")->value() =
-        all ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
   }
   // (AI-assisted, j2cuts) config.ini anim_lod (default on, Jak 1's rule) and anim_lod_far (default
   // off): joint math of far models every 2nd-4th frame (process-drawable.gc execute-math-engine).

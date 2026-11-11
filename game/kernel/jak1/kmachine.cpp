@@ -765,28 +765,26 @@ void InitMachine_PCPort() {
     intern_from_c("*pc-3ds-anim-native*")->value =
         anim_native ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
   }
-  // (AI-assisted) config.ini shadows = full (default, also on) | blob | off: the shadow volumes
-  // (shadow-execute-all fills the shadow bucket, which the 3DS renderer draws with the stencil
-  // buffer), only the blob shadow under Jak, or none (drawable.gc, TARGET_3DS). The volumes need
-  // the stencil buffer, which depth16 = on doesn't have: full is blob then. Other builds: full
-  // (host runs of the 3DS GOAL code make the shadow DMA like the 3DS).
+  // config.ini shadows = full (default, also on) | off: the shadow volumes (shadow-execute-all
+  // fills the shadow bucket, which the 3DS renderer draws with the stencil buffer) or none
+  // (drawable.gc, TARGET_3DS). The volumes need the stencil buffer, which depth16 = on doesn't
+  // have: off then. Other builds: full (host runs of the 3DS GOAL code make the shadow DMA like
+  // the 3DS).
   {
     std::string shadows = "full";
 #ifdef __3DS__
     char v[32];
     if (ctr_config_get("shadows", v, sizeof(v))) {
       const std::string s(v);
-      if (s == "blob") {
-        shadows = "blob";
-      } else if (s == "off" || s == "0" || s == "no" || s == "false" || s == "none") {
+      if (s == "blob" || s == "off" || s == "0" || s == "no" || s == "false" || s == "none") {
         shadows = "off";
       } else if (s != "full" && s != "all" && s != "on" && s != "1" && s != "yes" && s != "true") {
-        lg::warn("config.ini shadows = {}: not full, blob or off, using full", s);
+        lg::warn("config.ini shadows = {}: not full or off, using full", s);
       }
     }
     if (shadows == "full" && ctr_config_bool("depth16", 0)) {
-      shadows = "blob";
-      lg::info("shadows blob (config.ini shadows: the volumes need the stencil buffer, which "
+      shadows = "off";
+      lg::info("shadows off (config.ini shadows: the volumes need the stencil buffer, which "
                "depth16 = on doesn't have)");
     } else {
       lg::info("shadows {} (config.ini shadows)", shadows);
