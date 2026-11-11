@@ -247,10 +247,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.vis_culling = parse_bool(v);
     } else if (key == "run_culling") {
       s.run_culling = parse_bool(v);  // (AI-assisted)
-    } else if (key == "ps2_lod_scale") {
-      // (AI-assisted, ps2lodscale) auto | 0.3 .. 1
-      s.ps2_lod_scale_auto = v == "auto";
-      s.ps2_lod_scale = s.ps2_lod_scale_auto ? 1.f : std::clamp(f, 0.3f, 1.f);
     } else if (key == "tie_lod") {
       s.tie_lod = parse_bool(v);  // (AI-assisted) c3l v17
     } else if (key == "color_stream") {

@@ -969,9 +969,9 @@ the wall is broken, the sewer hover door, the strip's vents).
   statue wall without the rubble slabs, as the PC; strip hides 13 of 24 (2093 triangles not drawn
   per level draw), sewer its hover door.
 
-## Culling data (after ExtTfrag)
+## Retired extension sections (208-288)
 
-(AI-assisted, Nov 11.) Tables for the culling keys of docs/3ds-port/culling.md, each appended to
-the extension header (no version change: an older reader stops at its own `ExtHeader::size`, the
-sections before a present one are zero when the level has none).
+Bytes 208-288 of the extension header held tables of culling options since removed (occluders,
+horizon grid, far copies, normal cones). Readers ignore them; the converter no longer writes them.
+Draw kind bit 0x4000 (a terrain back face mark) is retired too: a draw with it has both sides drawn.
 

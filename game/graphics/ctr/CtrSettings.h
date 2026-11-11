@@ -256,12 +256,6 @@ struct CtrSettings {
   // pieces of ~96 triangles made at load) tested against the view on their own: only the ones on
   // screen are drawn (bounding spheres made at load, 8 bytes per piece)
   bool run_culling = true;
-  // (AI-assisted, ps2lodscale) the PS2's tie and tfrag level of detail distances (its switches and
-  // geomorph bands, not the screen-space error rule) times this: auto = the PS2's lines over the
-  // 3DS's (240 / 448 Jak 1, 240 / 416 Jak II), where a shape error covers as many pixels of the
-  // 240-line top screen as it did of the PS2's picture (docs/3ds-port/culling.md). 1: the PS2's
-  float ps2_lod_scale = 1.f;
-  bool ps2_lod_scale_auto = false;
   // (AI-assisted) c3l v17 tie levels of detail: the instance groups that have a near version
   // (geometry 0) are drawn with it within their PS2 distance, else with the far one (geometry 3).
   // off: the far versions only (as before v17)

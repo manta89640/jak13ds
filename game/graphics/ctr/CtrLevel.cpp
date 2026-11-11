@@ -10433,15 +10433,8 @@ struct ReliefAt {
     return kn;
   }
 };
-// (AI-assisted, ps2lodscale) config.ini ps2_lod_scale: the factor on the PS2's tie and tfrag LOD
-// distances (auto: the PS2's lines over the top screen's 240)
-float ctr_ps2_lod_scale() {
-  const auto& s = ctr_settings();
-  if (s.ps2_lod_scale_auto) {
-    return 240.f / (g_game_version == GameVersion::Jak2 ? 416.f : 448.f);
-  }
-  return s.ps2_lod_scale;
-}
+// the factor on the PS2's tie and tfrag LOD distances (its switches and geomorph bands)
+constexpr float kPs2LodScale = 1.f;
 
 // (AI-assisted, title-popin) a sphere against the view's four planes (the chunk test of emit_chunk)
 CTR_HOT bool sphere_in_view(const CtrBackgroundCamera& cam, const float* s) {
@@ -12308,9 +12301,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // doesn't move it: pulling the switch in made the pops larger); older files: the PS2 distance,
     // pulled in to half while the GPU is busy
     const float k0 = settings.tie_lod ? settings.detail_scale : 0.f;
-    // (AI-assisted, ps2lodscale) the PS2's distances (the floor, the geomorph's planes, older
-    // files' switch) x ps2_lod_scale; the screen-space error rule stays as it is
-    const float k0p = k0 * ctr_ps2_lod_scale();
+    // the PS2's distances (the floor, the geomorph's planes, older files' switch) x kPs2LodScale
+    const float k0p = k0 * kPs2LodScale;
     // (AI-assisted, streaming: lod_auto, was auto_detail: the chunk loop's auto_detail is above now)
     // (AI-assisted, autodetail) with shape errors: the relief's tie_lod_px at t
     const bool lod_auto = settings.auto_detail && (by_error ? relief.rl.stage[ctr_detail::kTieLodPx] >= 0 : true);
@@ -12749,7 +12741,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   if (tf_on) {
     const float wv[3] = {-R[0][3], -R[1][3], -R[2][3]};
     const float wl = std::sqrt(wv[0] * wv[0] + wv[1] * wv[1] + wv[2] * wv[2]);
-    const float k = settings.detail_scale * ctr_ps2_lod_scale() * wl;  // (ps2lodscale)
+    const float k = settings.detail_scale * kPs2LodScale * wl;
     const float w2 = lev.tf_dists[0] * k, w1 = lev.tf_dists[1] * k, w0 = lev.tf_dists[2] * k;
     m_tf_band[0] = 1.f / (w0 - w1);
     m_tf_band[1] = 1.f / (w1 - w2);
