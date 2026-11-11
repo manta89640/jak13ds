@@ -867,6 +867,10 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   }
   m_timing.tex_binds += gs.tex_binds;
   m_timing.draws += gs.draws;
+  m_timing.vsh_instr += gs.vsh_instr;
+  m_timing.state_changes += gs.state_changes;
+  m_timing.blend_states += gs.blend_states;
+  m_timing.prog_switches += gs.prog_switches;
   m_timing.gpu_wait_ms += gs.gpu_wait_ms;
   m_timing.queue_drains += gs.queue_drains;  // (AI-assisted, gpu-home)
   m_timing.gpu_busy_ms += gs.gpu_busy_ms;
@@ -989,6 +993,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
           m_timing.queue_drains
               ? fmt::format(", {} GX queue drains (queue full)", m_timing.queue_drains)
               : std::string());
+      // gpu_model features (docs/3ds-port/gpu_model.md)
+      lg::info("[ctr] gpumodel hw: {:.0f} vertex program kinstr, {:.1f} program switches, {:.1f} "
+               "state changes ({:.1f} blended) per frame",
+               m_timing.vsh_instr / n / 1000.0, m_timing.prog_switches / n,
+               m_timing.state_changes / n, m_timing.blend_states / n);
       lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB "
                "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB ({} in reserved "
                "VRAM, {} radial); last frame: {} early depth draws (self-test {}), {} proctex draws, {} level draws without the fog stage, {} with the fog in the vertex alpha ({} texture unit 1 switches); {} program switches, {} with a shader upload, {} uniform vectors at switches; {} texture binds without the cache clear",
