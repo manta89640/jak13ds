@@ -200,23 +200,6 @@ struct CtrSettings {
   // blended and cleared. Off by default: without dithering, faint blended layers (waterfall mist,
   // smoke) add less than one color step each and vanish, and gradients band.
   bool color16 = false;
-  // the GPU's early depth test for opaque level draws, drawn front to back in distance bands.
-  // (AI-assisted) Used only if the boot self-test (ctr_gpu_early.c) shows it changes no pixel on
-  // this console: it once left large screen blocks where the level never drew on a New 3DS.
-  bool early_depth = true;
-  // (AI-assisted) early_depth = sky: the early depth test only
-  // for the sky, drawn last (sky_last forced on) at depth 0: its fragments behind what the opaque
-  // draws covered are dropped before texturing. With on and sky_last the sky uses it too
-  bool early_depth_sky = false;
-  // (AI-assisted) early_depth_func = ge | gt | le | lt: the early test's function (the normal
-  // depth test stays >=); early_depth_clear = the early depth data's clear value (0 = far, max =
-  // 0xFFFFFF, or a number). pica_bench B8.*.c3 shows which pair passes everything after a clear
-  int early_depth_func = 0;
-  unsigned int early_depth_clear = 0;
-  // top_block32 = auto | off | on. auto: if the early depth self-test passes only in 32x32 block
-  // mode, the top render target becomes 256x416 in that mode (the screen shows 240x400 of it).
-  // on: that target always (a test; early depth still needs its self-test)
-  int top_block32 = 0;  // off: on hardware, game frames lose blocks with block32 early depth
   // (AI-assisted) 16-bit depth buffer instead of 24-bit + stencil: half the depth traffic, but
   // 256x coarser depth (z-fighting far away) and no stencil (shadows = full becomes blob, the
   // ocean = waves marks are left out). Off by default.

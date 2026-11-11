@@ -14,7 +14,6 @@
 
 #include "game/graphics/ctr/ctr_gpu.h"
 #include "game/graphics/ctr/ctr_gpu_bench.h"
-#include "game/graphics/ctr/ctr_gpu_early.h"
 #include "game/graphics/ctr/CtrTexConv.h"
 
 #include <3ds.h>
@@ -236,8 +235,6 @@ static inline int words_equal(const void* a, const void* b, unsigned n) {
   (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |        \
    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) |                                          \
    GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) | GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
-/* transfer flag bit 16: the tiled side is in 32x32 block mode (dimensions multiples of 32) */
-#define GX_TRANSFER_BLOCK32 (1u << 16)
 
 /* (AI-assisted) The frame's immediate vertices (sprites, HUD, sky, shadow volumes, the ocean),
  * two of them with the pipeline. 512 KB since Oct 17 (was 1536 KB): the largest frame measured
@@ -569,15 +566,8 @@ static int pres_init(void);
 /* (AI-assisted) config.ini depth16: a 16-bit depth buffer (no stencil: only ocean = waves uses it) */
 static int g_depth16 = 0;
 
-/* config.ini top_block32 (auto / off); g_block32: the top target is 256x416 in 32x32 block mode.
- * Its window rows 400-415 are the color buffer's first 16 rows (the GPU stores rows bottom up):
- * the screen shows rows 16-415, 240 of each 256-pixel line. */
-static int g_block32_want = 1; /* 0 off, 1 auto, 2 on (whatever the self-test says) */
-static int g_block32 = 0;
 #define TOP_W 240
 #define TOP_H 400
-#define B32_W 256
-#define B32_H 416
 
 /* the viewport: the screen's 240x400 (the whole render target in 8x8 mode) */
 static void set_top_viewport(void) {
@@ -586,17 +576,10 @@ static void set_top_viewport(void) {
 
 /* The previous frame is still in the render target's color buffer (VRAM, tiled RGBA8 or RGB565,
  * 240x400 rotated) at the start of the next frame, after the GPU finished it. Write it as a BMP.
- * block32: read from its screen buffer instead. */
-static const uint8_t* pres_last_frame(u32* stride);
+ */
 static void write_screenshot(void) {
   const int fw = 240, fh = 400;  /* render buffer dimensions */
   const uint8_t* src = (const uint8_t*)g.top->frameBuf.colorBuf;
-  /* block32: the last frame's screen buffer (linear, as the LCD reads it) */
-  u32 lstride = 0;
-  const uint8_t* lin = g_block32 ? pres_last_frame(&lstride) : NULL;
-  if (g_block32 && !lin) {
-    return;
-  }
   FILE* f = fopen(g.screenshot_path, "wb");
   if (!f) {
     return;
@@ -625,21 +608,6 @@ static void write_screenshot(void) {
       /* screen (x, y) -> render buffer (fx, fy) */
       int fx = (H - 1) - y;
       int fy = x;
-      if (lin) {
-        const uint8_t* q = lin + (u32)fy * lstride + (u32)fx * (g_color16 ? 2u : 3u);
-        if (g_color16) {
-          const uint32_t v = (uint32_t)q[0] | ((uint32_t)q[1] << 8);
-          const uint32_t r = (v >> 11) & 31, gr = (v >> 5) & 63, b = v & 31;
-          line[3 * x + 0] = (uint8_t)((b << 3) | (b >> 2));
-          line[3 * x + 1] = (uint8_t)((gr << 2) | (gr >> 4));
-          line[3 * x + 2] = (uint8_t)((r << 3) | (r >> 2));
-        } else {
-          line[3 * x + 0] = q[0];
-          line[3 * x + 1] = q[1];
-          line[3 * x + 2] = q[2];
-        }
-        continue;
-      }
       uint32_t tile = (uint32_t)((fy / 8) * tiles_x + (fx / 8));
       uint32_t px = tile * 64 + (((fx & 1)) | ((fy & 1) << 1) | ((fx & 2) << 1) | ((fy & 2) << 2) |
                                  ((fx & 4) << 2) | ((fy & 4) << 3));
@@ -1276,18 +1244,18 @@ static int vram_bank(const void* p) {
   return osConvertVirtToPhys(p) >= 0x18300000u;
 }
 
-/* The top screen's render target: 240x400 (block32: 256x416), RGBA8 / RGB565 color, D24S8
+/* The top screen's render target: 240x400, RGBA8 / RGB565 color, D24S8
  * (or depth16's D16) depth. citro3d puts the depth buffer in the other VRAM bank when it fits,
  * else silently in the same one: then color and depth traffic share one bank. (AI-assisted) */
-static C3D_RenderTarget* create_top_target(int block32) {
-  const int w = block32 ? B32_W : TOP_W, h = block32 ? B32_H : TOP_H;
+static C3D_RenderTarget* create_top_target(void) {
+  const int w = TOP_W, h = TOP_H;
   C3D_RenderTarget* t = C3D_RenderTargetCreate(w, h, g_color16 ? GPU_RB_RGB565 : GPU_RB_RGBA8,
                                                g_depth16 ? GPU_RB_DEPTH16 : GPU_RB_DEPTH24_STENCIL8);
   if (!t) {
     return NULL;
   }
   C3D_FrameBuf* fb = &t->frameBuf;
-  C3D_FrameBufAttrib(fb, (u16)w, (u16)h, block32 != 0);
+  C3D_FrameBufAttrib(fb, (u16)w, (u16)h, false);
   if (fb->depthBuf && vram_bank(fb->colorBuf) == vram_bank(fb->depthBuf)) {
     void* d = vramAllocAt(C3D_CalcDepthBufSize(w, h, fb->depthFmt),
                           vram_bank(fb->colorBuf) ? VRAM_ALLOC_A : VRAM_ALLOC_B);
@@ -1306,8 +1274,8 @@ int ctr_gpu_describe_target(char* out, int size) {
   const C3D_FrameBuf* fb = &g.top->frameBuf;
   const u32 c = osConvertVirtToPhys(fb->colorBuf), d = osConvertVirtToPhys(fb->depthBuf);
   return snprintf(out, (size_t)size,
-                  "%dx%d%s, color %s at 0x%08lx (VRAM %c), depth %s at 0x%08lx (VRAM %c)%s",
-                  fb->width, fb->height, fb->block32 ? " block32" : "",
+                  "%dx%d, color %s at 0x%08lx (VRAM %c), depth %s at 0x%08lx (VRAM %c)%s",
+                  fb->width, fb->height,
                   g_color16 ? "RGB565" : "RGBA8", (unsigned long)c, vram_bank(fb->colorBuf) ? 'B' : 'A',
                   fb->depthFmt == GPU_RB_DEPTH16 ? "D16" : "D24S8", (unsigned long)d,
                   vram_bank(fb->depthBuf) ? 'B' : 'A',
@@ -1878,7 +1846,7 @@ int ctr_gpu_init(void) {
      * then adds fully); no dithering (gradients band slightly). */
     gfxSetScreenFormat(GFX_TOP, GSP_RGB565_OES);
   }
-  g.top = create_top_target(0);
+  g.top = create_top_target();
   if (!g.top) {
     return -2;
   }
@@ -2322,7 +2290,7 @@ static struct {
   u32* ids;   /* 16 bytes per queue slot: the frame number the copy to the fence takes */
   u32 stride, mode;
   u32 bytes;    /* one screen buffer (the render target's size) */
-  u32 show_off; /* where the LCD starts reading in a buffer (block32: 16 lines in) */
+  u32 show_off; /* where the LCD starts reading in a buffer */
   int last_buf; /* the newest frame's buffer (-1 none) */
   volatile u32 vblanks;      /* counted by the vblank callback */
   volatile u32 next_release; /* set with each frame by the game thread (ctr_gpu_note_release) */
@@ -2976,16 +2944,7 @@ static int pres_init(void) {
     if (fb[0] && fb[1] && fb[0] != fb[1]) {
       u8* at[2] = {fb[0], fb[1]};
       u32 size[2] = {region, region};
-      int regions = 2;
-      if (g_block32) {
-        /* (block32: when they lie back to back, three buffers fit in the two) */
-        u8* lo = fb[0] < fb[1] ? fb[0] : fb[1];
-        if ((fb[0] < fb[1] ? fb[1] : fb[0]) == lo + region) {
-          at[0] = lo;
-          size[0] = 2 * region;
-          regions = 1;
-        }
-      }
+      const int regions = 2;
       for (int k = 0; k < regions; k++) {
         for (u32 off = 0; off + bytes <= size[k] && borrowed < PRESENT_BUFS; off += bytes) {
           s_pres.buf[borrowed++] = at[k] + off;
@@ -3027,10 +2986,6 @@ static int pres_init(void) {
   memset(s_pres.fence, 0, 64);
   GSPGPU_FlushDataCache(s_pres.fence, 64);
   memset(s_pres.ids, 0, 16 * PRESENT_Q);
-  if (g_block32) {
-    printf("[ctr] screen buffers: %d of %d in libctru's framebuffers, %lu KB each\n", borrowed,
-           PRESENT_BUFS, (unsigned long)(bytes / 1024));
-  }
   s_pres.stride = fw * bpp;
   s_pres.bytes = bytes;
   s_pres.show_off = (fh - TOP_H) * s_pres.stride;
@@ -3049,17 +3004,6 @@ static int pres_init(void) {
    * callback (citro3d's queue gets the event before it) */
   gspSetEventCallback(GSPGPU_EVENT_PPF, gt_ppf, NULL, false);
   return 1;
-}
-
-/* the newest transferred frame as the LCD reads it (the GPU is done with it) */
-static const uint8_t* pres_last_frame(u32* stride) {
-  if (!s_pres.on || s_pres.last_buf < 0) {
-    return NULL;
-  }
-  u8* p = s_pres.buf[s_pres.last_buf];
-  GSPGPU_InvalidateDataCache(p, s_pres.bytes);
-  *stride = s_pres.stride;
-  return p + s_pres.show_off;
 }
 
 /* after the frame's draws are in the GPU queue: its transfer to a free screen buffer, the
@@ -3114,8 +3058,7 @@ static void pres_queue_frame(u32* fence_id) {
     const C3D_FrameBuf* fb = &g.top->frameBuf;
     const u32 dim = GX_BUFFER_DIM(fb->width, fb->height);
     GX_DisplayTransfer((u32*)fb->colorBuf, dim, (u32*)s_pres.buf[b], dim,
-                       (g_color16 ? DISPLAY_TRANSFER_FLAGS_565 : DISPLAY_TRANSFER_FLAGS) |
-                           (fb->block32 ? GX_TRANSFER_BLOCK32 : 0));
+                       g_color16 ? DISPLAY_TRANSFER_FLAGS_565 : DISPLAY_TRANSFER_FLAGS);
     s_pres.last_buf = b;
   }
   /* the fence: a 16 byte texture copy of this frame's number, after the transfer. Not a memory
@@ -3342,27 +3285,6 @@ static void pipeline_close_list(void) {
  * it runs right before the first draw that needs what is behind it (SKY_HOOK), so every blended
  * pixel still blends over the sky, and the sky draws itself with depth 0 (ctr_gpu_set_depth_far)
  * only where no opaque draw has written depth. Off (no hook set): nothing changes. */
-/* (AI-assisted) ctr_gpu_set_early_depth_params: the sky's draws too; the early test's function
- * and the early depth data's clear value (defaults: the old GEQUAL and 0) */
-static int g_early_sky = 0;
-static int g_early_func = GPU_EARLYDEPTH_GEQUAL;
-static u32 g_early_clear = 0;
-/* (AI-assisted) the boot self-test's verdict (ctr_gpu_early_depth_selftest) and what the config
- * asks for: the early test is used only with both */
-static int g_early_hw = 0;
-static int g_early_want = 0, g_early_want_sky = 0;
-static int s_early_stale; /* a depth write since the early data began may have gone farther */
-static char s_early_status[384];
-static int early_depth_in_use(void) {
-  return g_early_hw && (g_early_want || g_early_want_sky);
-}
-
-void ctr_gpu_early_establish(void) {
-  C3Di_UpdateContext(); /* the framebuffer bind citro3d has pending, first */
-  GPUCMD_AddMaskedWrite(GPUREG_EARLYDEPTH_DATA, 0x7, g_early_clear);
-  GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
-  s_early_stale = 0;
-}
 static ctr_gpu_hook_fn s_sky_hook;
 static void* s_sky_hook_arg;
 static int g_depth_far;       /* ctr_gpu_set_depth_far */
@@ -3438,16 +3360,6 @@ static void frame_state_reset(void) {
    * texture cache: once per frame, not at every level draw) */
   if (g.fog_tex_valid) {
     tex1_bind(&g.fog_tex);
-  }
-  /* (AI-assisted) the early depth data starts as "far" like the depth buffer (cleared to 0;
-   * larger = closer): EARLYDEPTH_DATA is its clear value, EARLYDEPTH_CLEAR fills it. With the
-   * early test in use, after the top target is bound (as the self-test checked it) */
-  C3D_EarlyDepthTest(false, (GPU_EARLYDEPTHFUNC)g_early_func, g_early_clear);
-  if (early_depth_in_use()) {
-    ctr_gpu_early_establish();
-  } else {
-    GPUCMD_AddMaskedWrite(GPUREG_EARLYDEPTH_DATA, 0x7, g_early_clear);
-    GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
   }
   C3D_ProcTexBind(0, NULL);
   g.proc_radial = -1;
@@ -4806,7 +4718,6 @@ int ctr_gpu_tex_create_mipmapped(int w, int h, const uint8_t* rgba) {
 
 /* ---------------- (AI-assisted) 3DS hardware features: settings ---------------- */
 
-static int g_early_depth = 0; /* config.ini early_depth, if the self-test passed */
 /* (AI-assisted) cull_ties: which PICA mode culls the c3l back faces (see ctr_gpu_set_cull_flip) */
 static int g_cull_flip = 0;
 static int g_cull_enable = 0;
@@ -4835,19 +4746,6 @@ void ctr_gpu_set_color16(int on) {
   }
 }
 
-void ctr_gpu_set_early_depth(int on) {
-  g_early_want = on ? 1 : 0;
-  g_early_depth = g_early_want && g_early_hw;
-}
-
-int ctr_gpu_early_depth_active(void) {
-  return g_early_want && g_early_hw;
-}
-
-const char* ctr_gpu_early_depth_status(void) {
-  return s_early_status;
-}
-
 /* the GPU's queue run to its end (nothing left waiting for a run) */
 static void gpu_drain(void) {
   gxCmdQueue_s* q = &__C3D_Context.gxQueue;
@@ -4863,108 +4761,13 @@ static void gpu_drain(void) {
   }
 }
 
-static int s_early_ok = -1; /* the self-test's CTR_EARLY_OK_* bits (-1: not run) */
-
-static void early_hw_set(int on) {
-  g_early_hw = on ? 1 : 0;
-  g_early_depth = g_early_want && g_early_hw;
-  g_early_sky = g_early_want_sky && g_early_hw;
-}
-
-static int early_selftest_run(void) {
-  apt_gate_enter(); /* the HOME Menu and sleep wait for the test's GPU work */
-  gpu_drain(); /* the boot frame */
-  CtrEarlyTestIn in;
-  in.top = &g.top->frameBuf;
-  in.prog = &g.ps->basic;
-  in.uloc_projection = g.ps->uloc_projection;
-  in.func = g_early_func;
-  in.clear = g_early_clear;
-  in.emulator = ctr_gpu_is_emulator();
-  const int ok = ctr_early_selftest(&in, s_early_status, sizeof(s_early_status));
-  /* the test's program and state replaced by the game's again */
-  g.cur_prog = PROG_NONE;
-  use_program(PROG_BASIC);
-  C3D_SetFrameBuf(&g.top->frameBuf);
-  set_top_viewport();
-  C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-  C3D_CullFace(GPU_CULL_NONE);
-  g.last_state_valid = 0;
-  g.bound_tex = NULL;
-  s_tex_dirty = 1;
-  tex_units_forget();
-  apt_gate_leave();
-  return ok;
-}
-
-int ctr_gpu_early_depth_selftest(void) {
-  if (!g.ready || g.in_frame) {
-    return 0;
-  }
-  if (s_early_ok < 0) {
-    s_early_ok = early_selftest_run();
-    early_hw_set(s_early_ok & CTR_EARLY_OK_BLOCK8);
-  }
-  return g_early_hw;
-}
-
-/* the top render target replaced by an 8x8 or a block32 one (the GPU is idle) */
-static int top_target_switch(int block32) {
-  C3D_RenderTargetDelete(g.top);
-  g.top = create_top_target(block32);
-  if (!g.top && block32) {
-    g.top = create_top_target(0);
-  }
-  if (!g.top) {
-    return -1;
-  }
-  g_block32 = g.top->frameBuf.block32 ? 1 : 0;
-  C3D_SetFrameBuf(&g.top->frameBuf);
-  set_top_viewport();
-  return 0;
-}
-
-/* ctr_gpu_init: the early depth self-test when asked for (ctr_gpu_set_early_depth*), the block32
- * target when only it passed, then the screen output */
+/* ctr_gpu_init: the screen output (with steady pacing the frames go to our own screen buffers,
+ * pres_queue_frame) */
 static int top_target_setup(void) {
-  if (g_early_want || g_early_want_sky) {
-    s_early_ok = early_selftest_run();
-  }
-  const int ok = s_early_ok < 0 ? 0 : s_early_ok;
-  const char* why = NULL;
-  if (g_block32_want == 2 || ((ok & CTR_EARLY_OK_BLOCK32) && !(ok & CTR_EARLY_OK_BLOCK8))) {
-    if (!g_block32_want) {
-      why = "top_block32 = off";
-    } else if (!g_steady_pacing) {
-      why = "needs frame_pacing = steady";
-    } else {
-      if (top_target_switch(1) != 0) {
-        return -1;
-      }
-      why = g_block32 ? NULL : "no VRAM";
-    }
-  }
-  /* with steady pacing the frames go to our own screen buffers (pres_queue_frame) */
-  int pres_on = g_steady_pacing && pres_init();
-  if (g_block32 && !pres_on) {
-    if (top_target_switch(0) != 0) {
-      return -1;
-    }
-    why = "no memory for its screen buffers";
-    pres_on = g_steady_pacing && pres_init();
-  }
+  const int pres_on = g_steady_pacing && pres_init();
   if (!pres_on) {
     C3D_RenderTargetSetOutput(g.top, GFX_TOP, GFX_LEFT,
                               g_color16 ? DISPLAY_TRANSFER_FLAGS_565 : DISPLAY_TRANSFER_FLAGS);
-  }
-  if (g_block32 && s_early_ok < 0) {
-    snprintf(s_early_status, sizeof(s_early_status), "not run; top target block32 256x416");
-  } else if (s_early_ok >= 0) {
-    early_hw_set(ok & (g_block32 ? CTR_EARLY_OK_BLOCK32 : CTR_EARLY_OK_BLOCK8));
-    const size_t n = strlen(s_early_status);
-    snprintf(s_early_status + n, sizeof(s_early_status) - n, "; top target %s%s%s",
-             g_block32 ? "block32 256x416" : "8x8 240x400", why ? ", block32 not used: " : "",
-             why ? why : "");
   }
   return 0;
 }
@@ -5004,32 +4807,9 @@ int ctr_gpu_top_histogram(unsigned int counts[256]) {
   return idle;
 }
 
-void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear) {
-  g_early_want_sky = sky ? 1 : 0;
-  const int f = func & 3;
-  const u32 c = clear & 0xFFFFFFu;
-  if (g_early_hw && (f != g_early_func || c != g_early_clear)) {
-    g_early_hw = 0; /* (AI-assisted) the self-test checked another function or clear value */
-    g_early_depth = 0;
-  }
-  const int s = g_early_want_sky && g_early_hw;
-  if (s != g_early_sky || f != g_early_func || c != g_early_clear) {
-    g_early_sky = s;
-    g_early_func = f;
-    g_early_clear = c;
-    g.last_state_valid = 0;
-  }
-}
-
 void ctr_gpu_set_framebuffer(int depth16) {
   if (!g.ready) {
     g_depth16 = depth16 ? 1 : 0; /* the render target is made in ctr_gpu_init */
-  }
-}
-
-void ctr_gpu_set_top_block32(int mode) {
-  if (!g.ready) {
-    g_block32_want = mode < 0 ? 0 : (mode > 2 ? 2 : mode);
   }
 }
 
@@ -6468,14 +6248,6 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
   g.cur.tex_binds++;
 }
 
-static int early_depth_ok(const ctr_draw_state* st) {
-  return (g_early_depth && (st->flags & CTR_STATE_EARLY_DEPTH) && st->ztest == CTR_TEST_GEQUAL &&
-          st->zwrite && st->blend == CTR_BLEND_OFF) ||
-         /* (AI-assisted) early_depth = sky (and on with sky_last): the sky at
-          * depth 0 after the opaque geometry, dropped early where it covered a block */
-         (g_early_sky && g_depth_far && st->ztest == CTR_TEST_GEQUAL);
-}
-
 /* (AI-assisted) texture combiner stage id (0 or 1) as env: in the context, and to the GPU raw or
  * through citro3d (dirty flag) when it changed */
 static void commit_texenv(int id, const C3D_TexEnv* env, int raw) {
@@ -6506,7 +6278,7 @@ typedef struct {
   int mesh;
   uint32_t tint;
   u32 kind;     /* textured | alpha_full << 1 (proctex draws never take the short path) */
-  u32 in[16];   /* the settings the full path reads */
+  u32 in[12];   /* the settings the full path reads */
   u32 tex_config_bit1;
   C3D_TexEnv env0, env1;
   /* (AI-assisted, far-fog) stage 2 and g.ocean_stage2 (merc fog draws: the fog stage) */
@@ -6530,19 +6302,15 @@ static inline void state_inputs(u32* in) {
   in[0] = (u32)g_depth_far;
   in[1] = (u32)g_cull_enable;
   in[2] = (u32)g_cull_flip;
-  in[3] = (u32)g_early_depth;
-  in[4] = (u32)g_early_sky;
-  in[5] = (u32)g_early_func;
-  in[6] = g_early_clear;
-  in[7] = (u32)s_zdef_valid;
-  in[8] = s_zscale0;
-  in[9] = s_zoffset0;
-  in[10] = (u32)g_depth16;
-  in[11] = (u32)g.fog_tex_valid;
-  in[12] = g.fog_abgr;
-  in[13] = g.clear_abgr;
-  in[14] = (u32)g_tex1_gating;
-  in[15] = (u32)g_proctex;
+  in[3] = (u32)s_zdef_valid;
+  in[4] = s_zscale0;
+  in[5] = s_zoffset0;
+  in[6] = (u32)g_depth16;
+  in[7] = (u32)g.fog_tex_valid;
+  in[8] = g.fog_abgr;
+  in[9] = g.clear_abgr;
+  in[10] = (u32)g_tex1_gating;
+  in[11] = (u32)g_proctex;
 }
 
 /* mesh: 0 = immediate draws, 1 = level mesh, 2 = skinned mesh (tint = constant color stage).
@@ -6552,10 +6320,7 @@ static inline void state_inputs(u32* in) {
  * raw: written as raw commands (see "raw GPU commands"), else through citro3d. Both keep
  * citro3d's context right. */
 static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, int raw) {
-  if (st->flags || g_depth_far) { /* (AI-assisted) the sky's draws (early_depth = sky) too */
-    g.cur.early_depth_draws += early_depth_ok(st);
-    g.cur.proctex_draws += (st->flags & CTR_STATE_PROCTEX) != 0;
-  }
+  g.cur.proctex_draws += (st->flags & CTR_STATE_PROCTEX) != 0;
   _Static_assert(sizeof(*st) == 16, "ctr_draw_state compared as 4 words");
   if (g.last_state_valid && g.last_state_mesh == mesh && g.last_tint == tint &&
       words_equal(&g.last_state, st, 4)) {
@@ -6565,14 +6330,6 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   g.last_state_mesh = mesh;
   g.last_tint = tint;
   g.last_state_valid = 1;
-  /* (AI-assisted) a depth write without a >= / > test can leave the depth farther than the early
-   * depth data says: that data begins again before the next draw that uses it */
-  if (st->zwrite && st->ztest != CTR_TEST_GEQUAL && st->ztest != CTR_TEST_GREATER &&
-      st->ztest != CTR_TEST_NEVER) {
-    s_early_stale = 1;
-  } else if (s_early_stale && early_depth_ok(st)) {
-    ctr_gpu_early_establish();
-  }
   /* (AI-assisted, micro-mg) gpu_micro: the same state but for its texture (see StateFast) */
   const int stex0 = tex_res(st->tex); /* (AI-assisted) an animated slot's texture */
   const int textured0 = stex0 >= 0 && stex0 < MAX_TEXTURES && g.textures[stex0].used == 1;
@@ -6592,10 +6349,10 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
       !(st->flags & CTR_STATE_PROCTEX) && g.proc_radial < 0 && g.ocean_stage2 == s_sf.stage2 &&
       mesh != 3 && mesh != 6) {
     const u32 kind = textured0 ? 1u | ((u32)g.textures[stex0].alpha_full << 1) : 0u;
-    u32 in[16];
+    u32 in[12];
     state_inputs(in);
     C3Di_Context* fctx = &__C3D_Context;
-    if (kind == s_sf.kind && words_eq(in, s_sf.in, 16) &&
+    if (kind == s_sf.kind && words_eq(in, s_sf.in, 12) &&
         (fctx->texConfig & BIT(1)) == s_sf.tex_config_bit1 &&
         words_eq(&fctx->texEnv[0], &s_sf.env0, sizeof(C3D_TexEnv) / 4) &&
         words_eq(&fctx->texEnv[1], &s_sf.env1, sizeof(C3D_TexEnv) / 4) &&
@@ -7009,11 +6766,6 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   } else {
     e.depthTest = 1u | (((u32)map_test(st->ztest) & 7) << 4) | (wmask << 8);
   }
-  /* (AI-assisted) config.ini early_depth: fragments behind what opaque draws already covered are
-   * dropped before texturing. Only for draws that write depth with the same test and that nothing
-   * discards later (no blending, an alpha test that never fails): the hardware's early depth
-   * data can't know about fragments dropped after it. */
-  e.earlyDepth = early_depth_ok(st) != 0;
   /* (AI-assisted) sky_last: depth 0 for the sky's draws (ctr_gpu_set_depth_far) */
   if (g_depth_far) {
     e.zScale = 0;
@@ -7027,8 +6779,6 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   e.cullMode = (st->tcc & CTR_TCC_CULL_BACK) && (g_cull_enable || (st->tcc & CTR_TCC_CULL_OWN))
                    ? (g_cull_flip ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW)
                    : GPU_CULL_NONE;
-  e.earlyDepthFunc = (GPU_EARLYDEPTHFUNC)g_early_func; /* (AI-assisted) defaults: GEQUAL, 0 */
-  e.earlyDepthRef = g_early_clear;
   /* (AI-assisted) the stencil marks (CTR_STATE_STENCIL_*): 1 where a STENCIL_SET draw passed the
    * depth test, STENCIL_OUT draws where it isn't 1. Off: only the enable bit changes. */
   if ((st->flags & CTR_STATE_STENCIL_SET) && !g_depth16) {
@@ -7105,13 +6855,6 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   if (e.zScale != c->zScale || e.zOffset != c->zOffset) {
     const u32 zm[2] = {e.zScale, e.zOffset}; /* (AI-assisted) sky_last */
     p = raw_n(p, GPUREG_DEPTHMAP_SCALE, zm, 2, 1);
-  }
-  if (e.earlyDepth != c->earlyDepth || e.earlyDepthFunc != c->earlyDepthFunc ||
-      e.earlyDepthRef != c->earlyDepthRef) {
-    p = raw_w(p, GPUREG_EARLYDEPTH_TEST1, 0x1, e.earlyDepth ? 1 : 0);
-    p = raw_w(p, GPUREG_EARLYDEPTH_TEST2, 0xF, e.earlyDepth ? 1 : 0);
-    p = raw_w(p, GPUREG_EARLYDEPTH_FUNC, 0x1, e.earlyDepthFunc);
-    p = raw_w(p, GPUREG_EARLYDEPTH_DATA, 0x7, e.earlyDepthRef);
   }
   raw_end(p);
   *c = e;
@@ -7298,14 +7041,6 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
     __C3D_Context.effect.zScale = s_zscale0;
     __C3D_Context.effect.zOffset = s_zoffset0;
   }
-  /* (AI-assisted) early_depth = sky: the clouds too; else off, with the configured function and
-   * clear value (the defaults GEQUAL, 0 as before: EARLYDEPTH_DATA is the clear value) */
-  const int early = g_early_sky && g_depth_far && state->ztest == CTR_TEST_GEQUAL;
-  if (early && s_early_stale) {
-    ctr_gpu_early_establish(); /* (AI-assisted) as apply_state_tint */
-  }
-  C3D_EarlyDepthTest(early != 0, (GPU_EARLYDEPTHFUNC)g_early_func, g_early_clear);
-  g.cur.early_depth_draws += early;
   C3D_BufInfo* buf = C3D_GetBufInfo();
   BufInfo_Init(buf);
   BufInfo_Add(buf, dst, sizeof(ctr_clip_vertex2), 4, 0x3210);
@@ -7772,47 +7507,6 @@ static void screen_rows(float x0, float x1, int* r0, int* r1) {
   *r1 = p1 >> 3;
 }
 
-/* block32: the color buffer's 32x32 blocks can't be copied into the texture's 8x8 tiles as they
- * are: each strip of block rows goes to linear memory and from there into the texture's tiles
- * (two display transfers). Texture row t = color buffer row t + 16. */
-#define B32_STRIP_ROWS 128
-static void* s_b32_strip;
-static int screen_copy_b32(int r0, int r1) {
-  const u32 line = B32_W * (g_color16 ? 2u : 4u);
-  if (!s_b32_strip) {
-    const u32 bytes = B32_STRIP_ROWS * B32_W * 4u;
-    ctr_linear_lock();
-    s_b32_strip = linearAlloc(bytes);
-    ctr_linear_unlock();
-    if (!s_b32_strip) {
-      return 0;
-    }
-    cache_flush_now(s_b32_strip, bytes); /* no dirty line left to land on the GPU's data */
-  }
-  const u32 fmt = g_color16 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGBA8;
-  const u32 flags = GX_TRANSFER_IN_FORMAT(fmt) | GX_TRANSFER_OUT_FORMAT(fmt) |
-                    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
-  const int pad = B32_H - TOP_H;
-  const int a0 = r0 * 8 + pad, a1 = r1 * 8 + 7 + pad; /* color buffer rows */
-  u8* const color = (u8*)g.top->frameBuf.colorBuf;
-  u8* const tex = (u8*)g.textures[g.screen_tex].tex.data;
-  u8* const strip = (u8*)s_b32_strip;
-  int first = 1;
-  for (int s0 = a0 & ~31; s0 <= a1; s0 += B32_STRIP_ROWS) {
-    const int end = s0 + B32_STRIP_ROWS - 1 < a1 ? s0 + B32_STRIP_ROWS - 1 : a1;
-    const int n = ((end - s0) / 32 + 1) * 32;
-    const int b0 = a0 > s0 ? a0 : s0;
-    sync_display_transfer((u32*)(color + (u32)s0 * line), GX_BUFFER_DIM(B32_W, n), (u32*)strip,
-                          GX_BUFFER_DIM(B32_W, n), flags | GX_TRANSFER_BLOCK32, first);
-    first = 0;
-    const u32 dim = GX_BUFFER_DIM(B32_W, end - b0 + 1);
-    sync_display_transfer((u32*)(strip + (u32)(b0 - s0) * line), dim,
-                          (u32*)(tex + (u32)(b0 - pad) * line), dim,
-                          flags | GX_TRANSFER_OUT_TILED(1), 0);
-  }
-  return 1;
-}
-
 static int copy_screen_body(float x0, float x1, int part) {
   if (!g.ready || !g.in_frame) {
     return -1;
@@ -7864,17 +7558,6 @@ static int copy_screen_body(float x0, float x1, int part) {
     t->used = 1;
     ctr_linear_unlock();
     g.screen_tex = slot;
-  }
-  if (g_block32) {
-    int r0 = 0, r1 = 49;
-    if (part) {
-      screen_rows(x0, x1, &r0, &r1);
-    }
-    if (!screen_copy_b32(r0, r1)) {
-      return -1;
-    }
-    g.bound_tex = NULL;
-    return g.screen_tex;
   }
   /* One GX copy after the draws so far (C3D_SyncTextureCopy splits the command list, which flushes
    * the framebuffer): 50 rows of 8x8 tiles, 30 tiles (7680 bytes; 3840 in RGB565) each in the
@@ -7973,7 +7656,6 @@ static struct {
   C3D_FrameBuf fb;
   ctr_gpu_hook_fn hook;
   void* hook_arg;
-  int early, early_sky;
 } s_rtc;
 
 static void rt_reap(void) {
@@ -8190,10 +7872,6 @@ static void rt_target(int i, void* color, int fb_w, int fb_h, int vx, int vw, in
     s_rtc.hook = s_sky_hook;
     s_rtc.hook_arg = s_sky_hook_arg;
     s_sky_hook = NULL;
-    s_rtc.early = g_early_depth;
-    s_rtc.early_sky = g_early_sky;
-    g_early_depth = 0;
-    g_early_sky = 0;
   }
   C3D_FrameBuf* fb = &s_rtc.fb;
   memset(fb, 0, sizeof(*fb));
@@ -8215,11 +7893,6 @@ void ctr_gpu_rt_end(void) {
   C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
   s_sky_hook = s_rtc.hook;
   s_sky_hook_arg = s_rtc.hook_arg;
-  g_early_depth = s_rtc.early;
-  g_early_sky = s_rtc.early_sky;
-  if (g_early_depth || g_early_sky) {
-    ctr_gpu_early_establish(); /* (AI-assisted) the target's early depth data begins again */
-  }
   /* the texture cache may hold the tile's old texels: the next bind clears it */
   g.bound_tex = NULL;
   s_tex_dirty = 1;
@@ -10593,7 +10266,7 @@ void ctr_gpu_linear_account_get(ctr_gpu_linear_account* out) {
   out->fixed = lin_size(__C3D_Context.cmdBuf) + lin_size(s_vbufs[0] ? s_vbufs[0] : g.vbuf) +
                lin_size(s_vbufs[1]) + lin_size(g.quad_indices) + lin_size(s_grid_idx) +
                lin_size(s_pres.fence) + lin_size(s_pres.ids) + lin_size(s_bd.probe) +
-               lin_size(s_bd.scis) + lin_size(s_b32_strip);
+               lin_size(s_bd.scis);
   for (int i = 0; i < PRESENT_BUFS; i++) {
     out->fixed += lin_size(s_pres.buf[i]);
   }
@@ -10701,7 +10374,7 @@ void ctr_gpu_linear_account_get(ctr_gpu_linear_account* out) {
  * pacing: the fence copy is queued at the frame end, after it), then reduced on the CPU to 8x8
  * blocks: the buffer's tile (tx, ty) (8x8 pixels, 64 words) is the screen's block
  * (ty, 29 - tx) (write_screenshot's mapping: screen (x, y) = buffer (239 - y, x)); a D24S8 word's
- * depth is its low 24 bits (0 far, the cleared value; larger = closer). Not with D16, block32 or
+ * depth is its low 24 bits (0 far, the cleared value; larger = closer). Not with D16 or
  * without the pipeline and steady pacing. One copy at a time. */
 static struct {
   u32* buf;
@@ -10716,7 +10389,7 @@ static struct {
 
 void ctr_gpu_depth_copy(const float user[16]) {
   if (!g.ready || !g.in_frame || s_dr.failed || s_dr.busy || !s_pipeline || !s_pres.on ||
-      g_depth16 || g_block32 || !g.top || s_bd.frame) {
+      g_depth16 || !g.top || s_bd.frame) {
     return; /* (a gpu_breakdown frame submits its own parts: no copy of ours in between) */
   }
   const C3D_FrameBuf* fb = &g.top->frameBuf;

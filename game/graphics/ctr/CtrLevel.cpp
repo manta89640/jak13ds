@@ -13036,7 +13036,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   // (AI-assisted) fog_stage_skip
   const bool fog_skip = settings.fog_stage_skip;
-  const bool early_depth = ctr_gpu_early_depth_active() != 0;  // (AI-assisted) the band order
+  const bool early_depth = false;  // the early depth test is gone: no band order
   const float pzw = std::abs(cam.perspective[2][3]);
 #ifndef __3DS__
   ctr_gpu_soft_view_depth(pzw * 4096.f);

@@ -76,8 +76,8 @@ typedef struct {
 
 /* (AI-assisted) ctr_draw_state flags: what a draw allows the 3DS GPU to do differently */
 enum {
-  /* opaque, depth tested GEQUAL and written, never discarded by the alpha test (its texture's
-   * alpha passes): may use the early depth test (ctr_gpu_set_early_depth) */
+  /* opaque, depth tested GEQUAL and written, never discarded by the alpha test (the level
+   * renderer's draw lists; the GPU layer ignores it) */
   CTR_STATE_EARLY_DEPTH = 1,
   /* the texture is radial (ctr_gpu_tex_radial) and the texture coordinates go from -1 to 1 across
    * it (center 0): drawn with the procedural texture unit instead of reading texels */
@@ -270,7 +270,7 @@ void ctr_gpu_screen_copy_pin(int level);
  * the tile x..x+w, y..y+h of it: their clip / ctr coordinates [-1, 1] cover the tile as they
  * cover the screen (x: tile left to right, y: bottom to top); x a multiple of 16, w + (x & 15)
  * <= max_tile_w; the tile is NOT cleared (draw over all of it first: alpha 0 for empty texels,
- * depth 0 with ztest ALWAYS). No early depth test and no sky hook in between (both resume after).
+ * depth 0 with ztest ALWAYS). No sky hook in between (it resumes after).
  * Another ctr_gpu_rt_begin may follow (the next tile) without an end in between.
  * ctr_gpu_rt_end: the screen again. Only inside a frame. ctr_gpu_rt_uv: the texture coordinates
  * (ctr_vertex s, t) of logical point (lx, ly) of the texture (pixel edges at integers). */
@@ -409,31 +409,16 @@ void ctr_gpu_set_vram_textures(int on);
  * (trilinear, slower) (config.ini mipmaps). */
 void ctr_gpu_set_mip_mode(int mode);
 /* (AI-assisted) 3DS hardware features (config.ini). color16: a 16-bit (RGB565) color buffer and
- * top screen, set before ctr_gpu_init. early_depth: the early depth test for draws with
- * CTR_STATE_EARLY_DEPTH. proctex: radial textures drawn with the procedural texture unit.
- * compact: ctr_gpu_tex_create_compact picks small formats (off: RGBA8 like ctr_gpu_tex_create). */
+ * top screen, set before ctr_gpu_init. proctex: radial textures drawn with the procedural texture
+ * unit. compact: ctr_gpu_tex_create_compact picks small formats (off: RGBA8 like
+ * ctr_gpu_tex_create). */
 void ctr_gpu_set_color16(int on);
-void ctr_gpu_set_early_depth(int on);
-/* (AI-assisted) config.ini early_depth modes (used once the self-test passed): sky = the sky's draws
- * (sky_last: depth 0, after the opaque geometry) use the early depth test too; func = the early
- * test's function (GPU_EARLYDEPTHFUNC: 0 >=, 1 >, 2 <=, 3 <; the depth test stays >=); clear =
- * the early depth data's clear value (GPUREG_EARLYDEPTH_DATA, 24 bits; every early depth clear
- * uses it). Defaults 0, 0, 0 = the old state. Any time. */
-void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear);
-/* (AI-assisted) the early depth test checked on this console (ctr_gpu_early.c). ctr_gpu_init runs
- * it when early depth was asked for before it (ctr_gpu_set_early_depth, _params); then this
- * returns that result. Until it passes the early test stays off. 1: passed. */
-int ctr_gpu_early_depth_selftest(void);
 /* For the shadow self-test (CtrShadow.cpp). ctr_gpu_submit_now: in a frame, what is built so
  * far goes to the GPU as a command list of its own. ctr_gpu_top_histogram: outside a frame, once
  * the GPU has drawn all it was sent, the top screen's pixels by their blue value; 0: can't be
  * read */
 void ctr_gpu_submit_now(void);
 int ctr_gpu_top_histogram(unsigned int counts[256]);
-/* (AI-assisted) the early test in use (asked for and the self-test passed) */
-int ctr_gpu_early_depth_active(void);
-/* (AI-assisted) the self-test's result, one line ("" before it ran) */
-const char* ctr_gpu_early_depth_status(void);
 /* (AI-assisted) config.ini tex_cache_clear: 0 always (each texture unit 0 bind clears the GPU's
  * texture cache, as citro3d does), 1 uploads (a bind that keeps a level pool texture and only
  * changes its sampling settings doesn't clear it unless a pool was filled or moved since the last
@@ -453,10 +438,6 @@ void ctr_gpu_set_skin_clip_f24(int on);
 /* (AI-assisted) the top render target, set before ctr_gpu_init (config.ini): depth16 = a 16-bit
  * depth buffer instead of 24-bit + stencil. */
 void ctr_gpu_set_framebuffer(int depth16);
-/* config.ini top_block32 (off = 0, auto = 1, on = 2), set before ctr_gpu_init. auto: when the
- * early depth self-test passes only in 32x32 block mode, the top target becomes 256x416 in that
- * mode; on: that target always (early depth still only if its self-test passed) */
-void ctr_gpu_set_top_block32(int mode);
 /* (AI-assisted) one line about the top render target (size, formats, VRAM addresses and banks)
  * for the log; returns its length (0 before ctr_gpu_init) */
 int ctr_gpu_describe_target(char* out, int size);
@@ -908,12 +889,11 @@ typedef struct {
   unsigned int pool_vram_bytes; /* of which also in VRAM (the copy the GPU reads) */
   int pools, pools_in_vram;
   /* (AI-assisted) ctr_gpu_tex_create_compact textures: how many, their bytes, how many of them
-   * are in the reserved VRAM, radial ones; draws with the early depth test / procedural texture */
+   * are in the reserved VRAM, radial ones; draws with the procedural texture */
   int compact_textures;
   unsigned int compact_bytes;
   int compact_in_vram;
   int radial_textures;
-  int early_depth_draws;
   int proctex_draws;
   int nofog_draws;   /* (AI-assisted) level draws without the fog stage (fog_stage_skip) */
   int color_clear_skipped; /* (AI-assisted) skip_clear: this frame cleared only the depth */

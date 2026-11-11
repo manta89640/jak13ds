@@ -585,14 +585,10 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_frame_begin(clear[0], clear[1], clear[2]);
   ctr_gpu_set_cull(ctr_settings().cull_ties ? 1 : 0, ctr_settings().cull_flip ? 1 : 0);
   ctr_gpu_set_frame_overlap2(ctr_settings().frame_overlap2);
-  ctr_gpu_set_early_depth(ctr_settings().early_depth ? 1 : 0);
   ctr_gpu_set_tex_cache_clear(ctr_settings().tex_cache_uploads ? 1 : 0);  // (AI-assisted)
   ctr_gpu_set_mip_bias(ctr_settings().mip_bias);                          // (AI-assisted)
   ctr_gpu_set_skin_rows_f24(ctr_settings().skin_rows_f24 ? 1 : 0);         // (AI-assisted)
   ctr_gpu_set_skin_clip_f24(ctr_settings().skin_clip_f24 ? 1 : 0);         // (AI-assisted)
-  ctr_gpu_set_early_depth_params(
-      ctr_settings().early_depth_sky || (ctr_settings().early_depth && ctr_settings().sky_last),
-      ctr_settings().early_depth_func, ctr_settings().early_depth_clear);
   ctr_gpu_set_fog_alpha(ctr_settings().fog_alpha ? 1 : 0);
   ctr_gpu_set_tex1_gating(ctr_settings().tex1_gating ? 1 : 0);
   ctr_gpu_set_shader_opt(ctr_settings().shader_opt ? 1 : 0);        // (AI-assisted)
@@ -816,12 +812,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
               : std::string());
       lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB "
                "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB ({} in reserved "
-               "VRAM, {} radial); last frame: {} early depth draws (self-test {}), {} proctex draws, {} level draws without the fog stage, {} with the fog in the vertex alpha ({} texture unit 1 switches); {} program switches, {} with a shader upload, {} uniform vectors at switches; {} texture binds without the cache clear",
+               "VRAM, {} radial); last frame: {} proctex draws, {} level draws without the fog stage, {} with the fog in the vertex alpha ({} texture unit 1 switches); {} program switches, {} with a shader upload, {} uniform vectors at switches; {} texture binds without the cache clear",
                gs.pools, gs.pool_bytes / 1024, gs.pools_in_vram, gs.pool_vram_bytes / 1024,
                gs.linear_free / 1024, gs.linear_largest / 1024, gs.vram_free / 1024,
                gs.compact_textures, gs.compact_bytes / 1024, gs.compact_in_vram,
-               gs.radial_textures, gs.early_depth_draws,
-               ctr_gpu_early_depth_active() ? "passed" : "off or failed", gs.proctex_draws, gs.nofog_draws,
+               gs.radial_textures, gs.proctex_draws, gs.nofog_draws,
                gs.fog_alpha_draws, gs.unit1_toggles, gs.prog_switches, gs.prog_uploads,
                gs.prog_unif_vectors, gs.tex_clears_skipped);
       // build time by bucket renderer
@@ -1515,24 +1510,11 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_color16(ctr_settings().color16 ? 1 : 0);  // the render target's format
   ctr_gpu_set_steady_pacing(ctr_settings().steady_pacing ? 1 : 0);
   ctr_gpu_set_framebuffer(ctr_settings().depth16 ? 1 : 0);
-  // the early depth self-test runs in ctr_gpu_init (it picks the top target's tile mode)
-  ctr_gpu_set_top_block32(ctr_settings().top_block32);
-  ctr_gpu_set_early_depth(ctr_settings().early_depth ? 1 : 0);
-  if (ctr_settings().early_depth || ctr_settings().early_depth_sky) {
-    ctr_gpu_set_early_depth_params(
-        ctr_settings().early_depth_sky || (ctr_settings().early_depth && ctr_settings().sky_last),
-        ctr_settings().early_depth_func, ctr_settings().early_depth_clear);
-  }
   // (AI-assisted) hardware hang bisect switches (config.ini, CtrSettings.h)
   ctr_gpu_set_shader_basic(ctr_settings().shader_basic);
   ctr_gpu_set_asm_tex(ctr_settings().asm_tex ? 1 : 0);
   ctr_gpu_set_defer_flush(ctr_settings().defer_flush ? 1 : 0);
   lg::info("[ctr] diag: defer_flush {}", ctr_settings().defer_flush ? "on" : "off");
-#ifdef __3DS__
-  if (ctr_settings().early_depth || ctr_settings().early_depth_sky) {
-    ctr_boot_mark("7a GPU init with the early depth self-test");
-  }
-#endif
   if (ctr_gpu_init() != 0) {
     lg::error("[ctr] GPU init failed");
     return 1;
@@ -1545,17 +1527,6 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   }
 #ifdef __3DS__
   ctr_boot_mark("8 GPU ready (first top screen frame drawn)");
-  if (ctr_settings().early_depth || ctr_settings().early_depth_sky) {
-    // (AI-assisted) the early depth test checked on this console before anything uses it
-    ctr_gpu_set_early_depth_params(
-        ctr_settings().early_depth_sky || (ctr_settings().early_depth && ctr_settings().sky_last),
-        ctr_settings().early_depth_func, ctr_settings().early_depth_clear);
-    const int passed = ctr_gpu_early_depth_selftest();
-    const std::string line = fmt::format("early depth self-test: {} -> early depth {}",
-                                         ctr_gpu_early_depth_status(), passed ? "on" : "off");
-    lg::info("[ctr] {}", line);
-    ctr_boot_mark(("8a " + line).c_str());
-  }
   if (ctr_settings().pica_bench) {
     // (AI-assisted) the GPU microbenchmark, before anything else uses the GPU
     lg::info("[ctr] pica_bench: GPU microbenchmark before the game starts");
@@ -1567,7 +1538,6 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_rgba4_as_rgba8(ctr_settings().rgba4_as_rgba8 ? 1 : 0);
   // (AI-assisted) before vram_textures: the reserved VRAM for compact textures is taken there
   ctr_gpu_set_compact_textures(ctr_settings().compact_textures ? 1 : 0);
-  ctr_gpu_set_early_depth(ctr_settings().early_depth ? 1 : 0);
   ctr_gpu_set_proctex(ctr_settings().proctex_glows ? 1 : 0);
   ctr_gpu_set_vram_textures(ctr_settings().vram_textures ? 1 : 0);
   ctr_gpu_set_mip_mode(ctr_settings().mipmaps);
