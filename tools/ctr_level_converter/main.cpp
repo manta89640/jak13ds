@@ -1972,6 +1972,7 @@ struct Converter {
     ctr_cull::Box box;
     u16 vis;
     float margin;  // how far the surface's morph moves a vertex (game units)
+    std::vector<u32> tris;  // the surface's triangles (their draws' final modes: occluder_table)
   };
   std::vector<OccCand> occ_cands;
   size_t occ_tried = 0;
@@ -2015,7 +2016,12 @@ struct Converter {
     occ_tried++;
     ctr_cull::Box b;
     if (occluders::inscribed_box(closed, p, &b)) {
-      occ_cands.push_back({b, vis, margin});
+      std::vector<u32> own;
+      own.reserve(members.size());
+      for (u32 t : members) {
+        own.push_back(ids[t]);
+      }
+      occ_cands.push_back({b, vis, margin, std::move(own)});
     }
   }
   //! the occluders to write: each candidate shrunk by its morph and the shape error of the tie
@@ -2030,6 +2036,17 @@ struct Converter {
     };
     std::vector<Sized> out;
     for (const auto& c : occ_cands) {
+      // a surface drawn blended (key_cullable takes Cs As + Cd (1 - As) blending, which the draw
+      // optimisations drop only where every texel is opaque): see-through, not an occluder
+      bool blended = false;
+      for (u32 ti : c.tris) {
+        DrawMode mode;
+        mode.as_int() = draw_keys[tris[ti].draw_key].mode;
+        blended = blended || mode.get_ab_enable();
+      }
+      if (blended) {
+        continue;
+      }
       float m = c.margin;
       for (size_t g = 0; g < lod_groups.size() && g < lod_group_error.size(); g++) {
         const float* bs = lod_groups[g].bsphere;
@@ -7229,9 +7246,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         out_run_lods.insert(out_run_lods.end(), run_lods.begin(), run_lods.end());
         out_run_protos.insert(out_run_protos.end(), run_protos.begin(), run_protos.end());
         out_run_bands.insert(out_run_bands.end(), run_bands.begin(), run_bands.end());
-        // (AI-assisted, facecull) each run's normal cone, from its triangles as drawn (their
-        // indices after the vertex cache order, in run order from the chunk's first index); 3
-        // degrees wider (6 where the PS2's geomorph moves a corner)
+        // (AI-assisted, facecull) each run's normal cone, from its triangles as drawn: their
+        // quantized positions (what the GPU culls: a thin triangle can turn on the grid), their
+        // indices after the vertex cache order, in run order from the chunk's first index; 3
+        // degrees wider (6 in a chunk whose corners the PS2's geomorph moves)
         u32 at = ch.draw_count || out_draws.size() > ch.first_draw
                      ? out_draws[ch.first_draw].first_index
                      : (u32)out_indices.size();
@@ -7242,10 +7260,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           if (run_faces[r] && n >= 3) {
             pos.clear();
             bool moves = false;
+            // (the indices are the chunk's final vertices here: welded, reordered and grouped,
+            // no longer local_src's; the geomorph's moving vertices are in morph_verts)
+            moves = morph_verts && !morph_verts->empty();
             for (u32 k = at; k < at + n; k++) {
-              const auto& v = cv.verts[local_src.at(out_indices[k])];
-              pos.insert(pos.end(), {v.x, v.y, v.z});
-              moves = moves || v.mband;
+              const u32 li = out_indices[k];
+              const auto& q = out_verts.at(ch.first_vertex + li);
+              pos.insert(pos.end(), {ch.origin[0] + q.pos[0] * ch.scale,
+                                     ch.origin[1] + q.pos[1] * ch.scale,
+                                     ch.origin[2] + q.pos[2] * ch.scale});
             }
             cone = ctr_cull::make_cone(pos.data(), n / 3, (moves ? 6.f : 3.f) * 3.14159265f / 180.f);
           }
@@ -7885,6 +7908,13 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     for (const auto& t : cv.tris) {
       const auto& dk = cv.draw_keys[t.draw_key];
       if ((dk.kind & 0xff) != 0 || t.tier > 2 || !cv.key_cullable(t.draw_key)) {
+        continue;
+      }
+      // (key_cullable takes Cs As + Cd (1 - As) blending that the draw optimisations may drop;
+      // a draw that still blends here is see-through: not terrain that hides anything)
+      DrawMode hz_mode;
+      hz_mode.as_int() = dk.mode;
+      if (hz_mode.get_ab_enable()) {
         continue;
       }
       horizon::TerrainTri x{};

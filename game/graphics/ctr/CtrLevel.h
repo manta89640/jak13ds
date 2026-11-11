@@ -1653,7 +1653,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   float m_fc_d2 = 0.f;
   // (AI-assisted, facecull) cone_cull this level draw, and statistics: runs it hid, their triangles
   bool m_cone_on = false;
-  u64 m_cone_frames = 0, m_cone_runs = 0, m_cone_tris = 0;
+  u64 m_cone_frames = 0, m_cone_chunks = 0, m_cone_runs = 0, m_cone_tris = 0;
   u64 m_fc_frames = 0, m_fc_copies = 0, m_fc_sources = 0;
   float m_sz_focal = 0.f;
   float m_sz_fwd[3] = {0, 0, 1};

@@ -592,6 +592,31 @@ void test_face_bins() {
   check(cv.face_bin(t) == 0, "a triangle moved by the wind has none");
 }
 
+// (AI-assisted, review) an occluder of a surface whose draw still blends is not written
+void test_occluder_blend() {
+  for (int blended = 0; blended < 2; blended++) {
+    Converter cv;
+    DrawMode mode;
+    mode.as_int() = 0;
+    mode.set_depth_write_enable(true);
+    mode.set_alpha_blend(DrawMode::AlphaBlend::SRC_DST_SRC_DST);
+    mode.set_ab(blended != 0);
+    DrawKey k{};
+    k.mode = mode.as_int();
+    k.texture = 0xffff;
+    k.kind = (u16)(1 | c3l::kDrawCullBack);
+    SrcTri t{};
+    t.draw_key = cv.key_id(k);
+    cv.tris.push_back(t);
+    ctr_cull::Box b{};
+    b.ax[0][0] = b.ax[1][1] = b.ax[2][2] = 1.f;
+    b.h[0] = b.h[1] = b.h[2] = 3.f * 4096.f;
+    cv.occ_cands.push_back({b, 7, 0.f, {0}});
+    const auto tab = cv.occluder_table();
+    check(tab.size() == (blended ? 0u : 1u), "an occluder only of a surface drawn opaque");
+  }
+}
+
 int main() {
   try {
     lg::initialize();
@@ -599,6 +624,7 @@ int main() {
     test_far_copies();
     test_terrain_cull();
     test_face_bins();
+    test_occluder_blend();
     test_resize();
     test_vista_seams();
     test_atlas_order(true);

@@ -27,6 +27,7 @@
 #include "game/graphics/ctr/CtrRenderer.h"
 #include "game/graphics/ctr/CtrStream.h"
 #include "game/graphics/ctr/ctr_gpu.h"
+#include "game/graphics/ctr/CtrCull.h"
 
 // (AI-assisted, perfv2) host diagnostic: mesh handle -> what it is (CtrLevel fills it)
 std::map<int, std::string>& ctr_soft_mesh_desc() {
@@ -4079,20 +4080,8 @@ void ctr_gpu_depth_copy(const float user[16]) {
   if (s_dcopy.pending || g_soft.depth.size() != (size_t)kW * kH) {
     return;
   }
-  for (int by = 0; by < 30; by++) {
-    for (int bx = 0; bx < 50; bx++) {
-      float lo = 1e30f, hi = -1e30f;
-      for (int y = by * 8; y < by * 8 + 8; y++) {
-        for (int x = bx * 8; x < bx * 8 + 8; x++) {
-          const float z = g_soft.depth[x + y * kW];
-          lo = std::min(lo, z);
-          hi = std::max(hi, z);
-        }
-      }
-      s_dcopy.zfar[by * 50 + bx] = lo;
-      s_dcopy.znear[by * 50 + bx] = hi;
-    }
-  }
+  static_assert(ctr_cull::kDepthBX * 8 == kW && ctr_cull::kDepthBY * 8 == kH, "depth blocks");
+  ctr_cull::depth_blocks(g_soft.depth.data(), s_dcopy.zfar, s_dcopy.znear);
   memcpy(s_dcopy.user, user, sizeof(s_dcopy.user));
   s_dcopy.pending = true;
   s_dcopy.frame = (int)g_soft.frame;

@@ -28,7 +28,9 @@ ones with converter data need the levels converted again.
 **Data** (`tools/ctr_level_converter/occluders.cpp`, `c3l::ExtOcc`). The converter already finds
 closed tie surfaces for back face culling (`orient_ties`: welded, consistently wound, open only at
 small holes or on the ground, a clear inside). For each one without planar openings (a door, a
-window), no wind and no prototype the game hides, at least 1.1 m across on every side:
+window), no wind, no prototype the game hides and no triangle in a draw that still blends after the
+converter's fixups (a fading or see-through surface hides nothing behind it), at least 1.1 m across
+on every side:
 
 - the inside on a voxel grid (24 along the longest side, at least 0.2 m), by the parity of the
   crossings along rows, for six yaw angles (boxes stay upright, y up);
@@ -55,9 +57,10 @@ every point of every hidden sphere has the box between it and the camera.
 **When an occluder counts** (`choose_occluders`, per level draw):
 - its node's bit in the game's visibility string (when there is one) is set;
 - the ordinary tie chunks with its node's runs around it (`make_occ_support` at the first draw: up
-  to four, not the near chunks or the vista tier) were all drawn opaque in the main pass the frame
-  before (`chunk_opaque_frame`): not cut by a distance limit, not fading, not replaced by the vista
-  copies. Either LOD version may be the one drawn: the box is inside both;
+  to four, not the near chunks, the vista tier or section 8's copies) were all drawn opaque in the
+  main pass the frame before (`chunk_opaque_frame`, stamped in `emit_chunk` after the far copy
+  switch, for chunks at full fade only): not cut by a distance limit, not fading, not replaced by
+  the vista or far copies. Either LOD version may be the one drawn: the box is inside both;
 - in view, within the draw distance, the camera at least 3 m outside the box (nearer, the surface
   in front of it may be cut by the near plane);
 - of those, the `occluder_count` (6) that look biggest (face areas / distance^2).
@@ -87,8 +90,8 @@ close to them; compare `render ms/frame` and the triangle count with it off.
 
 **Data** (`tools/ctr_level_converter/horizon.cpp`, `c3l::ExtHorizon`): the level's terrain as a grid
 of 8 m cells. A cell is covered when its opaque tfrag (tiers 0-2: what a camera in the level may
-see drawn) covers all of it, in every version present there (detailed and coarse tier, the
-geomorph's versions), in one layer: 5 x 5 samples, each inside a triangle of each version, and the
+see drawn; draws that still blend after the converter's fixups don't count) covers all of it, in
+every version present there (detailed and coarse tier, the geomorph's versions), in one layer: 5 x 5 samples, each inside a triangle of each version, and the
 non-steep triangles of a version at a sample within 2 m of each other (an overhang or a cave under
 the ground is two layers). Per covered cell the lowest (`minh`) and highest point of the triangles
 that reach it, morph offsets included. About 3 bytes per cell (village1 ~17 KB), read only while
@@ -146,14 +149,18 @@ passed the depth test. At the frame's end those are the runs seen. With `CTR_VIS
 - a frame is recorded while the title is on and the camera is within 4 m of `kTitlePath`; it adds
   to the last sample, or starts a new one once the camera has moved 0.5 m or turned 2 degrees
   (sample: position, the four view planes' normals);
-- every 900 recorded frames and when recording stops, `DIR/<level>.c3b` is written: per sample the
-  runs seen, grown by every run whose sphere touches theirs (+1 m: the other LOD version, tier or
-  near chunk of the same place, a vista copy over it); per run its samples grown by 2 on each
-  side, as intervals. Runs without a sphere are seen everywhere.
+- every 900 recorded frames and when recording stops, `DIR/<level>.c3b` is written for each level
+  still loaded that recorded frames: per sample the runs seen, grown by every run whose sphere
+  touches theirs (+1 m: the other LOD version, tier or near chunk of the same place, a vista copy
+  over it); per run its samples grown by 2 on each side, as intervals. Runs without a sphere are
+  seen everywhere.
+- while baking, the culling of sections 1-5, 7, 8 and 10 is off whatever config.ini says, so the
+  bake records the whole picture. Sections 6 and 9 follow config.ini: bake with them off, or as
+  they will be played.
 
 Run the host renderer (`gk --ctr-gfx`, as for the other host checks) on the title with
-`CTR_VIS_BAKE=DIR:title` for at least two loops of the flight, with the defaults (no new culling key
-on), from the same .c3l files as the SD card, then copy `DIR/village1.c3b` (and any other level it
+`CTR_VIS_BAKE=DIR:title` for at least two loops of the flight, from the same .c3l files as the SD
+card, then copy `DIR/village1.c3b` (and any other level it
 wrote) next to the .c3l files. The log has `[visbake] DIR/<level>.c3b: N samples, N of N runs seen,
 N intervals (N KB)`.
 
@@ -194,13 +201,17 @@ blocks from its depth buffer at once and hands them out from the next frame.
 **The test** (`CtrCull.h depth_test`): with the copy's camera, a sphere's screen box (its bounding
 box's corners projected) and its nearest point's depth; hidden when that point is farther than the
 farthest depth of every block of the box and no block has anything nearer than `depth_reuse_min`
-(20 m; Jak, an enemy, a moving platform near the camera may have moved since), spheres grown by
-0.5 m. Off screen or reaching behind the camera: not hidden.
+(20 m; Jak, an enemy, a moving platform near the camera may have moved since). Spheres are grown by
+0.5 m plus the parallax of the camera's move since the copy (`depth_grow`: the move times the
+sphere's distance over `depth_reuse_min`, the nearest an occluder can be). Any part off the copy's
+screen (within a pixel of its edge) or reaching behind the camera: not hidden (the copy has no depth
+there, and a turn since may have brought it in view).
 
-**When:** only while the camera is within 0.25 m and 1 degree of the copy's camera (its position
-from the matrix, `depth_eye`), and a chunk or run is hidden only from the second copy in a row that
-hid it (`depth_reuse_hidden`: per chunk and run the copy and the streak; 3 bytes per run). So it
-works while standing or turning slowly, and a thing that comes out from behind something shows at
+**When:** a copy is asked for only while the camera is slow (within 0.125 m and about 0.5 degree of
+the frame before), and used only while the camera is within 0.25 m and 1 degree of the copy's
+camera (its position from the matrix, `depth_eye`), and a chunk or run is hidden only from the
+second copy in a row that hid it (`depth_reuse_hidden`: per chunk and run the copy and the streak;
+3 bytes per run). So it works while standing or turning slowly, and a thing that comes out from behind something shows at
 most a frame or two after the copy that saw it. The vista pass's chunks are not tested.
 
 **What can go wrong:** a moving thing farther than 20 m that hid a run (a far enemy, a platform)
@@ -209,7 +220,8 @@ behind it.
 
 The test (`cull_test.cpp`): a wall over half the screen at 30 m: a sphere behind it is hidden, one
 beside it, in front of it or behind the camera is not, one across its edge partly; a wall at 10 m
-hides nothing; the camera's position comes back from its matrix.
+hides nothing; a sphere behind a wall over the whole screen that reaches off its edge is not hidden;
+the growth for a move; the camera's position comes back from its matrix.
 
 **Cost:** 375 KB of linear memory; per copy the GPU copy and a pass over 96k words (1500 tiles);
 per chunk in view a projection of 9 points, per run of chunks partly behind the depth the same.
@@ -240,7 +252,8 @@ angle widened for its pitch, + 5 degrees, all twelve once it reaches 60 degrees 
 camera's cell must have every one of those bins recorded in 4 frames or more, else nothing is
 hidden. Then the runs seen from that cell and the 7 cells next to it on the camera's side, in those
 bins, are the ones drawn: a bit per run (`lev.cell_bits`), made again only when the cell, the side
-or the bins change. Runs seen in none are not drawn.
+or the bins change (`cell_select_key`, fields that don't overlap). Runs seen in none are not drawn.
+The bake's cell keys keep 19 bits per axis and the bins apart from them.
 
 **Why it can still miss something:** the bake saw the cell from the places and angles it was in;
 something visible only from another corner of the cell, or at a moment the bake didn't see (a door
@@ -249,7 +262,8 @@ are the safety; the bake's coverage is the rest.
 
 The test (`cull_test.cpp`): for 2000 random views (yaw, pitch, half angle), every direction within
 the half angle falls in a bin the view takes; the view's direction and a half angle reaching its
-corners from four planes.
+corners from four planes; every cell, side and bins give a different key; `seen_any` (a binary
+search per interval) against looking up each sample.
 
 **Cost:** on a change of cell, side or bins, a pass over the level's runs (each run's intervals for
 the samples taken: up to ~50); per run of the chunks in view a bit. Memory: the .c3c (samples 64
@@ -391,9 +405,10 @@ every way), so the converter first splits such runs by the way their triangles f
   `kDrawCullCond`, culled only from some places; not moved by the wind) gets a facing bin
   (`face_bin`: the largest component of its normal and its sign, 6 bins); a draw's triangles of one
   node are sorted by it and runs split where it changes;
-- per run its normal cone (`CtrCull.h make_cone`): the mean normal as axis, packed to s8, and the
-  widest normal from that packed axis, 3 degrees wider (6 if the PS2's geomorph moves a corner),
-  its cosine rounded down; 80 degrees or wider: none. In `ExtCones`.
+- per run its normal cone (`CtrCull.h make_cone`), from the written (welded, quantized) vertices
+  the run's indices point at: the mean normal as axis, packed to s8, and the widest normal from
+  that packed axis, 3 degrees wider (6 if the chunk's vertices have morph offsets), its cosine
+  rounded down; 80 degrees or wider: none. In `ExtCones`.
 
 **Why it holds** (`cone_away`): with the run's sphere (center c, radius r), the camera at e and
 v = c - e at angle t from the axis, every normal is within t + a of v's direction, so for every

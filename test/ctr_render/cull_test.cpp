@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <random>
+#include <set>
 #include <vector>
 
 #include "check.h"
@@ -630,6 +631,78 @@ void test_cones() {
              tested);
 }
 
+// (AI-assisted, review) the fixes of the review: cell keys of neighbouring cells and sides differ;
+// seen_any is the brute force; depth_test leaves a sphere off the copy's screen alone; the growth
+// for a camera move
+void test_review_fixes() {
+  // keys: every (cell, sides, bins) in a small range is unique (the old key put a z side on the
+  // cell's bit 0)
+  std::set<uint64_t> keys;
+  size_t n = 0;
+  for (uint32_t own = 0; own < 64; own++) {
+    for (int sx = -1; sx <= 1; sx += 2) {
+      for (int sy = -1; sy <= 1; sy += 2) {
+        for (int sz = -1; sz <= 1; sz += 2) {
+          for (uint32_t ym : {0x7u, 0x38u, 0x801u}) {
+            for (uint32_t pm : {1u, 2u, 6u}) {
+              const int side[3] = {sx, sy, sz};
+              keys.insert(ctr_vis_bake::cell_select_key(own, side, ym, pm));
+              n++;
+            }
+          }
+        }
+      }
+    }
+  }
+  check(keys.size() == n, "cell_vis keys of different cells, sides or bins differ");
+  // seen_any against seen() over every sample
+  std::mt19937 rng(3);
+  for (int iter = 0; iter < 300; iter++) {
+    std::vector<uint16_t> hits;
+    for (uint32_t k = 0; k < 200; k++) {
+      if (rng() % 9 == 0) {
+        hits.push_back((uint16_t)k);
+      }
+    }
+    std::vector<ctr_vis_bake::Interval> iv;
+    ctr_vis_bake::to_intervals(hits, (int)(rng() % 3), 199, &iv);
+    const uint32_t first[2] = {0, (uint32_t)iv.size()};
+    std::vector<uint32_t> use;
+    for (uint32_t k = 0; k < 200; k++) {
+      if (rng() % 23 == 0) {
+        use.push_back(k);
+      }
+    }
+    bool want = false;
+    for (uint32_t u : use) {
+      want = want || ctr_vis_bake::seen(first, iv.data(), 0, u);
+    }
+    check(ctr_vis_bake::seen_any(first, iv.data(), 0, use.data(), use.size()) == want,
+          "seen_any is any sample seen");
+  }
+  // a wall over the whole screen at 30 m: a sphere behind it reaching off the left edge is not
+  // hidden (its part off screen had no depth in the copy); one inside the screen is
+  ctr_cull::DepthSnap s;
+  const float eye[3] = {0, 0, 0};
+  make_depth_scene(30.f, eye, &s);
+  for (int b = 0; b < ctr_cull::kDepthBX * ctr_cull::kDepthBY; b++) {
+    s.zfar[b] = s.zfar[0];
+    s.znear[b] = s.znear[0];
+  }
+  const float lim = ctr_cull::depth_at_distance(s, 20.f);
+  const float inside[3] = {0.f, 0.f, -60.f};
+  check(ctr_cull::depth_test(s, inside, 2.f, lim, 1e-5f) == 2, "behind a wall over the screen");
+  // the left edge at z = -60: x = -60 / fx
+  const float edge_x = -60.f / (1.f / std::tan(0.5f) * 240.f / 400.f);
+  const float across[3] = {edge_x, 0.f, -60.f};
+  check(ctr_cull::depth_test(s, across, 2.f, lim, 1e-5f) == 0,
+        "a sphere reaching off the copy's screen is not hidden");
+  // the growth: the move's shift at the sphere for occluders at d_min
+  check(std::fabs(ctr_cull::depth_grow(100.f, 0.25f, 20.f, 0.5f) - (0.5f + 1.25f)) < 1e-4f,
+        "a 0.25 m move against occluders 20 m away shifts 1.25 m at 100 m");
+  fmt::print("  review fixes: cell keys, interval lookup, screen edges, move growth\n");
+}
+
 }  // namespace
 
 void run_cull_tests() {
@@ -645,4 +718,5 @@ void run_cull_tests() {
   test_cell_bins();
   test_sphere_px();
   test_cones();
+  test_review_fixes();
 }

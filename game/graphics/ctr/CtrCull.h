@@ -260,8 +260,8 @@ inline bool build_horizon(const HorizonGridView& g, const float* eye, float R, f
   }
   const int k = (int)std::ceil(R / g.cell) + 1;
   const float w = 2.f * kPi / kHorizonBins;
-  // a cell's distances and azimuth span from the eye; full: the eye is in it
-  auto geom = [&](int i, int j, float* dmin, float* dmax, float* a0, float* a1, bool* full) {
+  // a cell's distances from the eye (cheap: tested before its angles); full: the eye is in it
+  auto dist = [&](int i, int j, float* dmin, float* dmax, bool* full) {
     const float x0 = g.x0 + i * g.cell - eye[0], x1 = x0 + g.cell;
     const float z0 = g.z0 + j * g.cell - eye[2], z1 = z0 + g.cell;
     const float nx = x0 > 0 ? x0 : (x1 < 0 ? x1 : 0.f);
@@ -270,11 +270,11 @@ inline bool build_horizon(const HorizonGridView& g, const float* eye, float R, f
     const float fx = std::fmax(std::fabs(x0), std::fabs(x1)), fz = std::fmax(std::fabs(z0), std::fabs(z1));
     *dmax = std::sqrt(fx * fx + fz * fz);
     *full = nx == 0.f && nz == 0.f;
-    if (*full) {
-      *a0 = -kPi;
-      *a1 = kPi;
-      return;
-    }
+  };
+  // its azimuth span (not full)
+  auto span = [&](int i, int j, float* a0, float* a1) {
+    const float x0 = g.x0 + i * g.cell - eye[0], x1 = x0 + g.cell;
+    const float z0 = g.z0 + j * g.cell - eye[2], z1 = z0 + g.cell;
     const float ac = std::atan2((z0 + z1) * 0.5f, (x0 + x1) * 0.5f);
     float lo = 0, hi = 0;
     const float cx[4] = {x0, x1, x0, x1}, cz[4] = {z0, z0, z1, z1};
@@ -295,11 +295,14 @@ inline bool build_horizon(const HorizonGridView& g, const float* eye, float R, f
       if (inside && g.minh[j * g.nx + i] != kHorizonUncovered) {
         continue;
       }
-      float dmin, dmax, a0, a1;
+      float dmin, dmax, a0 = -kPi, a1 = kPi;
       bool full;
-      geom(i, j, &dmin, &dmax, &a0, &a1, &full);
+      dist(i, j, &dmin, &dmax, &full);
       if (dmin >= R) {
         continue;
+      }
+      if (!full) {
+        span(i, j, &a0, &a1);
       }
       const int b0 = horizon_bin_floor(a0), b1 = horizon_bin_floor(a1);
       for (int b = b0; b <= b1 && b < b0 + kHorizonBins; b++) {
@@ -318,11 +321,14 @@ inline bool build_horizon(const HorizonGridView& g, const float* eye, float R, f
       if (m == kHorizonUncovered) {
         continue;
       }
-      float dmin, dmax, a0, a1;
+      float dmin, dmax, a0 = -kPi, a1 = kPi;
       bool full;
-      geom(i, j, &dmin, &dmax, &a0, &a1, &full);
+      dist(i, j, &dmin, &dmax, &full);
       if (dmax > R) {
         continue;
+      }
+      if (!full) {
+        span(i, j, &a0, &a1);
       }
       const float dy = g.base_y + m * kHorizonMinUnit - eye[1];
       const float e = std::fmin(std::atan2(dy, std::fmax(dmin, 1.f)), std::atan2(dy, dmax));
@@ -404,10 +410,10 @@ inline float depth_at_distance(const DepthSnap& s, float d) {
 }
 
 /*!
- * Was the sphere hidden in that frame: on screen there, behind the farthest depth of the blocks it
- * covered (by `eps`), with nothing in those blocks nearer than stored depth `z_limit` (things near
- * the camera may have moved since: Jak, an enemy)? 2: behind all of its blocks, 1: behind some of
- * them (its pieces may be), 0: none (or off screen, or reaching behind the camera).
+ * Was the sphere hidden in that frame: all of it on screen there, behind the farthest depth of the
+ * blocks it covered (by `eps`), with nothing in those blocks nearer than stored depth `z_limit`
+ * (things near the camera may have moved since: Jak, an enemy)? 2: behind all of its blocks, 1:
+ * behind some of them (its pieces may be), 0: none (or reaching off screen, or behind the camera).
  */
 inline int depth_test(const DepthSnap& s, const float* c, float r, float z_limit, float eps) {
   float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
@@ -425,11 +431,15 @@ inline int depth_test(const DepthSnap& s, const float* c, float r, float z_limit
     y0 = std::fmin(y0, sy);
     y1 = std::fmax(y1, sy);
   }
-  const int bx0 = std::max(0, (int)std::floor(x0 / 8.f)), bx1 = std::min(kDepthBX - 1, (int)std::floor(x1 / 8.f));
-  const int by0 = std::max(0, (int)std::floor(y0 / 8.f)), by1 = std::min(kDepthBY - 1, (int)std::floor(y1 / 8.f));
-  if (bx0 > bx1 || by0 > by1) {
+  // all of it on screen in that frame: the depth of a part off screen then is unknown (a turn or a
+  // roll since may have brought it in view)
+  if (!(x0 >= 1.f && y0 >= 1.f && x1 <= kDepthBX * 8.f - 1.f && y1 <= kDepthBY * 8.f - 1.f)) {
     return 0;
   }
+  const int bx0 = std::max(0, (int)std::floor(x0 / 8.f));
+  const int bx1 = std::min(kDepthBX - 1, (int)std::floor(x1 / 8.f));
+  const int by0 = std::max(0, (int)std::floor(y0 / 8.f));
+  const int by1 = std::min(kDepthBY - 1, (int)std::floor(y1 / 8.f));
   // the sphere's nearest point: the least w
   const float* g = s.m + 12;
   const float gl = std::sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
@@ -456,6 +466,16 @@ inline int depth_test(const DepthSnap& s, const float* c, float r, float z_limit
 }
 inline bool depth_hidden(const DepthSnap& s, const float* c, float r, float z_limit, float eps) {
   return depth_test(s, c, r, z_limit, eps) == 2;
+}
+
+/*!
+ * How much to grow a sphere at distance d from the eye before testing it against a copy taken from
+ * an eye `move` away, when everything that may hide it in the copy is at least `d_min` from that
+ * eye: the move shifts such a surface against the sphere by at most move / d_min radians, which is
+ * move x d / d_min at the sphere (plus `base`).
+ */
+inline float depth_grow(float d, float move, float d_min, float base) {
+  return base + move * d / std::fmax(d_min, 1.f);
 }
 
 //! The camera position of a world -> clip matrix: where x, y and w are 0.

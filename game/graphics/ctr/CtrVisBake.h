@@ -181,4 +181,24 @@ inline void view_bins(float yaw, float pitch, float h, uint32_t* yaw_mask, uint3
   }
 }
 
+//! (AI-assisted, cellvis) cell_vis's cache key: the own cell, the camera's side of it per axis, the
+//! bins; fields that don't overlap (own: bits 32+, sides 20-25, yaw bins 3-14, pitch bins 0-2)
+inline uint64_t cell_select_key(uint32_t own, const int side[3], uint32_t ym, uint32_t pm) {
+  const uint32_t sides = (uint32_t)(side[0] + 1) | ((uint32_t)(side[1] + 1) << 2) |
+                         ((uint32_t)(side[2] + 1) << 4);
+  return ((uint64_t)own << 32) | ((uint64_t)sides << 20) | ((uint64_t)(ym & 0xfff) << 3) | (pm & 7);
+}
+
+//! Was run r seen in any of the samples `use` (ascending)? Each interval once, by binary search.
+inline bool seen_any(const uint32_t* run_first, const Interval* iv, uint32_t r, const uint32_t* use,
+                     size_t n) {
+  for (uint32_t i = run_first[r]; i < run_first[r + 1]; i++) {
+    const uint32_t* at = std::lower_bound(use, use + n, (uint32_t)iv[i].lo);
+    if (at != use + n && *at <= iv[i].hi) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace ctr_vis_bake
