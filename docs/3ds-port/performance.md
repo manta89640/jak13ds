@@ -1898,3 +1898,21 @@ Checked: the natives' differential tests as ARM code (qemu-arm): sp-process-bloc
 bones, shadow-execute all match their references. cpu_bench pair `mem.runs64k` /
 `mem.runs64k_pld` (the run loop's arrays for 64K runs, 1.25 MB) prices it on a console; the
 primitive pair `mem.seq256k` / `mem.seq256k_pld` too.
+
+### 10. A one-bone merc vertex program (onebone)
+
+Merc draws whose palette has one bone (rigid props, vehicles' and characters' rigid parts:
+`palette_count == 1`, so every vertex's three bone indices are 0) ran the full blend of
+ctr_skin_opt: two MOVAs and nine multiplies / multiply-adds through indexed uniforms.
+`ctr_skin_opt1.v.pica` is ctr_skin_opt with that blend as bone 0's rows times the weights' sum,
+read at a constant index: 5 instructions instead of 11 (33 in all). The sum is rounded once where
+the three products were rounded three times (float24): the same picture up to rounding.
+
+- `config.ini merc_one_bone` (default off), shader_opt's program set only; the backend checks its
+  uniforms are at ctr_skin_opt's places (`skin1_ok`) and puts it in the resident code image. A
+  program switch re-sends the clip matrix, lights and rows (citro3d may rewrite uniform registers
+  on a bind), so models that mix one-bone and multi-bone draws pay that per switch.
+- pica_bench `B3.skin_opt1` next to `B3.skin_opt` (the same one-bone vertices) prices the saving
+  per vertex on a console.
+- Checked: `check_shaders.py` (every output component written once, the hazards the PICA hangs
+  on). Not assembled here: picasso is devkitPro's (the 3DS build assembles it).

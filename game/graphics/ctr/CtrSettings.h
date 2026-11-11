@@ -193,6 +193,10 @@ struct CtrSettings {
   // lines in gk.log and data/log/cpu_bench.txt; CtrCpuBench.h). Azahar's times say nothing (one
   // tick per instruction): console only.
   bool cpu_bench = false;
+  // (AI-assisted, onebone) merc draws whose palette has one bone with ctr_skin_opt1 (5 blend
+  // instructions per vertex instead of 11; rounding-level differences). Off until pica_bench
+  // B3.skin_opt1 and a console say so (needs shader_opt's program set)
+  bool merc_one_bone = false;
   // (AI-assisted) 3DS hardware features (docs/3ds-port/config_ini.md):
   // 16-bit (RGB565) color buffer and top screen: half the memory traffic of every pixel drawn,
   // blended and cleared. Off by default: without dithering, faint blended layers (waterfall mist,

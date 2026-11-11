@@ -1,0 +1,94 @@
+; (AI-assisted, onebone, Nov 11) ctr_skin_opt for a draw whose palette has one bone
+; (MercDraw::palette_count == 1: every vertex's three bone indices are 0): the blended rows are
+; bone 0's rows times the weights' sum, read at a constant index. No MOVA, no indexed uniform reads:
+; 5 instructions for the blend instead of 11 (33 in all, from 38). The sum before the product rounds
+; (float24) where the three multiply-adds rounded three times: the same picture up to rounding.
+; Same inputs, outputs and uniform declarations as ctr_skin_opt (the renderer checks that the
+; uniforms are at the same places: skin1_ok). config.ini merc_one_bone.
+;
+; (AI-assisted)
+; config.ini shader_opt: ctr_skin.v.pica in 33 instructions (35; the hardware default, the Oct 2
+; ctr_skin_old, has 53). Same inputs, outputs and uniform names; two uniforms carry factors the
+; shader no longer applies (ctr_gpu_draw_skinned makes them when g.ps->opt):
+;  - the weights are used as they come (0..255, no mul by 1/255): the blended bone rows are 255
+;    times too long, so the camera space position is too; clip has its x, y, z columns divided by
+;    255 to undo that (the translation column stays). The normal is normalized anyway (rsq).
+;  - lights[3..6] (light colors, ambient) are premultiplied by the color scale (1/510 rgb, 1/255
+;    alpha): the vertex color goes in unscaled (one mul less).
+; (AI-assisted, far-fog) The game's fog (merc2.vert): 3 instructions more (36). Its amount, in
+; texcoord1 = outtc0.zw (packed like ctr_mesh_opt: no extra output register), is read from the fog
+; ramp on texture unit 1 by the CTR_TCC_FOG draws' combiner stage; the other draws don't read it.
+; (AI-assisted, mercsprite) The port's draw distance / vista haze, as the level meshes get it
+; (ctr_mesh_opt: max(clamp(game fog), haze)): 2 instructions more (38), the haze a dph with its own
+; row (mfog[2]), then the max; the models were at game fog strength while the scenery around them
+; was hazed (pasted on).
+; Every output component is written exactly once; the two MOVAs are apart.
+
+.fvec clip[4]
+.fvec row0[24]
+.fvec row1[24]
+.fvec row2[24]
+.fvec scales        ; x: texture coordinate scale (1/1024)
+.fvec lights[7]     ; 0-2: light direction rows, 3-5: light colors, 6: ambient (3-6 times the
+                    ; color scale)
+.fvec mfog[3]       ; (AI-assisted, far-fog) 0: the fog amount as a row (dph with the camera space
+                    ; position: clip[3] / 255 and 1 - hvdf.w / 255), 1: x its lower, y its upper
+                    ; clamp, 2: the haze amount as a row (ctr_gpu_draw_skinned, skin_fog_rows)
+
+.constf consts(0.0, 0.0, 0.0, 0.0)
+.alias zero consts.xxxx
+
+.out outpos position
+.out outtc0 texcoord0.xy
+.out - texcoord1 outtc0.zw
+.out outclr color
+
+.alias inpos v0
+.alias inidx v1
+.alias inwgt v2
+.alias intex v3
+.alias inclr v4
+.alias innrm v5
+
+.entry main_ctr_skin_opt1
+.proc main_ctr_skin_opt1
+  ; one bone (palette entry 0): its rows times the weights' sum (0..255)
+  add r0.x, inwgt.xxxx, inwgt.yyyy
+  add r0.x, r0.xxxx, inwgt.zzzz
+  mul r1, row0[0], r0.xxxx
+  mul r2, row1[0], r0.xxxx
+  mul r3, row2[0], r0.xxxx
+
+  ; camera space position r4 (x 255; dph: w = 1) and the rotated normal r5, interleaved
+  dph r4.x, inpos, r1
+  dp3 r5.x, innrm, r1
+  dph r4.y, inpos, r2
+  dp3 r5.y, innrm, r2
+  dph r4.z, inpos, r3
+  dp3 r5.z, innrm, r3
+  ; (AI-assisted, far-fog) the fog amount r9.x (unclamped); (mercsprite) the haze r10.x
+  dph r9.x, r4, mfog[0]
+  dph r10.x, r4, mfog[2]
+  dph outpos.x, r4, clip[0]
+  dp3 r6.x, r5, r5
+  dph outpos.y, r4, clip[1]
+  ; lighting: the rows are the negated bone matrices (see CtrMerc), so the normal is -r5; the
+  ; lights' sum is scaled by 1 / |r5| (r6.x) instead of normalizing (as ctr_skin.v.pica)
+  mul r7, lights[0], -r5.xxxx
+  dph outpos.z, r4, clip[2]
+  rsq r6.x, r6.x
+  mad r7, -r5.yyyy, lights[1], r7
+  dph outpos.w, r4, clip[3]
+  mad r7, -r5.zzzz, lights[2], r7
+  mul outtc0.xy, scales.xxxx, intex.xyyy
+  max r9.x, mfog[1].xxxx, r9.xxxx
+  max r7, zero, r7
+  mul r8, lights[3], r7.xxxx
+  mad r8, r7.yyyy, lights[4], r8
+  mad r8, r7.zzzz, lights[5], r8
+  min r9.x, mfog[1].yyyy, r9.xxxx
+  mad r8, r8, r6.xxxx, lights[6]
+  max outtc0.zw, r10.xxxx, r9.xxxx
+  mul outclr, inclr, r8
+  end
+.end

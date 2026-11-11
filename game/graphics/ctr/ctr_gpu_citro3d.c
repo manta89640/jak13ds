@@ -51,6 +51,9 @@ extern const uint8_t ctr_skin_old_mask_shbin[];
 extern const size_t ctr_skin_old_mask_shbin_size;
 extern const uint8_t ctr_skin_opt_mask_shbin[];
 extern const size_t ctr_skin_opt_mask_shbin_size;
+/* (AI-assisted, onebone) ctr_skin_opt for draws with a one-bone palette */
+extern const uint8_t ctr_skin_opt1_shbin[];
+extern const size_t ctr_skin_opt1_shbin_size;
 extern const uint8_t ctr_etie_fa_shbin[];
 extern const size_t ctr_etie_fa_shbin_size;
 /* Jak 1's wind ties (ctr_gpu_draw_mesh_wind), with shader_opt's set */
@@ -353,6 +356,7 @@ enum {
   PROG_ETIE,      /* (AI-assisted, j2water2) ctr_gpu_etie_draw (ctr_etie.v.pica) */
   PROG_MESH_WIND, /* ctr_gpu_draw_mesh_wind (ctr_mesh_wind.v.pica, set 1 only) */
   PROG_SKIN_MASK, /* PROG_SKIN for textures with an alpha mask (on unit 2) */
+  PROG_SKIN1,     /* (AI-assisted, onebone) PROG_SKIN for one-bone palettes (ctr_skin_opt1) */
   PROG_ETIE_FA,   /* PROG_ETIE for textures with an alpha mask (on unit 1) */
   PROG_MESH_MORPH,    /* ctr_gpu_draw_mesh_morph (ctr_mesh_morph.v.pica, set 1 only) */
   PROG_MESH_MORPH_FA, /* the same with the fog in the alpha (ctr_mesh_morph_fa.v.pica) */
@@ -411,6 +415,9 @@ typedef struct {
   /* the alpha mask programs (c3l v23), their uniforms at skin's / etie's places */
   shaderProgram_s skin_mask, etie_fa;
   int mask_ok, etie_fa_ok;
+  /* (AI-assisted, onebone) ctr_skin_opt1 (set 1), its uniforms at skin's places (skin1_ok) */
+  shaderProgram_s skin1;
+  int skin1_ok;
 } ProgSet;
 static ProgSet s_ps[2];
 
@@ -456,6 +463,7 @@ static struct {
   u32 tmorph_unif_id;     /* the tfrag geomorph uniforms the GPU has (ctr_gpu_draw_mesh_tmorph) */
   /* ctr_skin_old_mask, ctr_skin_opt_mask, ctr_etie_fa.v.pica */
   DVLB_s* skin_mask_dvlb[2];
+  DVLB_s* skin1_dvlb; /* (AI-assisted, onebone) */
   DVLB_s* etie_fa_dvlb;
   u32 wind_rows_id;       /* the slot rows the GPU has (ctr_gpu_draw_mesh_wind), 0: none */
   u32 morph_slot_id[CTR_MORPH_ROWS]; /* each row's rows_id on the GPU (ctr_gpu_draw_mesh_morph) */
@@ -1019,6 +1027,7 @@ static void use_program(int prog) {
                                 : prog == PROG_TFRAG_MORPH ? &g.ps->tfrag_morph
                                 : prog == PROG_TFRAG_MORPH_FA ? &g.ps->tfrag_morph_fa
                                 : prog == PROG_SKIN_MASK ? &g.ps->skin_mask
+                                : prog == PROG_SKIN1 ? &g.ps->skin1
                                 : prog == PROG_ETIE_FA ? &g.ps->etie_fa
                                                         : &g.ps->mesh;
     const void* dvlp = sp->vertexShader ? (const void*)sp->vertexShader->dvle->dvlp : NULL;
@@ -1103,9 +1112,11 @@ static void use_program(int prog) {
                                              : g.ps->uloc_ocean_full_clip_gs,
                      &g.ocean_full_gs);
     unif_vectors += 4;
-  } else if (prog == PROG_SKIN || prog == PROG_SKIN_ENV || prog == PROG_SKIN_MASK) {
+  } else if (prog == PROG_SKIN || prog == PROG_SKIN_ENV || prog == PROG_SKIN_MASK ||
+             prog == PROG_SKIN1) {
     C3D_BindProgram(prog == PROG_SKIN        ? &g.ps->skin
                     : prog == PROG_SKIN_MASK ? &g.ps->skin_mask
+                    : prog == PROG_SKIN1     ? &g.ps->skin1
                                              : &g.ps->env);
     g.last_state_valid = 0;
     AttrInfo_AddLoader(attr, 0, GPU_SHORT, 3);         /* position */
@@ -1378,6 +1389,18 @@ static void prog_set_ulocs(ProgSet* p, int have_fa) {
                  shaderInstanceGetUniformLocation(vs, "lights") == p->uloc_skin_lights &&
                  shaderInstanceGetUniformLocation(vs, "mfog") == p->uloc_skin_mfog;
   }
+  /* (AI-assisted, onebone) the one-bone program: usable when its uniforms are at skin's places */
+  p->skin1_ok = 0;
+  if (p->skin1.vertexShader) {
+    vs = p->skin1.vertexShader;
+    p->skin1_ok = shaderInstanceGetUniformLocation(vs, "clip") == p->uloc_skin_clip &&
+                  shaderInstanceGetUniformLocation(vs, "row0") == p->uloc_skin_rows[0] &&
+                  shaderInstanceGetUniformLocation(vs, "row1") == p->uloc_skin_rows[1] &&
+                  shaderInstanceGetUniformLocation(vs, "row2") == p->uloc_skin_rows[2] &&
+                  shaderInstanceGetUniformLocation(vs, "scales") == p->uloc_skin_scales &&
+                  shaderInstanceGetUniformLocation(vs, "lights") == p->uloc_skin_lights &&
+                  shaderInstanceGetUniformLocation(vs, "mfog") == p->uloc_skin_mfog;
+  }
   p->etie_fa_ok = 0;
   if (p->etie_fa.vertexShader && p->etie.vertexShader) {
     vs = p->etie_fa.vertexShader;
@@ -1402,7 +1425,7 @@ static void prog_set_free(ProgSet* p) {
   shaderProgram_s* maybe[] = {&p->mesh_fa,   &p->mesh_df,       &p->mesh_df_fa, &p->ocean_env,
                               &p->etie,      &p->mesh_wind,     &p->skin_mask,  &p->etie_fa,
                               &p->mesh_morph, &p->mesh_morph_fa, &p->tfrag_morph,
-                              &p->tfrag_morph_fa};
+                              &p->tfrag_morph_fa, &p->skin1};
   for (size_t i = 0; i < sizeof(maybe) / sizeof(maybe[0]); i++) {
     if (maybe[i]->vertexShader) {
       shaderProgramFree(maybe[i]);
@@ -1490,18 +1513,18 @@ static void resident_programs(const ProgSet* rp) {
     printf("[ctr] shader_resident: off\n");
     return;
   }
-  DVLE_s* dvles[2 * 21];
+  DVLE_s* dvles[2 * 22];
   int n = 0;
   for (int k = 0; k < 1; k++) {
     const ProgSet* p = rp;
     /* (AI-assisted, j2water) + ocean_env (Jak II); (j2water2) + etie (Jak II) */
-    const shaderProgram_s* all[21] = {&p->basic,     &p->mesh,       &p->mesh_fa,    &p->skin,
+    const shaderProgram_s* all[22] = {&p->basic,     &p->mesh,       &p->mesh_fa,    &p->skin,
                                 &p->env,       &p->clip,       &p->clip2,      &p->ocean,
                                 &p->ocean_full, &p->ocean_full_clip, &p->mesh_df, &p->mesh_df_fa,
                                 &p->ocean_env, &p->etie,       &p->mesh_wind,  &p->skin_mask,
                                 &p->etie_fa,   &p->mesh_morph, &p->mesh_morph_fa,
-                                &p->tfrag_morph, &p->tfrag_morph_fa};
-    for (int i = 0; i < 21; i++) {
+                                &p->tfrag_morph, &p->tfrag_morph_fa, &p->skin1};
+    for (int i = 0; i < 22; i++) {
       if (!all[i]->vertexShader) {
         continue;
       }
@@ -1674,6 +1697,12 @@ static void load_opt_set(void) {
   if (g.skin_mask_dvlb[1]) {
     shaderProgramInit(&p->skin_mask);
     shaderProgramSetVsh(&p->skin_mask, &g.skin_mask_dvlb[1]->DVLE[0]);
+  }
+  /* (AI-assisted, onebone) ctr_skin_opt1 */
+  g.skin1_dvlb = DVLB_ParseFile((u32*)ctr_skin_opt1_shbin, (u32)ctr_skin_opt1_shbin_size);
+  if (g.skin1_dvlb) {
+    shaderProgramInit(&p->skin1);
+    shaderProgramSetVsh(&p->skin1, &g.skin1_dvlb->DVLE[0]);
   }
   g.wind_dvlb = DVLB_ParseFile((u32*)ctr_mesh_wind_shbin, (u32)ctr_mesh_wind_shbin_size);
   if (g.wind_dvlb) {
@@ -5150,6 +5179,13 @@ void ctr_gpu_set_top_block32(int mode) {
 
 void ctr_gpu_set_proctex(int on) {
   g_proctex = on ? 1 : 0;
+}
+
+/* (AI-assisted, onebone) config.ini merc_one_bone: draws whose palette has one bone use
+ * ctr_skin_opt1 (shader_opt's set only, with its uniforms at skin's places) */
+static int s_merc_one_bone;
+void ctr_gpu_set_merc_one_bone(int on) {
+  s_merc_one_bone = on ? 1 : 0;
 }
 
 void ctr_gpu_set_compact_textures(int on) {
@@ -9923,8 +9959,11 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
   if (!cmd_room() || gpuCmdBufSize - gpuCmdBufOffset < CMD_RESERVE_WORDS + CMD_DRAW_WORDS + 320) {
     return;
   }
-  /* c3l v23: a texture with an alpha mask (on unit 2) */
-  use_program(g.ps->mask_ok && tex_mask(tex_res(state->tex)) >= 0 ? PROG_SKIN_MASK : PROG_SKIN);
+  /* c3l v23: a texture with an alpha mask (on unit 2); (AI-assisted, onebone) a one-bone palette:
+   * ctr_skin_opt1 (merc_one_bone) */
+  use_program(g.ps->mask_ok && tex_mask(tex_res(state->tex)) >= 0 ? PROG_SKIN_MASK
+              : s_merc_one_bone && palette_count == 1 && g.ps->skin1_ok ? PROG_SKIN1
+                                                                         : PROG_SKIN);
   const MeshSlot* ms = &g.meshes[mesh];
   const int raw = use_raw(state);
   if (raw) {

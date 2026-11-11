@@ -162,6 +162,8 @@ extern const uint8_t ctr_mesh_opt_shbin[];
 extern const size_t ctr_mesh_opt_shbin_size;
 extern const uint8_t ctr_skin_opt_shbin[];
 extern const size_t ctr_skin_opt_shbin_size;
+extern const uint8_t ctr_skin_opt1_shbin[]; /* (AI-assisted, onebone) */
+extern const size_t ctr_skin_opt1_shbin_size;
 extern const uint8_t ctr_bench_shbin[];
 extern const size_t ctr_bench_shbin_size;
 extern const uint8_t ctr_bench_sep_shbin[];
@@ -260,6 +262,7 @@ static struct {
   int tex_ok[6];
   Prog basic, clip2, bench, sep;
   Prog mesh_opt, skin_opt; /* (AI-assisted) config.ini shader_opt's */
+  Prog skin_opt1;          /* (AI-assisted, onebone) merc_one_bone's */
   shaderProgram_s bench_entry[BENCH_ENTRIES]; /* the bench DVLB's entry points (shared code) */
   int bench_entry_ok[BENCH_ENTRIES];
   C3D_Mtx m_px, m_geo;
@@ -1792,6 +1795,7 @@ static int setup(void) {
   prog_load(&B.clip2, ctr_clip2_shbin, ctr_clip2_shbin_size, 0);
   prog_load(&B.mesh_opt, ctr_mesh_opt_shbin, ctr_mesh_opt_shbin_size, 0);
   prog_load(&B.skin_opt, ctr_skin_opt_shbin, ctr_skin_opt_shbin_size, 0);
+  prog_load(&B.skin_opt1, ctr_skin_opt1_shbin, ctr_skin_opt1_shbin_size, 0);
   prog_load(&B.sep, ctr_bench_sep_shbin, ctr_bench_sep_shbin_size, 0);
   if (prog_load(&B.bench, ctr_bench_shbin, ctr_bench_shbin_size, 0)) {
     for (int i = 0; i < BENCH_ENTRIES && i < (int)B.bench.dvlb->numDVLE; i++) {
@@ -1821,6 +1825,7 @@ static void teardown(void) {
   prog_free(&B.clip2);
   prog_free(&B.mesh_opt);
   prog_free(&B.skin_opt);
+  prog_free(&B.skin_opt1);
   prog_free(&B.sep);
   prog_free(&B.bench);
   ctr_linear_lock();
@@ -1916,6 +1921,9 @@ int ctr_gpu_bench_run(void) {
     /* (AI-assisted) config.ini shader_opt's programs, the packed output register (o3p) before
      * the program that packs texcoord1 that way */
     b3_skin("B3.skin_opt", &B.skin_opt, 1);
+    /* (AI-assisted, onebone) the one-bone program on the same one-bone vertices: what
+     * merc_one_bone saves per vertex (B3.skin_opt - B3.skin_opt1) */
+    b3_skin("B3.skin_opt1", &B.skin_opt1, 1);
     b3_entry(ids[8], 8);
     b3_mesh("B3.mesh_opt", &B.mesh_opt, 1);
   }

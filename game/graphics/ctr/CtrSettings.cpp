@@ -207,6 +207,8 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.pica_bench = parse_bool(v);  // (AI-assisted)
     } else if (key == "cpu_bench") {
       s.cpu_bench = parse_bool(v);  // (AI-assisted, cpubench)
+    } else if (key == "merc_one_bone") {
+      s.merc_one_bone = parse_bool(v);  // (AI-assisted, onebone)
     } else if (key == "color16") {
       s.color16 = parse_bool(v);
     } else if (key == "early_depth") {
