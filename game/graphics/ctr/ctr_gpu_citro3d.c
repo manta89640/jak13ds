@@ -15,8 +15,6 @@
 #include "game/graphics/ctr/ctr_gpu.h"
 #include "game/graphics/ctr/ctr_gpu_bench.h"
 #include "game/graphics/ctr/ctr_gpu_early.h"
-#define CTR_VPROBE_WRAP
-#include "game/graphics/ctr/ctr_gpu_vprobe.h"
 #include "game/graphics/ctr/CtrTexConv.h"
 
 #include <3ds.h>
@@ -139,7 +137,6 @@ static void gx_end(void);
 static int gx_lost(void);
 static void raw_gas_flags_clear(void);
 static void gx_queue_enlarge(void);
-static void vprobe_frame(void);
 void ctr_linear_lock(void);
 void ctr_linear_unlock(void);
 
@@ -162,11 +159,7 @@ static void* safe_vram_alloc(size_t size) {
   if ((size_t)vramSpaceFree() < size + VRAM_RESERVE) {
     return NULL;
   }
-  void* p = vramAlloc(size);
-  if (ctr_vprobe_on && p) {
-    ctr_vprobe_vram_add(p, __LINE__);
-  }
-  return p;
+  return vramAlloc(size);
 }
 static int vram_room(size_t size) {
   return (size_t)vramSpaceFree() >= size + VRAM_RESERVE;
@@ -960,7 +953,6 @@ static void process_pending_deletes(int hold) {
       p->used = 4;
     } else if (p->used == 2 || p->used == 4) {
       if (p->vram) {
-        ctr_vprobe_pool_out(i, p->vram, __LINE__);
         vramFree(p->vram);
       }
       if (p->linear) {
@@ -1866,7 +1858,6 @@ static void flush_selftest(void) {
 }
 
 static int top_target_setup(void);
-static void vprobe_boot(void);
 extern u32 __ctru_linear_heap_size;
 static u32 s_lin_before; /* the linear heap's bytes in use when ctr_gpu_init began */
 int ctr_gpu_init(void) {
@@ -1876,7 +1867,6 @@ int ctr_gpu_init(void) {
   ctr_linear_lock();
   s_lin_before = __ctru_linear_heap_size - (u32)linearSpaceFree();
   ctr_linear_unlock();
-  ctr_vprobe_enable(ctr_config_bool("vram_probe", 0));
   if (!C3D_Init(CMDBUF_BYTES)) {
     return -1;
   }
@@ -2057,7 +2047,6 @@ int ctr_gpu_init(void) {
     g.ready = 0;
     return -2;
   }
-  vprobe_boot();
   /* one dark frame right away: until the game draws its first frame (after loading the common
    * files and the title level), the top screen keeps the HOME Menu's launch logo and the boot
    * looks frozen */
@@ -2070,7 +2059,6 @@ void ctr_gpu_exit(void) {
   if (!g.ready) {
     return;
   }
-  ctr_vprobe_exit();
   apt_gate_remove(); /* (AI-assisted, gpu-home) */
   ctr_linear_lock();
   for (int i = 0; i < MAX_TEXTURES; i++) {
@@ -3532,9 +3520,6 @@ static void pipeline_frame_begin(u32 clear) {
   gt_note_first(); /* (AI-assisted) the clear below starts the GPU on this frame */
   update_pool_residency();
   vram_vertices_step(); /* (AI-assisted, vramvtx) */
-  if (!s_bd.frame) {
-    vprobe_frame();
-  }
   if (s_bd.frame) {
     bd_clear_begin();
   }
@@ -3623,7 +3608,6 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   /* before any draw: copies to VRAM are queued ahead of this frame's draws */
   update_pool_residency();
   vram_vertices_step(); /* (AI-assisted, vramvtx) */
-  vprobe_frame();
   if (g.screenshot_state == 2) {
     write_screenshot();
     g.screenshot_state = 0;
@@ -4196,16 +4180,6 @@ static void tex_init_external(C3D_Tex* tex, void* data, int w, int h, int format
 /* VRAM holds copies of what linear memory holds: the GPU reads them faster. The CPU never reads
  * VRAM (its mapping is cached: a read can return what was there before the GPU's last write), and
  * what is there may be gone after the HOME Menu or sleep. */
-static int s_vram_failed; /* a copy read back wrong: linear memory only from here on */
-
-static void cache_invalidate_now(const void* addr, u32 size) {
-  if (kernel_flush_on() &&
-      R_SUCCEEDED(svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)addr, size))) {
-    return;
-  }
-  GSPGPU_InvalidateDataCache(addr, size);
-}
-
 /* a copy at frame begin, in the queue's order behind the frames in flight (not waited for);
  * 0: not queued */
 static int queue_texture_copy(void* in, void* out, u32 size) {
@@ -4219,105 +4193,6 @@ static int queue_texture_copy(void* in, void* out, u32 size) {
     return ok;
   }
   return sync_texture_copy((u32*)in, 0, (u32*)out, 0, size, 8);
-}
-
-/* everything queued up to frame f's begin has run */
-static int gpu_done_with(u32 f) {
-  if (s_pres.on) {
-    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)s_pres.fence, 16);
-    return (s32)(*(volatile u32*)s_pres.fence - f) >= 0;
-  }
-  return (s32)((u32)g.frame_no - f) >= 3;
-}
-
-/* One slice of a pool's VRAM copy read back by the GPU every VCHECK_PERIOD frames and compared
- * with linear memory. */
-#define VCHECK_BYTES (32u * 1024u)
-#define VCHECK_PERIOD 15
-static struct {
-  uint8_t* buf;
-  int pool; /* the slice queued, -1: none */
-  u32 serial, off, bytes, frame;
-  u32 next, checks;
-  u32 cursor[MAX_POOLS];
-} s_vcheck = {.pool = -1};
-
-static void vcheck_step(void) {
-  if (s_vcheck.pool >= 0) {
-    if (!gpu_done_with(s_vcheck.frame)) {
-      return;
-    }
-    const int i = s_vcheck.pool;
-    const TexPool* p = &g.pools[i];
-    s_vcheck.pool = -1;
-    if (p->used == 1 && p->vram && p->vram_serial == s_vcheck.serial) {
-      cache_invalidate_now(s_vcheck.buf, s_vcheck.bytes);
-      const uint8_t* want = p->linear + s_vcheck.off;
-      s_vcheck.checks++;
-      if (memcmp(s_vcheck.buf, want, s_vcheck.bytes) != 0) {
-        u32 lines = 0, first = 0;
-        for (u32 o = 0; o < s_vcheck.bytes; o += 32) {
-          const u32 n = s_vcheck.bytes - o < 32 ? s_vcheck.bytes - o : 32;
-          if (memcmp(s_vcheck.buf + o, want + o, n) != 0) {
-            first = lines ? first : o;
-            lines++;
-          }
-        }
-        printf("[ctr] VRAM textures: pool %d at %08lx + %lu differs from linear memory in %lu of "
-               "%lu 32-byte lines (first at + %lu) after %lu good checks: textures in linear "
-               "memory from here on\n",
-               i, (unsigned long)(u32)p->vram, (unsigned long)s_vcheck.off, (unsigned long)lines,
-               (unsigned long)((s_vcheck.bytes + 31) / 32), (unsigned long)first,
-               (unsigned long)(s_vcheck.checks - 1));
-        s_vram_failed = 1;
-        return;
-      }
-    }
-  }
-  if (g.frame_no % 1800 == 0 && s_vcheck.checks) {
-    printf("[ctr] VRAM textures: %lu slices read back by the GPU, all as in linear memory\n",
-           (unsigned long)s_vcheck.checks);
-  }
-  if (g.frame_no % VCHECK_PERIOD) {
-    return;
-  }
-  if (!s_vcheck.buf) {
-    ctr_linear_lock();
-    s_vcheck.buf = (uint8_t*)linearAlloc(VCHECK_BYTES);
-    ctr_linear_unlock();
-    if (!s_vcheck.buf) {
-      return;
-    }
-    memset(s_vcheck.buf, 0, VCHECK_BYTES);
-    cache_flush_now(s_vcheck.buf, VCHECK_BYTES);
-  }
-  for (int n = 0; n < MAX_POOLS; n++) {
-    const int i = (int)(s_vcheck.next++ % MAX_POOLS);
-    const TexPool* p = &g.pools[i];
-    if (p->used != 1 || !p->vram) {
-      continue;
-    }
-    u32 off = s_vcheck.cursor[i];
-    if (off >= p->vram_bytes) {
-      off = 0;
-    }
-    u32 bytes = p->vram_bytes - off;
-    bytes = (bytes > VCHECK_BYTES ? VCHECK_BYTES : bytes) & ~15u;
-    if (!bytes) {
-      s_vcheck.cursor[i] = 0;
-      continue;
-    }
-    if (!queue_texture_copy((uint8_t*)p->vram + off, s_vcheck.buf, bytes)) {
-      break;
-    }
-    s_vcheck.pool = i;
-    s_vcheck.serial = p->vram_serial;
-    s_vcheck.off = off;
-    s_vcheck.bytes = bytes;
-    s_vcheck.frame = (u32)g.frame_no;
-    s_vcheck.cursor[i] = off + bytes;
-    break;
-  }
 }
 
 int ctr_gpu_pool_create(unsigned int bytes) {
@@ -4337,7 +4212,6 @@ int ctr_gpu_pool_create(unsigned int bytes) {
     if (mem) {
       TexPool* p = &g.pools[slot];
       memset(p, 0, sizeof(*p));
-      s_vcheck.cursor[slot] = 0;
       p->used = 3;
       p->linear = mem;
       p->bytes = bytes;
@@ -4476,14 +4350,12 @@ static void pool_leave_vram(int pool) {
   p->vram_bytes = 0;
   p->vram_serial = 0;
   pool_repoint(pool);
-  ctr_vprobe_pool_out(pool, v, __LINE__);
   vramFree(v);
 }
 
 static void arena_leave_vram(int back);
 
-/* nothing in VRAM is what was copied there any more (after the HOME Menu or sleep, or a failed
- * check): everything is read from linear memory; back: and copied to VRAM again from there */
+/* nothing in VRAM is what was copied there any more (after the HOME Menu or sleep): everything is read from linear memory; back: and copied to VRAM again from there */
 static void vram_copies_lost(int back) {
   vram_vertices_release(1); /* (AI-assisted, vramvtx) */
   ctr_linear_lock();
@@ -4495,7 +4367,6 @@ static void vram_copies_lost(int back) {
   }
   ctr_linear_unlock();
   arena_leave_vram(back);
-  s_vcheck.pool = -1;
 }
 
 /* (AI-assisted, vramvtx) config.ini vram_vertices: static meshes' vertices (merc models) copied into
@@ -4569,7 +4440,7 @@ static void vram_vertices_step(void) {
     }
   }
   s_vram_vtx_defer_n = kept;
-  if (!s_vram_vertices || s_vram_failed) {
+  if (!s_vram_vertices) {
     vram_vertices_release(0);
     return;
   }
@@ -4627,7 +4498,7 @@ static void vram_vertices_step(void) {
  * first, moving pools with a lower priority out if that makes room. The copies are queued ahead of
  * this frame's draws, which read the VRAM copy. */
 static void update_pool_residency(void) {
-  if (!g_vram_textures || s_vram_failed) {
+  if (!g_vram_textures) {
     int any = s_arena.base && !(s_arena.nfree == 1 && s_arena.free_len[0] == ARENA_BYTES);
     for (int i = 0; i < MAX_POOLS && !any; i++) {
       any = g.pools[i].used == 1 && g.pools[i].vram != NULL;
@@ -4635,10 +4506,6 @@ static void update_pool_residency(void) {
     if (any) {
       vram_copies_lost(0);
     }
-    return;
-  }
-  vcheck_step();
-  if (s_vram_failed) {
     return;
   }
   /* (AI-assisted) the largest block VRAM can give at all: two separate 3 MB banks, each with a
@@ -4775,7 +4642,6 @@ static void update_pool_residency(void) {
       ctr_linear_unlock();
       break;
     }
-    ctr_vprobe_pool_in(best, v, p->linear, part);
     p->vram_frame = g.frame_no;
     p->vram = v;
     p->vram_bytes = part;
@@ -4784,49 +4650,6 @@ static void update_pool_residency(void) {
     pool_repoint(best);
     copied += part;
   }
-}
-
-/* config.ini vram_probe: textures checked against the VRAM allocations (128 slots a frame), one
- * pool texture in VRAM for the live probe, then the probes (ctr_gpu_vprobe.c) */
-static void vprobe_frame(void) {
-  if (!ctr_vprobe_on) {
-    return;
-  }
-  static int scan, live_scan;
-  for (int k = 0; k < 128; k++) {
-    const int i = scan;
-    scan = (scan + 1) % MAX_TEXTURES;
-    const TexSlot* t = &g.textures[i];
-    if (t->used != 1 || !t->tex.data) {
-      continue;
-    }
-    const TexPool* p = t->pool >= 0 ? &g.pools[t->pool] : NULL;
-    const u32 bytes = p ? t->bytes : C3D_TexCalcTotalSize(t->tex.size, t->tex.maxLevel);
-    ctr_vprobe_tex_check(t->tex.data, bytes, i, t->pool, p ? p->vram : NULL,
-                         p ? p->vram_bytes : 0);
-  }
-  CtrVprobeTex live;
-  memset(&live, 0, sizeof(live));
-  for (int k = 0; k < 256 && !live.tex; k++) {
-    const int i = live_scan;
-    live_scan = (live_scan + 1) % MAX_TEXTURES;
-    const TexSlot* t = &g.textures[i];
-    if (t->used != 1 || t->pool < 0 || t->bytes > 32u * 1024u) {
-      continue;
-    }
-    const TexPool* p = &g.pools[t->pool];
-    const uint8_t* d = (const uint8_t*)t->tex.data;
-    if (!p->vram || d < (const uint8_t*)p->vram ||
-        d + t->bytes > (const uint8_t*)p->vram + p->vram_bytes || g.frame_no - p->vram_frame < 3) {
-      continue;
-    }
-    live.tex = &t->tex;
-    live.bytes = t->bytes;
-    live.levels = t->levels;
-    live.slot = i;
-    live.pool = t->pool;
-  }
-  ctr_vprobe_frame((u32)g.frame_no, live.tex ? &live : NULL);
 }
 
 /* allow_vram: only from the render thread (the copy to VRAM goes through the GX queue) */
@@ -5072,32 +4895,6 @@ static int early_selftest_run(void) {
   tex_units_forget();
   apt_gate_leave();
   return ok;
-}
-
-/* config.ini vram_probe: buffers, calibration and the first probe, outside a frame */
-static void vprobe_boot(void) {
-  if (!ctr_vprobe_on) {
-    return;
-  }
-  apt_gate_enter();
-  gpu_drain();
-  CtrVprobeIn in;
-  in.prog = &g.ps->basic;
-  in.uloc_projection = g.ps->uloc_projection;
-  in.emulator = ctr_gpu_is_emulator();
-  in.cpu_vram_read = !envIsHomebrew();
-  ctr_vprobe_init(&in);
-  g.cur_prog = PROG_NONE;
-  use_program(PROG_BASIC);
-  C3D_SetFrameBuf(&g.top->frameBuf);
-  set_top_viewport();
-  C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-  C3D_CullFace(GPU_CULL_NONE);
-  g.last_state_valid = 0;
-  g.bound_tex = NULL;
-  s_tex_dirty = 1;
-  tex_units_forget();
-  apt_gate_leave();
 }
 
 int ctr_gpu_early_depth_selftest(void) {
@@ -5533,7 +5330,7 @@ int ctr_gpu_tex_radial(int handle) {
 static void migrate_small_textures(void) {
   /* (AI-assisted) s_small_waiting: a compact texture may wait (set when one is made); the scan of
    * all 2048 slots ran every frame */
-  if (!s_arena.base || !s_small_waiting || s_vram_failed) {
+  if (!s_arena.base || !s_small_waiting) {
     return;
   }
   static int scan = 0;
@@ -5907,9 +5704,6 @@ static void apt_gate_hook(APT_HookType type, void* param) {
   const int timed_out = s_apt.busy;
   s_apt.timeouts += (u32)timed_out;
   LightLock_Unlock(&s_apt.lock);
-  if (ctr_vprobe_on) {
-    ctr_vprobe_st(VP_APT, __LINE__, (u32)type, (u32)timed_out, s_apt.suspends, 0);
-  }
   /* what is queued (with frame_overlap2 = on the queue keeps running between frames) */
   gxCmdQueueWait(&__C3D_Context.gxQueue, GX_WAIT_MS(1000));
   printf("[ctr] %s: frames stopped (%.1f ms%s; %lu frames abandoned unsent so far)\n",
@@ -5926,9 +5720,6 @@ static void apt_gate_hook(APT_HookType type, void* param) {
 static void apt_gate_after(void) {
   if (!s_apt.gate || aptShouldClose()) {
     return;
-  }
-  if (ctr_vprobe_on) {
-    ctr_vprobe_st(VP_APT, __LINE__, 0xFF, 0, s_apt.suspends, 0);
   }
   LightLock_Lock(&s_apt.lock);
   s_apt.epoch++;
@@ -5986,7 +5777,7 @@ static void apt_resume_state(void) {
   g.bound_tex = NULL;
   s_tex_dirty = 1;
   vram_vertices_release(1); /* lost with vram_textures off too */
-  if (g_vram_textures && !s_vram_failed) {
+  if (g_vram_textures) {
     vram_copies_lost(1);
   }
   if (s_pres.on) {
@@ -6528,9 +6319,6 @@ static void bind_mask(TexSlot* m, const C3D_Tex* color, int unit) {
     return;
   }
   C3D_TexBind(unit, t);
-  if (ctr_vprobe_on) {
-    ctr_vprobe_st(VP_MASK, __LINE__, (u32)t->data, (u32)unit, t->param, t->lodParam);
-  }
   *cur = t;
   s_mask_data[unit] = t->data;
   s_mask_param[unit] = t->param;
@@ -6543,9 +6331,6 @@ static void bind_mask(TexSlot* m, const C3D_Tex* color, int unit) {
   g.cur.tex_binds++;
 }
 static void unit2_mask_release(void) {
-  if (ctr_vprobe_on) {
-    ctr_vprobe_st(VP_MASK, __LINE__, 0, 2, 0, 0);
-  }
   C3Di_Context* ctx = &__C3D_Context;
   ctx->tex[2] = NULL;
   ctx->flags |= C3DiF_Tex(2);
@@ -8315,10 +8100,6 @@ static int rt_create(int lw, int lh, int max_tile_w, int max_level, int depth_on
   s_rt[i].max_w = max_tile_w;
   s_rt[i].depth = depth;
   s_rt[i].depth_vram = depth_vram;
-  if (ctr_vprobe_on) {
-    ctr_vprobe_ev(VP_RT_TEX, __LINE__, (u32)t->tex.data, (u32)color_bytes, (u32)depth,
-                  ((u32)lw << 16) | (u32)lh);
-  }
   char dtxt[48] = "no depth";
   if (depth) {
     snprintf(dtxt, sizeof(dtxt), "D16 %dx%d in %s", max_tile_w, lh,
@@ -10812,7 +10593,7 @@ void ctr_gpu_linear_account_get(ctr_gpu_linear_account* out) {
   out->fixed = lin_size(__C3D_Context.cmdBuf) + lin_size(s_vbufs[0] ? s_vbufs[0] : g.vbuf) +
                lin_size(s_vbufs[1]) + lin_size(g.quad_indices) + lin_size(s_grid_idx) +
                lin_size(s_pres.fence) + lin_size(s_pres.ids) + lin_size(s_bd.probe) +
-               lin_size(s_bd.scis) + lin_size(s_vcheck.buf) + lin_size(s_b32_strip);
+               lin_size(s_bd.scis) + lin_size(s_b32_strip);
   for (int i = 0; i < PRESENT_BUFS; i++) {
     out->fixed += lin_size(s_pres.buf[i]);
   }

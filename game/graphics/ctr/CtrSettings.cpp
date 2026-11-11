@@ -353,7 +353,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
                key == "log_async" || key == "c3l_read_buffer" || key == "text_scale" ||
                key == "text_min_height" ||
                key == "button_art" || key == "preset" || key == "gpu_micro" ||
-               key == "vram_probe" ||
                ctr_cfg_is_user_alias(key.c_str())) {
       // not the renderer's (preset, particles, text_size: ctr_config_presets.h, applied as the
       // keys they stand for) (platform/3ds/port/ctr_port.c, mips2c_native.cpp, kperf.cpp,

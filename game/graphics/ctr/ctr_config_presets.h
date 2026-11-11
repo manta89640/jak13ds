@@ -183,7 +183,7 @@ static const char* const ctr_cfg_removed[] = {
     "impostors", "impostor_distance", "impostor_error", "impostor_budget", "impostor_atlas",
     "fine_vis", "fine_vis_kb", "occ_cull", "occ_cull_tris", "occ_cull_dist", "vista_untextured",
     /* renderer strip: removed with their code */
-    "gpu_micro_ident", "cmd_dump", "cpu_bench",
+    "vram_probe", "gpu_micro_ident", "cmd_dump", "cpu_bench",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */
