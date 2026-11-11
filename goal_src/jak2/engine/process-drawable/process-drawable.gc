@@ -478,7 +478,9 @@
 ;; both the camera and Jak runs on one frame in 4 only (staggered by pid), so its joints are at
 ;; most 3 frames old. Its code, post, collision and sounds still run every frame. A model that
 ;; asked once and didn't ask again (a pose set before sleeping) gets its skipped math the next
-;; frame (*anim-lod-skipped*).
+;; frame (*anim-lod-skipped*). A model whose sphere from its last joint math, grown by
+;; ANIM_LOD_MOVE, could pass this frame's draw test (in view, within its draw distance) is never
+;; skipped: the test reads the origin its joint math makes, so it enters the view on time.
 ;; anim_lod_far: a citizen (citizen-init-by-other sets pc-anim-lod) that was on screen, ANIM_LOD_FAR
 ;; or more from the camera and Jak, gets its joint math every 2nd frame (every 3rd from
 ;; ANIM_LOD_FARTHER). On the frames between, and on the frames anim_lod skips while it is off
@@ -491,6 +493,7 @@
   (define-extern *pc-3ds-anim-lod* symbol)
   (define-extern *pc-3ds-anim-lod-far* symbol)
   (defconstant ANIM_LOD_DIST (meters 30))
+  (defconstant ANIM_LOD_MOVE (meters 4))
   (defconstant ANIM_LOD_FAR (meters 40))
   (defconstant ANIM_LOD_FARTHER (meters 70))
   (defconstant ANIM_LOD_JUMP (meters 1.5))
@@ -542,13 +545,27 @@
       )
     )
 
+  (defun anim-lod-may-show? ((dc draw-control))
+    "Could dc's sphere (its last joint math's, grown by ANIM_LOD_MOVE) be drawn this frame?"
+    (let ((s (new 'stack-no-clear 'sphere)))
+      (set! (-> s quad) (-> dc origin quad))
+      (set! (-> s r) (+ (-> dc bounds w) ANIM_LOD_MOVE))
+      (and (sphere-in-view-frustum? s)
+           (< (vector-vector-distance s (-> *math-camera* trans))
+              (+ (the-as float (-> dc lod-set lod (-> dc lod-set max-lod) dist)) ANIM_LOD_MOVE)
+              )
+           )
+      )
+    )
+
   (defun anim-lod-skip? ((pd process-drawable))
-    "anim_lod: skip this frame's joint math for pd (not on screen, far)?"
+    "anim_lod: skip this frame's joint math for pd (not on screen, far, not about to be)?"
     (and *pc-3ds-anim-lod*
          (nonzero? (logand (+ *anim-lod-frame* (-> pd pid)) 3))
          (not (logtest? (-> pd draw status) (draw-control-status on-screen)))
          (anim-lod-allowed? pd)
          (anim-lod-beyond? pd ANIM_LOD_DIST)
+         (not (anim-lod-may-show? (-> pd draw)))
          )
     )
 

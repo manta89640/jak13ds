@@ -19,7 +19,6 @@
 #include "common/util/string_util.h"
 
 #include "game/external/discord_jak1.h"
-#include "game/graphics/ctr/CtrButtonArt.h"
 #include "game/graphics/display.h"
 #include "game/graphics/gfx.h"
 #include "game/graphics/sceGraphicsInterface.h"
@@ -723,13 +722,14 @@ void InitMachine_PCPort() {
     memcpy(&bits, &lod_scale, 4);
     intern_from_c("*pc-3ds-merc-lod-scale*")->value = bits;
   }
-  // (AI-assisted) config.ini ocean = full: the game builds the PS2 ocean's DMA (draw-ocean) for
-  // CtrOceanFull instead of draw-ocean-3ds's packet for CtrOcean (drawable.gc, SKIP_OCEAN_DRAW)
+  // config.ini ocean (on unless off): the game builds the PS2 ocean's DMA (draw-ocean) for
+  // CtrOceanFull, else no ocean (drawable.gc, SKIP_OCEAN_DRAW)
   {
     bool ocean_full = false;
 #ifdef __3DS__
     char v[32];
-    ocean_full = ctr_config_get("ocean", v, sizeof(v)) && std::string(v) == "full";
+    const std::string o = ctr_config_get("ocean", v, sizeof(v)) ? v : "on";
+    ocean_full = !(o == "off" || o == "0" || o == "false" || o == "no");
 #else
     // (AI-assisted) host test hook: OPENGOAL_OCEAN_FULL=1 runs draw-ocean like the 3DS default
     // (render-ocean-quad and the other ocean natives, e.g. for OPENGOAL_MIPS2C_VERIFY runs)
@@ -764,28 +764,26 @@ void InitMachine_PCPort() {
     intern_from_c("*pc-3ds-anim-native*")->value =
         anim_native ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
   }
-  // (AI-assisted) config.ini shadows = full (default, also on) | blob | off: the shadow volumes
-  // (shadow-execute-all fills the shadow bucket, which the 3DS renderer draws with the stencil
-  // buffer), only the blob shadow under Jak, or none (drawable.gc, TARGET_3DS). The volumes need
-  // the stencil buffer, which depth16 = on doesn't have: full is blob then. Other builds: full
-  // (host runs of the 3DS GOAL code make the shadow DMA like the 3DS).
+  // config.ini shadows = full (default, also on) | off: the shadow volumes (shadow-execute-all
+  // fills the shadow bucket, which the 3DS renderer draws with the stencil buffer) or none
+  // (drawable.gc, TARGET_3DS). The volumes need the stencil buffer, which depth16 = on doesn't
+  // have: off then. Other builds: full (host runs of the 3DS GOAL code make the shadow DMA like
+  // the 3DS).
   {
     std::string shadows = "full";
 #ifdef __3DS__
     char v[32];
     if (ctr_config_get("shadows", v, sizeof(v))) {
       const std::string s(v);
-      if (s == "blob") {
-        shadows = "blob";
-      } else if (s == "off" || s == "0" || s == "no" || s == "false" || s == "none") {
+      if (s == "blob" || s == "off" || s == "0" || s == "no" || s == "false" || s == "none") {
         shadows = "off";
       } else if (s != "full" && s != "all" && s != "on" && s != "1" && s != "yes" && s != "true") {
-        lg::warn("config.ini shadows = {}: not full, blob or off, using full", s);
+        lg::warn("config.ini shadows = {}: not full or off, using full", s);
       }
     }
     if (shadows == "full" && ctr_config_bool("depth16", 0)) {
-      shadows = "blob";
-      lg::info("shadows blob (config.ini shadows: the volumes need the stencil buffer, which "
+      shadows = "off";
+      lg::info("shadows off (config.ini shadows: the volumes need the stencil buffer, which "
                "depth16 = on doesn't have)");
     } else {
       lg::info("shadows {} (config.ini shadows)", shadows);
@@ -826,28 +824,6 @@ void InitMachine_PCPort() {
     memcpy(&bits, &text_min, 4);
     intern_from_c("*pc-3ds-text-min-height*")->value = bits;
   }
-  // (AI-assisted) 3DS button symbols (game/graphics/ctr/CtrButtonArt.h): config.ini button_art
-  // (default on); the progress menu tells where its PS2 button icons are (progress-draw.gc).
-  {
-    bool button_art = false;  // (AI-assisted) off since Oct 12: the user prefers the PS2 symbols for now
-#ifdef __3DS__
-    button_art = ctr_config_bool("button_art", 0);
-#else
-    if (const char* e = getenv("OPENGOAL_BUTTON_ART")) {
-      button_art = atoi(e) != 0;
-    }
-#endif
-    ctr_button_art::set_enabled(button_art);
-    intern_from_c("*pc-3ds-button-art*")->value =
-        button_art ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
-    lg::info("3DS button symbols {} (config.ini button_art)", button_art ? "on" : "off");
-    make_function_symbol_from_c(
-        "pc-3ds-button-texture", +[](u32 button, u32 tbp0, u32 psm) -> u64 {
-          ctr_button_art::register_texture((int)button, tbp0, psm);
-          return 0;
-        });
-  }
-
   make_function_symbol_from_c("pc-discord-rpc-update", update_discord_rpc);
 
   // setup string constants

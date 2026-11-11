@@ -1993,9 +1993,6 @@
   (none))
 
 (defmethod draw-progress ((this progress))
-  ;; og:preserve-this (AI-assisted) 3DS: the 3DS buttons for the PS2 icons (progress-draw.gc)
-  (#when TARGET_3DS
-    (pc-3ds-button-icons))
   (let ((f30-0 (+ -409.0 (-> this particles 2 init-pos x) (* 0.8 (the float (-> this left-x-offset)))))
         (s5-0 (if (or (-> this stat-transition) (nonzero? (-> this level-transition))) 0 (-> this transition-offset))))
     (let ((f28-0 (if (or (-> this stat-transition) (nonzero? (-> this level-transition))) 1.0 (-> this transition-percentage-invert))))

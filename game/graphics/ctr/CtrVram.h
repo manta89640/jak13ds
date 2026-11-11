@@ -41,13 +41,6 @@ unsigned ctr_vram_copy_kb();
 struct CtrTexture {
   int handle = -1;  // ctr_gpu texture
   int w = 0, h = 0;  // size of the GPU texture (1 << tw, 1 << th, clamped to 8..1024)
-  // box[j]: the part of the texture (normalized s0, t0, s1, t1) outside of
-  // which every texel has alpha below 1 << j (GS scale, 0x80 = 1.0), one texel more on each side
-  // (bilinear filtering reads half a texel out); the whole texture when there is none. Particles
-  // are drawn over the box of the texels their alpha makes visible only (CtrSprite)
-  float box[8][4] = {{0.f, 0.f, 1.f, 1.f}, {0.f, 0.f, 1.f, 1.f}, {0.f, 0.f, 1.f, 1.f},
-                     {0.f, 0.f, 1.f, 1.f}, {0.f, 0.f, 1.f, 1.f}, {0.f, 0.f, 1.f, 1.f},
-                     {0.f, 0.f, 1.f, 1.f}, {0.f, 0.f, 1.f, 1.f}};
   int max_alpha = 255;  // the largest texel alpha
 };
 
@@ -161,8 +154,6 @@ class CtrVram {
   }
 
   void clear_cache();
-  // (AI-assisted) drop the cached textures ctr_button_art::patch may change
-  void drop_art_textures();
   // Frees the decoded textures no lookup asked for since the last call: the ones kept aside go,
   // and every cached one is kept aside until its next lookup takes it back (no decode). The
   // relocated ones (the font pages) stay. Between frames (no texture of a frame in use).
@@ -332,7 +323,6 @@ class CtrVram {
     const u32 off = m_remap[tex0 & 0x3fff];
     return off <= (tex0 & 0x3fff) ? tex0 - off : tex0;
   }
-  u32 m_art_gen = 0;  // (AI-assisted) ctr_button_art::generation() of the cached textures
   // (AI-assisted) per 16 KB chunk: what it holds (see the top of this file). Page chunks have odd
   // ids, all others even ones from m_next_unique_id.
   static constexpr u32 kChunkCount = 256;

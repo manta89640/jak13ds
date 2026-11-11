@@ -3,7 +3,7 @@
 /*!
  * @file CtrOceanFull.h
  * (AI-assisted)
- * The PS2 ocean on the 3DS (config.ini ocean = full; the default, flat, is CtrOcean.h).
+ * The PS2 ocean on the 3DS (config.ini ocean = on).
  *
  * The game runs draw-ocean (drawable.gc: *pc-3ds-ocean-full*, set by the kernel from config.ini)
  * instead of draw-ocean-3ds, so the two ocean buckets get the PS2's DMA, which this renders like
@@ -41,7 +41,6 @@
  * Mid: fog(tex * v) + env * tex.a * v.a, as the PS2's two passes; near: alpha blended with v.a,
  * fog(tex * v) + env * tex.a, = the PS2's three passes (v.a * fog(tex * v) + (1 - v.a) * dest, then
  * + env * v.a * tex.a) but for where the sum reaches white (the GS saturates once at the end).
- * config.ini ocean_near_alpha (default 0: the PS2's own alpha) is a floor on the near alpha.
  *
  * Jak II (the same programs' _jak2 versions): the mid-and-far bucket starts with the env map's
  * first pass (ocean-method-89, drawn like CtrOceanEnvJak2; the warp is CtrOceanEnvWarpJak2's), the

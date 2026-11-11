@@ -37,7 +37,6 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #include "game/graphics/ctr/CtrRendererJak2.h"
 #include "game/graphics/ctr/CtrSky.h"
 #include "game/graphics/ctr/CtrMerc.h"
-#include "game/graphics/ctr/CtrOcean.h"
 #include "game/graphics/ctr/CtrOceanFull.h"
 #include "game/graphics/ctr/CtrClipTest.h"
 #include "game/graphics/ctr/CtrShadow.h"
@@ -132,7 +131,7 @@ const AbSwitch kAbSwitches[] = {
     // computes them)
     {"shadows",
      [](CtrSettings& s, bool on) {
-       s.shadows = on ? CtrSettings::ShadowMode::Full : CtrSettings::ShadowMode::Blob;
+       s.shadows = on ? CtrSettings::ShadowMode::Full : CtrSettings::ShadowMode::Off;
      },
      [](const CtrSettings& s) { return s.shadows == CtrSettings::ShadowMode::Full; }},
     {"envmap", [](CtrSettings& s, bool on) { s.envmap = on; },
@@ -143,26 +142,8 @@ const AbSwitch kAbSwitches[] = {
     // distort_copy: rows (on) or the whole screen (off)
     {"distort_copy", [](CtrSettings& s, bool on) { s.distort_copy_rows = on; },
      [](const CtrSettings& s) { return s.distort_copy_rows; }},
-    // shadow_casters: the config's cap (on; 6 when the config says all) or every caster (off)
-    {"shadow_casters",
-     [](CtrSettings& s, bool on) {
-       static const int kConfigCap = s.shadow_casters > 0 ? s.shadow_casters : 6;
-       s.shadow_casters = on ? kConfigCap : 0;
-     },
-     [](const CtrSettings& s) { return s.shadow_casters > 0; }},
-    // sprite_min_alpha: the config's value for big sprites (on; 6 when it is 2) or 2 (off)
-    {"sprite_min_alpha",
-     [](CtrSettings& s, bool on) {
-       static const int kConfigAlpha = s.sprite_min_alpha > 2 ? s.sprite_min_alpha : 6;
-       s.sprite_min_alpha = on ? kConfigAlpha : 2;
-     },
-     [](const CtrSettings& s) { return s.sprite_min_alpha > 2; }},
     {"sprite_alpha_discard", [](CtrSettings& s, bool on) { s.sprite_alpha_discard = on; },
      [](const CtrSettings& s) { return s.sprite_alpha_discard; }},
-    {"envmap_batch", [](CtrSettings& s, bool on) { s.envmap_batch = on; },
-     [](const CtrSettings& s) { return s.envmap_batch; }},
-    {"merc_tex_sort", [](CtrSettings& s, bool on) { s.merc_tex_sort = on; },
-     [](const CtrSettings& s) { return s.merc_tex_sort; }},
     {"merc_gen_lod", [](CtrSettings& s, bool on) { s.merc_gen_lod = on; },
      [](const CtrSettings& s) { return s.merc_gen_lod; }},
     {"clouds", [](CtrSettings& s, bool on) { s.clouds = on; },
@@ -191,13 +172,6 @@ const AbSwitch kAbSwitches[] = {
     // (AI-assisted) Compare texture detail at a fixed camera, including grazing surfaces.
     {"mipmaps", [](CtrSettings& s, bool on) { s.mipmaps = on ? 2 : 0; },
      [](const CtrSettings& s) { return s.mipmaps != 0; }},
-    // (AI-assisted, fidelity2) envmap_min_px: the config's limit (on; 16 when it says 0) or 0 (off)
-    {"envmap_min_px",
-     [](CtrSettings& s, bool on) {
-       static const float kConfigPx = s.envmap_min_px > 0.f ? s.envmap_min_px : 16.f;
-       s.envmap_min_px = on ? kConfigPx : 0.f;
-     },
-     [](const CtrSettings& s) { return s.envmap_min_px > 0.f; }},
     {"skin_rows_f24", [](CtrSettings& s, bool on) { s.skin_rows_f24 = on; },
      [](const CtrSettings& s) { return s.skin_rows_f24; }},
     // early_depth: the config's mode (on, sky) or off; nothing when the config
@@ -585,8 +559,7 @@ CtrRenderer::CtrRenderer()
     set(BucketId::MERC_EYES_AFTER_PRIS, std::move(eyes));
   }
   // (AI-assisted) config.ini shadows = full: the game's shadow volumes (CtrShadow: stencil passes,
-  // after the level and most merc buckets, before the ocean whose stencil marks it leaves at 0).
-  // Else the bucket is skipped: with blob the game draws Jak's fake shadow instead.
+  // after the level and most merc buckets, before the ocean). Else the bucket is skipped.
   if (ctr_settings().shadows == CtrSettings::ShadowMode::Full) {
     if (ctr_gpu_has_stencil()) {
       set(BucketId::SHADOW, std::make_unique<CtrShadowRenderer>("shadow", (int)BucketId::SHADOW));
@@ -595,16 +568,13 @@ CtrRenderer::CtrRenderer()
     }
   }
   // the ocean (after the level and merc, like the PS2's ocean-near)
-  if (ctr_settings().ocean && ctr_settings().ocean_mode == CtrSettings::OceanMode::Full) {
-    // (AI-assisted) config.ini ocean = full: the PS2 ocean's DMA (draw-ocean), both buckets
+  if (ctr_settings().ocean) {
+    // the PS2 ocean's DMA (draw-ocean), both buckets
     auto full = std::make_shared<CtrOceanFull>();
     set(BucketId::OCEAN_MID_AND_FAR, std::make_unique<CtrOceanFullBucket>(
                                          "ocean", (int)BucketId::OCEAN_MID_AND_FAR, full, false));
     set(BucketId::OCEAN_NEAR,
         std::make_unique<CtrOceanFullBucket>("ocean", (int)BucketId::OCEAN_NEAR, full, true));
-  } else {
-    set(BucketId::OCEAN_NEAR,
-        std::make_unique<CtrOceanRenderer>("ocean", (int)BucketId::OCEAN_NEAR));
   }
   // the sky (CtrSky: render-sky-3ds's packet), or the background when there is no sky (the ND
   // logo, interiors): a full screen gradient in the time of day's erase color. The sky textures
@@ -1674,7 +1644,6 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   // (AI-assisted) before vram_textures: the reserved VRAM for compact textures is taken there
   ctr_gpu_set_compact_textures(ctr_settings().compact_textures ? 1 : 0);
   ctr_gpu_set_early_depth(ctr_settings().early_depth ? 1 : 0);
-  ctr_gpu_set_proctex(ctr_settings().proctex_glows ? 1 : 0);
   ctr_gpu_set_vram_textures(ctr_settings().vram_textures ? 1 : 0);
   ctr_gpu_set_mip_mode(ctr_settings().mipmaps);
   ctr_gpu_set_overlap(ctr_settings().overlap ? 1 : 0);

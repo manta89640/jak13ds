@@ -47,7 +47,7 @@ void apply_rules(CtrSettings& s) {
   // the shadow volumes need the stencil buffer, which the 16-bit depth buffer doesn't have
   // (kmachine.cpp's choice of what the game builds follows the same rule)
   if (s.shadows == CtrSettings::ShadowMode::Full && s.depth16) {
-    s.shadows = CtrSettings::ShadowMode::Blob;
+    s.shadows = CtrSettings::ShadowMode::Off;
     s.shadows_full_wanted = true;
   }
   // (AI-assisted) early_depth = sky: the early test is for the sky drawn last
@@ -100,19 +100,9 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
     } else if (key == "sprites") {
       s.sprites = parse_bool(v);
     } else if (key == "ocean") {
-      if (v == "flat" || v == "waves" || v == "full") {
-        s.ocean = true;
-        s.ocean_mode = v == "full"    ? CtrSettings::OceanMode::Full
-                       : v == "waves" ? CtrSettings::OceanMode::Waves
-                                      : CtrSettings::OceanMode::Flat;
-      } else {
-        s.ocean = parse_bool(v);
-        s.ocean_mode = CtrSettings::OceanMode::Flat;
-      }
+      s.ocean = !(v == "off" || v == "0" || v == "false" || v == "no");
     } else if (key == "ocean_texture_rate") {
       s.ocean_texture_rate = std::clamp(std::atoi(v.c_str()), 1, 8);  // (AI-assisted)
-    } else if (key == "ocean_near_alpha") {
-      s.ocean_near_alpha = std::clamp(f, 0.f, 1.f);  // (AI-assisted)
     } else if (key == "distort") {
       s.distort = parse_bool(v);
     } else if (key == "envmap") {
@@ -121,27 +111,19 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.merc_gen_lod = parse_bool(v);  // (AI-assisted)
     } else if (key == "merc_lod_scale") {
       s.merc_lod_scale = std::clamp(f, 0.05f, 1.f);  // (AI-assisted) (kmachine.cpp reads it too)
-    } else if (key == "merc_tex_sort") {
-      s.merc_tex_sort = parse_bool(v);  // (AI-assisted)
-    } else if (key == "envmap_batch") {
-      s.envmap_batch = parse_bool(v);  // (AI-assisted)
     } else if (key == "distort_copy") {
       s.distort_copy_rows = v != "full";  // (AI-assisted) rows | full
     } else if (key == "shadows") {
-      // (AI-assisted) full | blob | off (on = full)
+      // full | off (on = full; the removed all = full, blob = off)
       if (v == "full" || v == "all" || parse_bool(v)) {
         s.shadows = CtrSettings::ShadowMode::Full;
-      } else if (v == "blob") {
-        s.shadows = CtrSettings::ShadowMode::Blob;
-      } else if (v == "off" || v == "0" || v == "false" || v == "no") {
+      } else if (v == "blob" || v == "off" || v == "0" || v == "false" || v == "no") {
         s.shadows = CtrSettings::ShadowMode::Off;
       } else {
         if (!s_quiet) {
-          lg::warn("[ctr] {}:{}: shadows = {}: expected full, all, blob or off", path.string(), n, v);
+          lg::warn("[ctr] {}:{}: shadows = {}: expected full or off", path.string(), n, v);
         }
       }
-    } else if (key == "shadow_casters") {
-      s.shadow_casters = std::clamp(std::atoi(v.c_str()), 0, 64);  // (AI-assisted)
     } else if (key == "sky") {
       s.sky = parse_bool(v);
     } else if (key == "clouds") {
@@ -161,8 +143,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.steady_pacing = v != "fast";
     } else if (key == "fps_cap") {
       s.fps_cap = std::atoi(v.c_str()) >= 60 ? 60 : 30;
-    } else if (key == "max_sprites") {
-      s.max_sprites = std::atoi(v.c_str());
     } else if (key == "rgba4_as_rgba8") {
       if (v != "auto") {
         s.rgba4_as_rgba8 = parse_bool(v);
@@ -175,8 +155,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       }
     } else if (key == "mip_bias") {
       s.mip_bias = std::clamp(f, -4.f, 4.f);  // (AI-assisted)
-    } else if (key == "envmap_min_px") {
-      s.envmap_min_px = std::clamp(f, 0.f, 400.f);  // (AI-assisted, fidelity2)
     } else if (key == "skin_rows_f24") {
       s.skin_rows_f24 = parse_bool(v);  // (AI-assisted)
     } else if (key == "mipmaps") {
@@ -221,17 +199,8 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.depth16 = parse_bool(v);
     } else if (key == "compact_textures") {
       s.compact_textures = parse_bool(v);
-    } else if (key == "proctex_glows") {
-      s.proctex_glows = parse_bool(v);
-    } else if (key == "sprite_max_size") {
-      s.sprite_max_size = std::max(0.f, f);
-    } else if (key == "sprite_min_alpha") {
-      s.sprite_min_alpha = std::clamp(std::atoi(v.c_str()), 2, 64);  // (AI-assisted)
     } else if (key == "sprite_alpha_discard") {
       s.sprite_alpha_discard = parse_bool(v);  // (AI-assisted)
-    } else if (key == "particle_fill") {
-      // (AI-assisted, perfv2) off | on | strong (or 0 | 1 | 2)
-      s.particle_fill = v == "strong" || v == "2" ? 2 : (parse_bool(v) ? 1 : 0);
     } else if (key == "vis_culling") {
       s.vis_culling = parse_bool(v);
     } else if (key == "run_culling") {
@@ -251,8 +220,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.stream_debug = parse_bool(v);  // (AI-assisted, streaming)
     } else if (key == "stream_reserve_kb") {
       s.stream_reserve_kb = std::clamp((int)f, 1024, 32768);  // (AI-assisted, streaming)
-    } else if (key == "tod_pulse_step") {
-      s.tod_pulse_step = std::clamp(std::atoi(v.c_str()), 0, 32);  // (AI-assisted, citadel)
     } else if (key == "tie_lod_px") {
       s.tie_lod_px = std::clamp(f, 0.25f, 16.f);  // (AI-assisted, title-popin)
     } else if (key == "neighbour_vis") {
@@ -316,7 +283,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
                key == "vfp_vector" ||  // (AI-assisted, vfpvec) native_bones_vfp.h
                key == "log_async" || key == "c3l_read_buffer" || key == "text_scale" ||
                key == "text_min_height" ||
-               key == "button_art" || key == "preset" || key == "gpu_micro" ||
+               key == "preset" || key == "gpu_micro" ||
                key == "gpu_micro_ident" || key == "vram_probe" ||
                ctr_cfg_is_user_alias(key.c_str())) {
       // not the renderer's (preset, particles, text_size: ctr_config_presets.h, applied as the
@@ -384,7 +351,6 @@ CtrSettings load() {
     s.vista_distance = 3000.f;
     s.shrub_scale = 0.8f;
     s.mipmaps = 1;
-    s.envmap_min_px = 16.f;
   }
   const auto dir = file_util::get_jak_project_dir();
   // (AI-assisted) config.ini, the one settings file (the sound and system keys in it are read by
@@ -518,13 +484,13 @@ std::string CtrSettings::summary() const {
   };
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
-      "merc {} sprites {} ({}) "
-      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} envmap_min_px {:.0f} skin_rows_f24 {} skin_clip_f24 {} "
-      "color16 {} early_depth {}{} top_block32 {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} particle_fill {} "
-      "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} fog_alpha {} tex1_gating {} shader_opt {} cmd_dedup {} cull_ties {} cull_merc {} merc_fog {} raw_cmds {} opaque_alpha {} tex_cache_clear {} asm_tex {} asm_mem {} "
+      "merc {} sprites {} "
+      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} merc_gen_lod {} (x{:.2f}) shadows {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} skin_rows_f24 {} skin_clip_f24 {} "
+      "color16 {} early_depth {}{} top_block32 {} compact_textures {} sprite_alpha_discard {} "
+      "vis_culling {} run_culling {} tie_lod {} streaming {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} fog_alpha {} tex1_gating {} shader_opt {} cmd_dedup {} cull_ties {} cull_merc {} merc_fog {} raw_cmds {} opaque_alpha {} tex_cache_clear {} asm_tex {} asm_mem {} "
       "ocean_tex_half {} fast_clock {} "
       // (AI-assisted) Oct 16: the rest of the keys, so the line holds every setting
-      "fog_start {:.2f} overlap {} frame_pacing {} fps_cap {} ocean_texture_rate {} ocean_near_alpha {:.2f} "
+      "fog_start {:.2f} overlap {} frame_pacing {} fps_cap {} ocean_texture_rate {} "
       "shader_basic {} defer_flush {} cmd_dump {} render_watchdog {} stats_period {:.0f}s "
       "color_stream {}"
       "{}{}{}{}{}{}{}",
@@ -533,21 +499,18 @@ std::string CtrSettings::summary() const {
       fmt::format("{:.2f}", shrub_scale),
       !(tie_distance_scale > 0) ? std::string("none") : fmt::format("{:.1f}", tie_distance_scale),
       fog ? "on" : "off",
-      merc ? "on" : "off", sprites ? "on" : "off", max_sprites, pipeline ? "on" : "off",
-      frame_overlap2 == 2 ? "on" : (frame_overlap2 == 1 ? "clean" : "off"), !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
+      merc ? "on" : "off", sprites ? "on" : "off", pipeline ? "on" : "off",
+      frame_overlap2 == 2 ? "on" : (frame_overlap2 == 1 ? "clean" : "off"), ocean ? "on" : "off",
       sky ? "on" : "off", clouds ? "on" : "off", sky_last ? "on" : "off",
       skip_clear ? "on" : "off", distort ? "on" : "off", distort_copy_rows ? "rows" : "full",
-      envmap ? "on" : "off", envmap_batch ? "on" : "off", merc_tex_sort ? "on" : "off",
+      envmap ? "on" : "off",
       merc_gen_lod ? "on" : "off", merc_lod_scale,
-      // (AI-assisted) with depth16, full falls back to blob (no stencil)
-      shadows == ShadowMode::Full   ? "full"
-      : shadows == ShadowMode::Blob ? (shadows_full_wanted ? "blob (full needs the stencil: depth16)"
-                                                           : "blob")
-                                    : "off",
-      shadow_casters,
+      // with depth16, full falls back to off (no stencil)
+      shadows == ShadowMode::Full ? "full"
+      : shadows_full_wanted       ? "off (full needs the stencil: depth16)"
+                                  : "off",
       rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), mip_bias,
-      envmap_min_px,
       skin_rows_f24 ? "on" : "off", skin_clip_f24 ? "on" : "off", color16 ? "on" : "off",
       early_depth ? "on" : (early_depth_sky ? "sky" : "off"),
       early_depth_func || early_depth_clear
@@ -558,13 +521,12 @@ std::string CtrSettings::summary() const {
                         early_depth_clear)
           : std::string(),
       top_block32 == 1 ? "auto" : (top_block32 ? "on" : "off"),
-      compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
-      sprite_max_size, sprite_min_alpha, sprite_alpha_discard ? "on" : "off",
-      particle_fill == 2 ? "strong" : (particle_fill ? "on" : "off"),
+      compact_textures ? "on" : "off",
+      sprite_alpha_discard ? "on" : "off",
       vis_culling ? "on" : "off", run_culling ? "on" : "off", tie_lod ? "on" : "off",
       streaming ? fmt::format("on ({} KB, reserve {} KB)", stream_kb, stream_reserve_kb)
                 : std::string("off"),
-      tod_pulse_step, neighbour_vis ? "on" : "off", lowres_vista ? "on" : "off", vista_distance, fog_stage_skip ? "on" : "off", fog_alpha ? "on" : "off", tex1_gating ? "on" : "off", shader_opt ? "on" : "off", cmd_dedup ? (cmd_dedup_draw ? "on+draw" : "on") : "off", cull_ties ? (cull_flip ? "flip" : "on") : "off", cull_merc ? "on" : "off",
+      neighbour_vis ? "on" : "off", lowres_vista ? "on" : "off", vista_distance, fog_stage_skip ? "on" : "off", fog_alpha ? "on" : "off", tex1_gating ? "on" : "off", shader_opt ? "on" : "off", cmd_dedup ? (cmd_dedup_draw ? "on+draw" : "on") : "off", cull_ties ? (cull_flip ? "flip" : "on") : "off", cull_merc ? "on" : "off",
       merc_fog ? "on" : "off",
       raw_cmds ? "on" : "off",
       opaque_alpha ? "on" : "off",
@@ -573,7 +535,7 @@ std::string CtrSettings::summary() const {
       asm_mem ? "on" : "off",
       ocean_tex_half ? "on" : "off",
       fast_clock ? "on" : "off", fog_start, overlap ? "on" : "off", steady_pacing ? "steady" : "fast",
-      fps_cap, ocean_texture_rate, ocean_near_alpha, shader_basic ? "new" : "old",
+      fps_cap, ocean_texture_rate, shader_basic ? "new" : "old",
       defer_flush ? "on" : "off", cmd_dump ? "on" : "off", render_watchdog ? "on" : "off",
       stats_period, color_stream ? "on" : "off",
       gpu_profile ? " gpu_profile" : (gpu_profile_ab ? " gpu_profile ab" : ""),

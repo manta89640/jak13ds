@@ -30,7 +30,6 @@ static int lookup_jak2_texture_dest_offset(int, int) {
 }
 #endif
 
-#include "game/graphics/ctr/CtrButtonArt.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
 namespace {
@@ -1390,12 +1389,6 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
       key &= ~(0x3ffffull << 37);
     }
   }
-  // (AI-assisted) the 3DS button art (CtrButtonArt.h) changed where it goes: decode the textures
-  // it may draw on again
-  if (m_art_gen != ctr_button_art::generation()) {
-    m_art_gen = ctr_button_art::generation();
-    drop_art_textures();
-  }
   Entry* cached = find_cached(key);
   // (AI-assisted) valid while nothing pending is over it and its chunks hold what it was decoded
   // from (entry_sig: a few chunk ids, not the texture's bytes)
@@ -1474,8 +1467,6 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
     return nullptr;
   }
 
-  // (AI-assisted) the PS2 button symbols of the font and the progress menu -> 3DS buttons
-  ctr_button_art::patch(tex0, data.data(), w, h);
 #ifndef __3DS__
   {
     // (AI-assisted) host diagnosis: env CTR_TEX_DUMP=<dir> writes every decoded texture
@@ -1494,44 +1485,10 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   }
 #endif
 
-  // the texels with alpha, per alpha level (CtrTexture::box)
-  float box[8][4];
+  // the largest texel alpha (CtrTexture::max_alpha)
   int max_alpha = 0;
-  {
-    // the bounds of the texels whose alpha's highest bit is j, then those of j and above
-    int x0[8], y0[8], x1[8], y1[8];
-    for (int j = 0; j < 8; j++) {
-      x0[j] = w, y0[j] = h, x1[j] = -1, y1[j] = -1;
-    }
-    for (int y = 0; y < h; y++) {
-      const u32* row = data.data() + (size_t)y * w;
-      for (int x = 0; x < w; x++) {
-        const u32 a = row[x] >> 24;
-        if (a) {
-          const int j = 31 - __builtin_clz(a);
-          x0[j] = std::min(x0[j], x);
-          x1[j] = std::max(x1[j], x);
-          y0[j] = std::min(y0[j], y);
-          y1[j] = std::max(y1[j], y);
-          max_alpha = std::max(max_alpha, (int)a);
-        }
-      }
-    }
-    for (int j = 6; j >= 0; j--) {
-      x0[j] = std::min(x0[j], x0[j + 1]);
-      x1[j] = std::max(x1[j], x1[j + 1]);
-      y0[j] = std::min(y0[j], y0[j + 1]);
-      y1[j] = std::max(y1[j], y1[j + 1]);
-    }
-    for (int j = 0; j < 8; j++) {
-      box[j][0] = 0.f, box[j][1] = 0.f, box[j][2] = 1.f, box[j][3] = 1.f;
-      if (x1[j] >= 0) {
-        box[j][0] = (float)std::max(0, x0[j] - 1) / (float)w;
-        box[j][1] = (float)std::max(0, y0[j] - 1) / (float)h;
-        box[j][2] = (float)std::min(w, x1[j] + 2) / (float)w;
-        box[j][3] = (float)std::min(h, y1[j] + 2) / (float)h;
-      }
-    }
+  for (u32 c : data) {
+    max_alpha = std::max(max_alpha, (int)(c >> 24));
   }
 
   // the 3DS needs at least 8x8: repeat pixels (normalized coordinates stay the same)
@@ -1549,11 +1506,9 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   Entry e;
   e.tex.w = gw;
   e.tex.h = gh;
-  memcpy(e.tex.box, box, sizeof(box));
   e.tex.max_alpha = max_alpha;
-  // (AI-assisted) the smallest 3DS format that holds it (sprites, HUD, font), checked for being a
-  // radial glow (CtrSpriteRenderer draws those with the procedural texture unit)
-  e.tex.handle = ctr_gpu_tex_create_compact(gw, gh, (const uint8_t*)data.data(), CTR_TEX_CHECK_RADIAL);
+  // (AI-assisted) the smallest 3DS format that holds it (sprites, HUD, font)
+  e.tex.handle = ctr_gpu_tex_create_compact(gw, gh, (const uint8_t*)data.data(), 0);
   // Allocation pressure is temporary: no failed handle is kept, the lookups try again, as often
   // as keeps the decodes that end here near 1% of the render thread (1 ms per 32 texels)
   if (e.tex.handle < 0) {
@@ -1724,22 +1679,6 @@ void CtrVram::sweep_outdated() {
   }
   m_cache_gen++;  // (AI-assisted) the front cache may point at erased entries
   m_sweep_at = std::max<size_t>(256, m_cache.size() + 128);
-}
-
-void CtrVram::drop_art_textures() {
-  for (auto* map : {&m_cache, &m_stale}) {
-    for (auto it = map->begin(); it != map->end();) {
-      if (ctr_button_art::may_patch(it->first)) {
-        if (it->second.tex.handle >= 0) {
-          ctr_gpu_tex_delete(it->second.tex.handle);
-        }
-        it = map->erase(it);
-      } else {
-        ++it;
-      }
-    }
-  }
-  m_cache_gen++;  // the front cache may point at erased entries
 }
 
 void CtrVram::clear_cache() {

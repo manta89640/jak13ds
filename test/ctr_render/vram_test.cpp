@@ -24,11 +24,6 @@ void ctr_gpu_tex_delete(int) {}
 void ctr_gpu_tex_update(int, const uint8_t*) {}
 double ctr_gpu_time_ms() { return 0; }
 }
-namespace ctr_button_art {
-u32 generation() { return 0; }
-bool may_patch(u64) { return false; }
-bool patch(u64, u32*, int, int) { return false; }
-}  // namespace ctr_button_art
 
 void run_vram_tests() {
   for (bool sparse : {false, true}) {

@@ -38,7 +38,6 @@ set(RUNTIME_SOURCE
         graphics/gfx_test.cpp
         graphics/gfx.cpp
         graphics/pipelines/null.cpp
-        graphics/ctr/CtrButtonArt.cpp
         graphics/ctr/CtrDirect.cpp
         graphics/ctr/CtrLevel.cpp
         graphics/ctr/CtrStream.cpp

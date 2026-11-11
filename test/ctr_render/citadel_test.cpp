@@ -1,7 +1,5 @@
-// (AI-assisted) CPU-only checks for visible light rewrites and perspective-correct sprite trim.
+// CPU-only checks for visible light rewrites.
 #include "game/graphics/ctr/CtrLight.h"
-#include "game/graphics/ctr/CtrSpriteTrim.h"
-#include "game/graphics/ctr/CtrTodPulse.h"
 #include "check.h"
 
 #include <array>
@@ -113,100 +111,8 @@ void test_visible_lights() {
   check(touched > 0, "chunks without visibility groups must still update");
 }
 
-ctr_clip_vertex point(float s, float t) {
-  ctr_clip_vertex p{};
-  p.x = -2.f + 4.f * s + t;
-  p.y = 3.f + s - 5.f * t;
-  p.z = 0.5f - s + 0.25f * t;
-  p.w = -1.f + 3.f * s + 2.f * t;  // crosses the camera plane
-  p.s = s;
-  p.t = t;
-  return p;
-}
-
-void test_clip_trim() {
-  std::array<int, 4> order{0, 1, 2, 3};
-  const float box[4] = {0.125f, 0.25f, 0.875f, 0.75f};
-  do {
-    ctr_clip_vertex quad[4]{};
-    int select[4][2];
-    int k00 = -1, k10 = -1, k01 = -1;
-    for (int k = 0; k < 4; k++) {
-      const int corner = order[k];
-      const float s = (float)(corner & 1), t = (float)(corner >> 1);
-      quad[k] = point(s, t);
-      quad[k].a = (uint8_t)(20 + k);
-      select[k][0] = s ? 2 : 0;
-      select[k][1] = t ? 3 : 1;
-      if (corner == 0) k00 = k;
-      if (corner == 1) k10 = k;
-      if (corner == 2) k01 = k;
-    }
-    check(ctr_trim_clip_quad(quad, k00, k10, k01, select, box, box),
-          "affine quad must trim in every UV orientation");
-    for (int k = 0; k < 4; k++) {
-      const auto expected = point(box[select[k][0]], box[select[k][1]]);
-      check(std::abs(quad[k].x - expected.x) < 1e-6f &&
-                std::abs(quad[k].y - expected.y) < 1e-6f &&
-                std::abs(quad[k].z - expected.z) < 1e-6f &&
-                std::abs(quad[k].w - expected.w) < 1e-6f &&
-                quad[k].s == expected.s && quad[k].t == expected.t,
-            "trim must preserve the original perspective surface and UVs");
-      check(quad[k].a == 20 + k, "trim must preserve vertex alpha");
-    }
-  } while (std::next_permutation(order.begin(), order.end()));
-
-  ctr_clip_vertex quad[4] = {point(0, 0), point(1, 0), point(0, 1), point(1, 1)};
-  quad[3].z += 1.f;
-  ctr_clip_vertex before[4];
-  memcpy(before, quad, sizeof(quad));
-  const int select[4][2] = {{0, 1}, {2, 1}, {0, 3}, {2, 3}};
-  check(!ctr_trim_clip_quad(quad, 0, 1, 2, select, box, box) &&
-            memcmp(before, quad, sizeof(quad)) == 0,
-        "non-affine quads must retain their original geometry");
-}
-// (AI-assisted, levellod) tod_pulse_step's detector: citadel's mood light pulses, the day (also
-// the title's fast one, with its rounding wobble) never does
-void test_tod_pulse() {
-  auto run = [](auto weight, u64 frames) {
-    CtrTodPulse p;
-    u8 last[3] = {0, 0, 0};
-    bool first = true, fired = false;
-    for (u64 f = 1; f <= frames; f++) {
-      const int v = std::clamp((int)std::lround(weight(f)), 0, 255);
-      const u8 w[3] = {(u8)v, (u8)v, (u8)v};
-      if (first || memcmp(w, last, 3) != 0) {
-        fired = p.move(w, f) || fired;
-        memcpy(last, w, 3);
-        first = false;
-      }
-    }
-    return std::make_pair(fired, p.pulsing(frames));
-  };
-  // citadel: 0.875 +- 0.25 every 128 frames (30 fps) or 256 (fps_cap = 60)
-  for (double period : {128.0, 256.0}) {
-    const auto r = run([&](u64 f) { return 56.0 + 16.0 * std::sin(6.2831853 * f / period); }, 1200);
-    check(r.first && r.second, "a mood light's pulse must be found");
-  }
-  // the day: up and down over 1800 frames (the title's ~60x day), with a +-0.6 rounding wobble
-  const auto day = run(
-      [](u64 f) {
-        const double x = (double)(f % 3600) / 1800.0;
-        return 64.0 * (x < 1 ? x : 2 - x) + 0.6 * std::sin(f * 1.7);
-      },
-      7200);
-  check(!day.first, "the day's own motion must never count as a pulse");
-  // a weight standing at a step boundary (63 64 63 64 ...) is no pulse either
-  const auto wobble = run([](u64 f) { return 63.5 + 0.6 * std::sin(f * 0.9); }, 2000);
-  check(!wobble.first, "rounding wobble must not count as a pulse");
-  // a slow swell (a full cycle over 30 s) is the day's kind of motion
-  const auto slow = run([](u64 f) { return 40.0 + 20.0 * std::sin(6.2831853 * f / 900.0); }, 3600);
-  check(!slow.first, "a slow cycle must not count as a pulse");
-}
 }  // namespace
 
 void run_citadel_tests() {
   test_visible_lights();
-  test_clip_trim();
-  test_tod_pulse();
 }

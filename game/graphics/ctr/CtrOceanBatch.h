@@ -45,7 +45,6 @@ class CtrOceanBatch {
   void begin(const ctr_draw_state& st, const u8 fog[3]) {
     m_state = st;
     memcpy(m_fog, fog, 3);
-    m_failed = false;
   }
   //! (AI-assisted, j1ocean) the sky reflection's texture for the env draws (-1: drawn without)
   void set_env(int tex) { m_env_tex = tex; }
@@ -63,12 +62,11 @@ class CtrOceanBatch {
   /*!
    * Room for n vertices and m indices in clip space (ctr_gpu_ocean_full_draw_clip, the native
    * programs): written at *v and *idx (vertex numbers from *first on), then commit(n, m). false:
-   * no vertex memory left this frame (nothing is drawn).
+   * no vertex memory left this frame for this piece (it alone is not drawn).
    */
   bool reserve_clip(int n, int m, ctr_ocean_full_vertex** v, u16** idx, int* first,
                     bool env = false) {
-    if (m_failed || !mode(env && m_env_tex >= 0 ? kModeEnv : kModeClip) ||
-        !room(n + 2 * m, 4 * m)) {
+    if (!mode(env && m_env_tex >= 0 ? kModeEnv : kModeClip) || !room(n + 2 * m, 4 * m)) {
       return false;
     }
     *v = m_v + m_nv;
@@ -319,7 +317,7 @@ class CtrOceanBatch {
    * ADC bit set joins the primitive without drawing a triangle.
    */
   void prim(const u8* data, u32 nloop, bool fan) {
-    if (m_failed || nloop < 3) {
+    if (nloop < 3) {
       return;
     }
     if (!mode(kModeGs) || !room((int)nloop, 3 * (int)nloop)) {
@@ -379,9 +377,10 @@ class CtrOceanBatch {
       return true;
     }
     flush();
-    // the next chunk (smaller when the frame's vertex memory is short)
-    for (int size = std::max(kChunkVerts, std::max(n, m / 3)); size >= n && 3 * size >= m;
-         size /= 4) {
+    // the next chunk, smaller when the frame's vertex memory is short, down to this piece's own
+    // size; only a piece that doesn't fit even so is left out (the next one tries again)
+    const int need = std::max(n, (m + 2) / 3);
+    for (int size = std::max(kChunkVerts, need);; size = std::max(size / 4, need)) {
       if (ctr_gpu_ocean_full_reserve(size, 3 * size, &m_v, &m_i)) {
         m_open = true;
         m_max_v = size;
@@ -389,8 +388,10 @@ class CtrOceanBatch {
         m_nv = m_ni = 0;
         return true;
       }
+      if (size == need) {
+        break;
+      }
     }
-    m_failed = true;  // no room this frame: the rest of the bucket isn't drawn
     dropped++;
     dropped_unlogged++;
     return false;
@@ -418,7 +419,7 @@ class CtrOceanBatch {
 
   ctr_draw_state m_state;
   u8 m_fog[3] = {0, 0, 0};
-  bool m_open = false, m_failed = false;
+  bool m_open = false;
   int m_mode = kModeGs;
   int m_env_tex = -1;  // (AI-assisted, j1ocean)
   bool m_env_mapped = false;

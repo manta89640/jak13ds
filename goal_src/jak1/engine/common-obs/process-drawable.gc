@@ -200,14 +200,16 @@
 ;; origin; process-taskable's look-at), and anything within ANIM_LOD_DIST of the camera or of Jak
 ;; (plus its bounding radius), so collision prims attached to joints are always current where Jak
 ;; can touch them.
-;; When such an actor comes into view, the draw that sets was-drawn uses the pose and origin from
-;; its last update (at most 3 frames old, from far away); the next frame updates it again.
+;; An actor whose sphere from its last update, grown by ANIM_LOD_MOVE, could pass this frame's
+;; draw test (in view, within its draw distance) is never skipped: the test reads the origin its
+;; joint math makes, so it enters the view in the frame it should, in its current pose.
 ;; An actor that asks for its joint math once and then sleeps (a pose set before sleep-code: the
 ;; pressed snow-bumper, buttons, switches) never asks again, so a skipped request is remembered
 ;; (*anim-lod-skipped*) and done on the next frame if the actor didn't ask again by then.
 (#when TARGET_3DS
   (define-extern *pc-3ds-anim-lod* symbol)
   (defconstant ANIM_LOD_DIST (meters 30))
+  (defconstant ANIM_LOD_MOVE (meters 4))
   (define *anim-lod-frame* 0)
   (define *anim-lod-skipped* (new 'global 'boxed-array handle MATRIX_ENGINE_AMOUNT))
   ;; (AI-assisted) new boxed-array sets length = the allocated count (like *matrix-engine*,
@@ -218,6 +220,14 @@
     (dotimes (i (-> arr length))
       (if (= (-> arr i) h) (return #t)))
     #f)
+  (defun anim-lod-may-show? ((dc draw-control))
+    "Could dc's sphere (its last joint math's, grown by ANIM_LOD_MOVE) be drawn this frame?"
+    (let ((s (new 'stack-no-clear 'sphere)))
+      (vector+! s (-> dc origin) (-> dc bounds))
+      (set! (-> s r) (+ (-> dc bounds w) ANIM_LOD_MOVE))
+      (and (sphere-in-view-frustum? s)
+           (< (vector-vector-distance s (-> *math-camera* trans))
+              (+ (the-as float (-> dc lod-set lod (-> dc lod-set max-lod) dist)) ANIM_LOD_MOVE)))))
   (defun anim-lod-skip? ((pd process-drawable))
     "Skip this frame's joint math for pd (see above)?"
     (let ((dc (-> pd draw)))
@@ -234,7 +244,8 @@
            (let* ((r (+ (-> dc bounds w) ANIM_LOD_DIST))
                   (r2 (* r r)))
              (and (< r2 (vector-vector-distance-squared (-> dc origin) (-> *math-camera* trans)))
-                  (< r2 (vector-vector-distance-squared (-> dc origin) (-> *target* control trans)))))))))
+                  (< r2 (vector-vector-distance-squared (-> dc origin) (-> *target* control trans)))))
+           (not (anim-lod-may-show? dc))))))
 
 (defun execute-math-engine ()
   (#when PC_PORT

@@ -2,7 +2,6 @@
 # The 3DS renderer: game/graphics/ctr (renderer, GL-free) + the citro3d backend and its shader.
 
 target_sources(og3ds_runtime PRIVATE
-  ${OG_ROOT}/game/graphics/ctr/CtrButtonArt.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrDirect.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrEye.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrLevel.cpp

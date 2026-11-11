@@ -43,6 +43,7 @@ class CtrMercRenderer : public CtrBucketRenderer {
   /*! Blend shapes: move the model's face vertices for these weights (all 0: the base pose). */
   void apply_blerc(const struct CtrLevelData& lev,
                    const struct CtrMercModelData& model,
+                   int mesh,
                    const float* weights);
   /*! (AI-assisted) Copy the game's vertex data of the model's rewritten effects (c3l v12
    * MercModEffect) to m_mod_bytes: per effect the unpacked vertex count, then per unpacked
@@ -51,9 +52,14 @@ class CtrMercRenderer : public CtrBucketRenderer {
                   const u8* effect_ptrs,
                   int effect_count,
                   const struct CtrMercModelData& model);
-  /*! (AI-assisted) Unpack what gather_mod copied (from m_mod_bytes[pos]) into the model's mesh. */
-  // ys, ns: the ripple y and normal x/z scales taken out of its bones
-  void apply_mod(const struct CtrMercModelData& model, size_t pos, float ys = 1.f, float ns = 1.f);
+  /*! (AI-assisted) Unpack what gather_mod copied (from m_mod_bytes[pos]) into the mesh (the
+   * model's or its instance's copy). ys, ns: the ripple y and normal x/z scales taken out of its
+   * bones */
+  void apply_mod(const struct CtrMercModelData& model,
+                 int mesh,
+                 size_t pos,
+                 float ys = 1.f,
+                 float ns = 1.f);
 
  public:
   /*! Game thread, before the frame is handed to the render thread: copy the bone matrices the
@@ -65,18 +71,16 @@ class CtrMercRenderer : public CtrBucketRenderer {
     int missing = 0;
     int draws = 0;
     int bad_bones = 0;
-    int env_batches = 0;  // (AI-assisted) envmap_batch: queues drawn
-    int env_small = 0;    // (AI-assisted, fidelity2) envmap_min_px: shine draws left out
     // (AI-assisted, shinefold) shine draws over the same triangles as the opaque base draw just
     // before them: the ones a one-pass base + shine draw could replace (performance.md "11.")
     int env_foldable = 0;
     int env_drawn = 0;
-    int sorted_draws = 0;  // (AI-assisted) merc_tex_sort: draws drawn from the queue
     int gen_lod = 0;       // (AI-assisted) merc_gen_lod: models drawn with the generated LOD
     int culled = 0;        // (AI-assisted) cull_merc: draws drawn with back face culling
     int mirrored = 0;      // (AI-assisted) ... marked ones not culled: a bone mirrors
     int unsent_bones = 0;  // (AI-assisted) draws using a bone the game didn't send
     int fogged = 0;        // (AI-assisted, far-fog) merc_fog: draws with the game's fog
+    int vtx_shared = 0;    // instances with rewritten vertices over the copies' limits
   };
 
  private:
@@ -129,39 +133,7 @@ class CtrMercRenderer : public CtrBucketRenderer {
   static constexpr int kFindSlots = 64;
   FindSlot m_find[kFindSlots];
 
-  // (AI-assisted) config envmap_batch: the envmap draws of the bucket are queued and drawn
-  // together (one skin -> env -> skin program switch pair, and the skin draws keep their uniforms)
-  // at its end, or before a draw that would see them differently: one that blends or doesn't
-  // write depth (the shine adds Cs * Ad after the base it shines on, which the depth test of the
-  // base passes; an opaque draw in front hides it the same way before or after)
-  struct QueuedDraw {
-    ctr_draw_state st;
-    u32 clip, rows, lights;  // offsets in m_qdata
-    u32 rows_f24;            // (AI-assisted) offset in m_qf24 (~0u: none)
-    u32 bones_id;            // (AI-assisted) the palette's number (ctr_gpu_draw_skinned)
-    int palette_count;
-    float fade[4];
-    int mesh;
-    int first_index, index_count;
-    u32 model_rank, draw_index;  // merc_tex_sort: the order they're drawn in
-  };
-  std::vector<float> m_qdata;
-  // (AI-assisted) the queued palettes as skin_rows_f24 words (ctr_gpu_pack_skin_rows_f24)
-  std::vector<uint32_t> m_qf24;
-  std::vector<QueuedDraw> m_q_env;
-  u32 queue_floats(const float* src, int n);
-  void flush_env();
-  // (AI-assisted) config merc_tex_sort: the opaque depth-writing draws of models without blend
-  // shapes or rewritten vertices are queued too and drawn draw by draw across the instances of a
-  // model (draw 0 of every yeti, then draw 1, ...: each instance keeps its own draw order), so a
-  // texture is bound once for all of them. Flushed before a draw that blends or doesn't write
-  // depth, before the queued shine.
-  std::vector<QueuedDraw> m_q_opaque;
-  std::vector<u64> m_q_order;  // (AI-assisted) sort keys (flush_opaque)
-  std::vector<const void*> m_q_models;  // model rank -> model
-  void flush_opaque();
-  void flush_queues();
-  // (AI-assisted) merc_gen_lod / envmap_min_px hysteresis: per drawn instance its model, its first
+  // (AI-assisted) merc_gen_lod hysteresis: per drawn instance its model, its first
   // bone's place (world, from the frame's level camera; else camera space) and its decisions
   // (kInstUnknown: none yet). An instance takes over the decisions of the nearest unclaimed one of
   // the same model in the bucket's previous frame (within kInstMatch). Was keyed by the bone
@@ -173,7 +145,6 @@ class CtrMercRenderer : public CtrBucketRenderer {
     float pos[3];
     u8 world;      // pos is in world space
     u8 low;        // merc_gen_lod: drawn with the generated low LOD
-    u8 env_small;  // envmap_min_px: shine left out
     u8 used;       // (previous frame) taken over already
   };
   std::vector<InstState> m_inst_prev, m_inst_cur;  // prev: sorted by model

@@ -400,7 +400,6 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     return;
   }
   g_bones.keep();  // (AI-assisted) the snapshot and game memory change before the next frame
-  flush_queues();
   m_snap_valid = false;  // used up: the next frame needs a new snapshot
   // (AI-assisted) the cost of the rewritten vertices, once per level (the first one drawn with
   // them) after a few seconds of updates
@@ -422,13 +421,14 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
   if (rs.log_now && m_stats.models) {
     lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones, {} with the generated low LOD), "
-              "{} draws, {} envmap batches ({} shine draws left out: envmap_min_px; {} drawn, {} "
-              "over their opaque base draw's triangles: foldable), {} draws sorted by texture, {} with back faces culled "
-              "({} not: mirroring bone), {} palette bones not sent, {} draws with fog",
+              "{} draws ({} shine draws, {} "
+              "over their opaque base draw's triangles: foldable), {} with back faces culled "
+              "({} not: mirroring bone), {} palette bones not sent, {} draws with fog, {} "
+              "instances with rewritten vertices over the copies' limits",
               m_name, m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.gen_lod,
-              m_stats.draws, m_stats.env_batches, m_stats.env_small, m_stats.env_drawn,
-              m_stats.env_foldable, m_stats.sorted_draws, m_stats.culled,
-              m_stats.mirrored, m_stats.unsent_bones, m_stats.fogged);
+              m_stats.draws, m_stats.env_drawn,
+              m_stats.env_foldable, m_stats.culled,
+              m_stats.mirrored, m_stats.unsent_bones, m_stats.fogged, m_stats.vtx_shared);
     m_stats = Stats();
   }
 }
@@ -461,7 +461,7 @@ u32 CtrMercRenderer::inst_state(const void* model, const math::Vector4f& t) {
     s.pos[1] = t.y();
     s.pos[2] = t.z();
   }
-  s.low = s.env_small = kInstUnknown;
+  s.low = kInstUnknown;
   s.used = 0;
   auto it = std::lower_bound(m_inst_prev.begin(), m_inst_prev.end(), model,
                              [](const InstState& a, const void* m) {
@@ -483,7 +483,6 @@ u32 CtrMercRenderer::inst_state(const void* model, const math::Vector4f& t) {
   if (best) {
     best->used = 1;
     s.low = best->low;
-    s.env_small = best->env_small;
   }
   m_inst_cur.push_back(s);
   return (u32)(m_inst_cur.size() - 1);
@@ -564,90 +563,14 @@ void CtrMercRenderer::note_keira_shadow(const CtrMercModelData& model, u64 frame
   }
 }
 
-u32 CtrMercRenderer::queue_floats(const float* src, int n) {
-  const u32 at = (u32)m_qdata.size();
-  m_qdata.insert(m_qdata.end(), src, src + n);
-  return at;
-}
-
-void CtrMercRenderer::flush_env() {
-  if (!m_q_env.empty()) {
-    const float* d = m_qdata.data();
-    for (const auto& q : m_q_env) {
-      ctr_gpu_draw_skinned_env(&q.st, d + q.clip, d + q.rows, q.palette_count,
-                               q.rows_f24 == ~0u ? nullptr : m_qf24.data() + q.rows_f24,
-                               q.bones_id, q.fade, q.mesh, q.first_index, q.index_count);
-    }
-    m_stats.env_batches++;
-    m_q_env.clear();
-  }
-}
-
-void CtrMercRenderer::flush_opaque() {
-  if (m_q_opaque.empty()) {
-    return;
-  }
-  const u32 n = (u32)m_q_opaque.size();
-  // by texture (a bind clears the GPU's texture cache: each texture once for all the queued
-  // models), then model (in the order they came), draw and the instances in the order they came
-  // (the queue index). As one 64-bit key per draw (all distinct, so the same order as the
-  // comparison of the four), sorted without touching the queued draws
-  m_q_order.resize(n);
-  bool fits = n < (1u << 18);
-  for (u32 i = 0; i < n; i++) {
-    const auto& q = m_q_opaque[i];
-    const u32 tex = (u32)(q.st.tex + 1);
-    fits = fits && tex < (1u << 16) && q.model_rank < (1u << 14) && q.draw_index < (1u << 16);
-    m_q_order[i] = (u64)tex << 48 | (u64)q.model_rank << 34 | (u64)q.draw_index << 18 | i;
-  }
-  if (fits) {
-    std::sort(m_q_order.begin(), m_q_order.end());
-  } else {
-    // (never: more queued draws, textures, models or draws per model than the key holds)
-    for (u32 i = 0; i < n; i++) {
-      m_q_order[i] = i;
-    }
-    std::sort(m_q_order.begin(), m_q_order.end(), [&](u64 a, u64 b) {
-      const auto& qa = m_q_opaque[a];
-      const auto& qb = m_q_opaque[b];
-      if (qa.st.tex != qb.st.tex) {
-        return qa.st.tex < qb.st.tex;
-      }
-      if (qa.model_rank != qb.model_rank) {
-        return qa.model_rank < qb.model_rank;
-      }
-      if (qa.draw_index != qb.draw_index) {
-        return qa.draw_index < qb.draw_index;
-      }
-      return a < b;
-    });
-  }
-  const float* d = m_qdata.data();
-  for (u64 key : m_q_order) {
-    const auto& q = m_q_opaque[fits ? (u32)(key & 0x3ffff) : (u32)key];
-    ctr_gpu_draw_skinned(&q.st, d + q.clip, d + q.rows, q.palette_count,
-                         q.rows_f24 == ~0u ? nullptr : m_qf24.data() + q.rows_f24, q.bones_id,
-                         d + q.lights, q.mesh, q.first_index, q.index_count);
-  }
-  m_stats.sorted_draws += (int)n;
-  m_q_opaque.clear();
-  m_q_models.clear();
-}
-
-void CtrMercRenderer::flush_queues() {
-  flush_opaque();  // (the bases before their shine)
-  flush_env();
-  m_qdata.clear();
-  m_qf24.clear();
-}
-
 void CtrMercRenderer::apply_blerc(const CtrLevelData& lev,
                                   const CtrMercModelData& model,
+                                  int mesh,
                                   const float* weights) {
   if (model.scale <= 0.f) {
     return;
   }
-  u8* verts = (u8*)ctr_gpu_mesh_vertices(model.mesh);
+  u8* verts = vtx_vertices(model, mesh, m_levels->set_generation());
   if (!verts) {
     return;
   }
@@ -675,7 +598,7 @@ void CtrMercRenderer::apply_blerc(const CtrLevelData& lev,
     }
   }
   if (lo <= hi) {
-    ctr_gpu_mesh_flush(model.mesh, (int)(lo * sizeof(c3l::MercVertex)),
+    ctr_gpu_mesh_flush(mesh, (int)(lo * sizeof(c3l::MercVertex)),
                        (int)((hi - lo + 1) * sizeof(c3l::MercVertex)));
   }
 }
@@ -741,6 +664,96 @@ bool mod_covers_all(const CtrMercModelData& model) {
   }
   return model.vertex_count && n == model.vertex_count;
 }
+
+// Render thread, per model with rewritten vertices (for the loaded levels' generation): each mod
+// effect's last unpacked vertices (ModV), written again when the game doesn't unpack the effect,
+// so the mesh's buffer taken this frame never keeps an older update of it. The GPU reads a mesh's
+// vertices after the frame is built, so instances drawn after the first in a frame each get a
+// copy of the mesh (else all would show the last one's vertices); a few per model, within a
+// memory budget, beyond which they draw the first one's vertices.
+struct VtxModel {
+  const CtrMercModelData* model = nullptr;
+  std::vector<std::vector<u8>> mod_last;
+  int used = 0, used_last = 0;  // instances this frame and the last one
+  u64 base_frame = ~0ull;       // the frame the model's own mesh was last rewritten in
+  std::vector<int> copies;      // meshes of the 2nd, 3rd... instance
+};
+struct VtxRegistry {
+  u32 gen = ~0u;
+  u64 frame = ~0ull;
+  u32 copy_bytes = 0;
+  std::vector<VtxModel> models;
+};
+VtxRegistry g_vtx;
+constexpr int kVtxMaxCopies = 3;
+constexpr u32 kVtxCopyBudget = 512u << 10;
+VtxModel& vtx_model(const CtrMercModelData& model, u32 gen) {
+  if (g_vtx.gen != gen) {
+    for (auto& m : g_vtx.models) {
+      for (int c : m.copies) {
+        ctr_gpu_mesh_delete(c);
+      }
+    }
+    g_vtx.models.clear();
+    g_vtx.copy_bytes = 0;
+    g_vtx.gen = gen;
+  }
+  for (auto& m : g_vtx.models) {
+    if (m.model == &model) {
+      return m;
+    }
+  }
+  auto& m = g_vtx.models.emplace_back();
+  m.model = &model;
+  return m;
+}
+// The model's vertices for a rewrite of the mesh: the model's own mesh marked as rewritten this frame
+u8* vtx_vertices(const CtrMercModelData& model, int mesh, u32 gen) {
+  if (mesh == model.mesh) {
+    vtx_model(model, gen).base_frame = g_vtx.frame;
+  }
+  return (u8*)ctr_gpu_mesh_vertices(mesh);
+}
+// This instance of a model with rewritten vertices: the mesh it rewrites and draws; own: it may
+// rewrite it; always: it must (a copy, or the first instance of a model drawn more than once)
+struct VtxInstance {
+  int mesh;
+  bool own, always;
+};
+VtxInstance vtx_instance(const CtrMercModelData& model, u64 frame, u32 gen) {
+  VtxModel& m = vtx_model(model, gen);
+  if (g_vtx.frame != frame) {
+    g_vtx.frame = frame;
+    for (auto& o : g_vtx.models) {
+      o.used_last = o.used;
+      o.used = 0;
+    }
+  }
+  const int k = m.used++;
+  if (k == 0) {
+    return {model.mesh, true, m.used_last > 1};
+  }
+  if (k - 1 < (int)m.copies.size()) {
+    return {m.copies[k - 1], true, true};
+  }
+  // a new copy, of the model's mesh as the first instance rewrote it this frame (both buffers
+  // then hold the rest of the vertices as made; its moved ones are rewritten for this instance)
+  const u32 need = model.vertex_count * (u32)sizeof(c3l::MercVertex) * 2 + (u32)model.indices.size() * 2;
+  if (k - 1 < kVtxMaxCopies && m.base_frame == frame && model.vertex_count &&
+      !model.indices.empty() && g_vtx.copy_bytes + need <= kVtxCopyBudget) {
+    const void* src = ctr_gpu_mesh_vertices(model.mesh);
+    const int c = src ? ctr_gpu_skinned_mesh_create(src, (int)model.vertex_count,
+                                                    model.indices.data(),
+                                                    (int)model.indices.size())
+                      : -1;
+    if (c >= 0) {
+      m.copies.push_back(c);
+      g_vtx.copy_bytes += need;
+      return {c, true, true};
+    }
+  }
+  return {model.mesh, false, false};
+}
 }  // namespace
 
 void CtrMercRenderer::gather_mod(const u8* ee_mem,
@@ -790,7 +803,11 @@ void CtrMercRenderer::gather_mod(const u8* ee_mem,
   }
 }
 
-void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos, float ys, float ns) {
+void CtrMercRenderer::apply_mod(const CtrMercModelData& model,
+                                int mesh,
+                                size_t pos,
+                                float ys,
+                                float ns) {
   const double t0 = ctr_gpu_time_ms();
   // the copy is followed to its end before the vertices' other buffer is taken (the loop below
   // gives up where it can't be followed: the buffer would be left half written)
@@ -831,13 +848,29 @@ void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos, float
       }
     }
   }
-  u8* verts = (u8*)ctr_gpu_mesh_vertices(model.mesh);
+  u8* verts = vtx_vertices(model, mesh, m_levels->set_generation());
   if (!verts) {
     return;
   }
+  VtxModel& vm = vtx_model(model, m_levels->set_generation());
+  vm.mod_last.resize(model.mod.size());
   const u8* p = m_mod_bytes.data() + pos;
   const u8* end = m_mod_bytes.data() + m_mod_bytes.size();
   u32 lo = UINT32_MAX, hi = 0;
+  // the effect's vertices to the model's (in vertex order)
+  auto write = [&](const CtrMercModEffect& e, const ModV* src) {
+    for (const auto& d : e.dests) {
+      u8* dst = verts + sizeof(c3l::MercVertex) * d.vertex;
+      const ModV& v = src[d.src];
+      memcpy(dst, v.pos, 6);
+      memcpy(dst + 12, v.st, 4);
+      memcpy(dst + 20, v.nrm, 4);  // normal + pad
+    }
+    if (!e.dests.empty()) {
+      lo = std::min<u32>(lo, e.dests.front().vertex);
+      hi = std::max<u32>(hi, e.dests.back().vertex);
+    }
+  };
   for (const auto& e : model.mod) {
     if (p + 4 > end) {
       return;
@@ -845,12 +878,16 @@ void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos, float
     u32 total;
     memcpy(&total, p, 4);
     p += 4;
+    std::vector<u8>& last = vm.mod_last[&e - model.mod.data()];
     if (total != e.vidx_end) {
-      // not unpacked (or not the fragments we expect): the vertices stay as they are, and the
-      // rest of the copy can't be followed
+      // not unpacked (or not the fragments we expect): its last unpacked vertices again (this
+      // buffer may hold an older update), and the rest of the copy can't be followed
       m_mod_bad++;
       if (total) {
         return;
+      }
+      if (last.size() == (size_t)e.vidx_end * sizeof(ModV)) {
+        write(e, (const ModV*)last.data());
       }
       continue;
     }
@@ -936,22 +973,13 @@ void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos, float
                "normal {} (1/127); ripple y x{}, normal x/z x{}",
                model.name, e.effect, total, e.dests.size(), dxz, dy, model.scale, dst, dn, ys, ns);
     }
-    for (const auto& d : e.dests) {
-      u8* dst = verts + sizeof(c3l::MercVertex) * d.vertex;
-      const ModV& s = src[d.src];
-      memcpy(dst, s.pos, 6);
-      memcpy(dst + 12, s.st, 4);
-      memcpy(dst + 20, s.nrm, 4);  // normal + pad
-    }
-    if (!e.dests.empty()) {
-      lo = std::min<u32>(lo, e.dests.front().vertex);
-      hi = std::max<u32>(hi, e.dests.back().vertex);
-    }
+    last.assign((const u8*)src, (const u8*)(src + total));
+    write(e, src);
     m_mod_effects++;
     m_mod_verts += total;
   }
   if (lo <= hi) {
-    ctr_gpu_mesh_flush(model.mesh, (int)(lo * sizeof(c3l::MercVertex)),
+    ctr_gpu_mesh_flush(mesh, (int)(lo * sizeof(c3l::MercVertex)),
                        (int)((hi - lo + 1) * sizeof(c3l::MercVertex)));
   }
   model.mod_checked = true;
@@ -1232,8 +1260,16 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     clip = hud;
   }
 
-  // blend shapes (faces): the game's weights follow the flags (Merc2::handle_pc_model)
-  if (model->blerc_count && model->keira_rig) {
+  // the mesh this instance draws (models with rewritten vertices: see vtx_instance)
+  VtxInstance vi{model->mesh, true, false};
+  if (model->blerc_count || !model->mod.empty()) {
+    vi = vtx_instance(*model, rs.frame_idx, m_levels->set_generation());
+    m_stats.vtx_shared += !vi.own;
+  }
+  const int mesh = vi.mesh;
+  // blend shapes (faces): the game's weights follow the flags (Merc2::handle_pc_model). An
+  // instance over the copies' limits (!own) is drawn with the first instance's vertices
+  if (vi.own && model->blerc_count && model->keira_rig) {
     // (AI-assisted) her face: Jak's weights mapped to her targets, and her blinks
     float weights[c3l::kMercBlercWeights];
     float jak_w[c3l::kMercBlercWeights];
@@ -1242,19 +1278,23 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       memcpy(jak_w, input + 32, sizeof(jak_w));
     }
     const bool any = ctr_keira::face_weights(uses_blerc ? jak_w : nullptr, rs.frame_idx, weights);
-    if (any || model->blerc_moved) {
-      apply_blerc(*lev, *model, weights);
-      model->blerc_moved = any;
+    if (any || model->blerc_moved || vi.always) {
+      apply_blerc(*lev, *model, mesh, weights);
+      if (mesh == model->mesh) {
+        model->blerc_moved = any;
+      }
     }
-  } else if (model->blerc_count) {
+  } else if (vi.own && model->blerc_count) {
     const bool uses_blerc = flags.bitflags & 4;
-    if (uses_blerc || model->blerc_moved) {
+    if (uses_blerc || model->blerc_moved || vi.always) {
       float weights[c3l::kMercBlercWeights] = {};
       if (uses_blerc) {
         memcpy(weights, input + 32, sizeof(weights));
       }
-      apply_blerc(*lev, *model, weights);
-      model->blerc_moved = uses_blerc;
+      apply_blerc(*lev, *model, mesh, weights);
+      if (mesh == model->mesh) {
+        model->blerc_moved = uses_blerc;
+      }
     }
   }
 
@@ -1266,9 +1306,10 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       m_mod_cursor++;
     }
     if (m_snap_valid) {
-      if (m_mod_cursor < m_mod_snaps.size() && m_mod_snaps[m_mod_cursor].ordinal == ordinal) {
+      if (vi.own && m_mod_cursor < m_mod_snaps.size() &&
+          m_mod_snaps[m_mod_cursor].ordinal == ordinal) {
         const ModSnap& ms = m_mod_snaps[m_mod_cursor];
-        apply_mod(*model, ms.pos, ms.ys, ms.ns);
+        apply_mod(*model, mesh, ms.pos, ms.ys, ms.ns);
       }
     } else {
       const int ec = std::min<int>(flags.effect_count, 64);
@@ -1294,7 +1335,9 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
           }
         }
       }
-      apply_mod(*model, 0, ys, ns);
+      if (vi.own) {
+        apply_mod(*model, mesh, 0, ys, ns);
+      }
     }
   }
 
@@ -1434,22 +1477,13 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   const CtrSettings& cs = ctr_settings();
   const bool cull_merc = cs.cull_merc && !hud_model;
   bool palette_mirrors = false;
-  // (AI-assisted) envmap_batch: this model's clip matrix and current palette in m_qdata (~0u: not
-  // there yet)
-  // merc_tex_sort: not for models whose vertices change per instance (blend shapes, rewritten
-  // vertices: one mesh); their shine is queued too then (its base may be in the queue)
-  const bool tex_sort = cs.merc_tex_sort && !model->blerc_count && model->mod.empty();
-  const bool env_batch = cs.envmap_batch || tex_sort;
-  u32 q_clip = ~0u, q_rows = ~0u, q_lights = ~0u;
-  u32 model_rank = ~0u;
   // (AI-assisted) the palette's number for the GPU (new with every palette made) and its float24
-  // words for skin_rows_f24, made once per palette (not at every upload: the shine pass and the
-  // texture sorted draws upload a palette again after other models' palettes)
+  // words for skin_rows_f24, made once per palette (not at every upload: the shine pass uploads
+  // a palette again)
   u32 palette_id = 0;
   const bool rows_f24 = ctr_gpu_skin_rows_f24_on() != 0;
   uint32_t palette_f24[9 * CTR_MAX_PALETTE];
   bool palette_f24_made = false;
-  u32 q_f24 = ~0u;
   // not HUD models: their rows are changed after they are made
   const bool bone_cache = !hud_model;
   const u32 bone_stamp = bone_cache ? next_bone_rows_stamp() : 0;
@@ -1478,18 +1512,6 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       palette_f24_made = true;
     }
     return palette_f24;
-  };
-  auto queue_f24 = [&](int count) -> u32 {
-    if (!rows_f24) {
-      return ~0u;
-    }
-    if (q_f24 == ~0u) {
-      const uint32_t* w = direct_f24(count);
-      const int n = 9 * std::min<int>(count, CTR_MAX_PALETTE);
-      q_f24 = (u32)m_qf24.size();
-      m_qf24.insert(m_qf24.end(), w, w + n);
-    }
-    return q_f24;
   };
   // (AI-assisted) config merc_gen_lod: the converter's generated low LOD of a model with only lod0
   // (the yeti; (j1ocean) never the pickups: CtrLevel gives those no gen_draws,
@@ -1532,43 +1554,6 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
 #endif
     }
   }
-  // (AI-assisted, fidelity2) envmap_min_px: the model's size on the top screen (its bounding
-  // sphere's diameter: 2 x the quantization range x the largest scale of its sent bones, over the
-  // nearest of their origins' w, as x/w spans the 400 pixels), worked out at its first envmap draw;
-  // below the limit no shine pass. (AI-assisted) The largest and nearest bone, as hud_depth_spread
-  // (was the first bone only: a tiny or hidden root, the power cell's, lost its shine at any size);
-  // per instance (inst_state) it is left out below 0.8 x the limit and back above it, so a shiny
-  // model near the limit doesn't flicker between shiny and dull
-  int env_small = -1;  // -1: not worked out yet
-  auto env_too_small = [&]() -> bool {
-    if (env_small < 0) {
-      env_small = 0;
-      if (cs.envmap_min_px > 0.f && !hud_model && i > 0 && slots[0] < 128) {
-        const float* cw = m_clip + 12;
-        float w = INFINITY;
-        float col = 0;
-        for (int b = 0; b < i; b++) {
-          if (slots[b] >= 128) {
-            continue;
-          }
-          const math::Vector4f* t = bones[slots[b]]->tmat;
-          w = std::min(w, -(cw[0] * t[3].x() + cw[1] * t[3].y() + cw[2] * t[3].z()) + cw[3]);
-          for (int c = 0; c < 3; c++) {
-            col = std::max(col, t[c].x() * t[c].x() + t[c].y() * t[c].y() + t[c].z() * t[c].z());
-          }
-        }
-        const float sx = std::sqrt(m_clip[0] * m_clip[0] + m_clip[1] * m_clip[1] +
-                                   m_clip[2] * m_clip[2]);
-        const float px = 2.f * model->scale * 32767.f * std::sqrt(col) * sx * 200.f;
-        InstState& s = inst_now();
-        const float limit = cs.envmap_min_px * (s.env_small == 0 ? 0.8f : 1.f);
-        // behind the camera or nearer than its size: keep it
-        env_small = w > 0.f && px < limit * w ? 1 : 0;
-        s.env_small = (u8)env_small;
-      }
-    }
-    return env_small == 1;
-  };
   // (AI-assisted, shinefold) this model's opaque base draws' triangle ranges (first, count)
   u64 base_ranges[32];
   int n_base_ranges = 0;
@@ -1580,10 +1565,6 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     float fade[4] = {0, 0, 0, 0};
     if (envmap) {
       if (draw.effect >= effect_count || !cs.envmap || no_envmap) {
-        continue;
-      }
-      if (env_too_small()) {
-        m_stats.env_small++;
         continue;
       }
       const u8* f = fades + 4 * draw.effect;
@@ -1602,8 +1583,6 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     const bool same_palette = rows_of && rows_of->palette_count == draw.palette_count &&
                               !memcmp(rows_of->palette, draw.palette, draw.palette_count);
     if (!same_palette) {
-      q_rows = ~0u;
-      q_f24 = ~0u;
       palette_id = next_palette_id();
       palette_f24_made = false;
     }
@@ -1723,31 +1702,9 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       }
       // emerc.frag: texture * fade * 2, no alpha test, the envmap mode's blending (adds a shine)
       st.atest = CTR_TEST_ALWAYS;
-      if (env_batch) {
-        if (q_clip == ~0u) {
-          q_clip = queue_floats(clip, 16);
-        }
-        if (q_rows == ~0u) {
-          q_rows = queue_floats(palette_rows, 12 * std::min<int>(draw.palette_count, CTR_MAX_PALETTE));
-        }
-        QueuedDraw q;
-        q.st = st;
-        q.clip = q_clip;
-        q.rows = q_rows;
-        q.rows_f24 = queue_f24(draw.palette_count);
-        q.bones_id = palette_id;
-        q.lights = 0;
-        q.palette_count = draw.palette_count;
-        memcpy(q.fade, fade, sizeof(fade));
-        q.mesh = model->mesh;
-        q.first_index = (int)draw.first_index;
-        q.index_count = (int)draw.index_count;
-        m_q_env.push_back(q);
-      } else {
-        ctr_gpu_draw_skinned_env(&st, clip, palette_rows, draw.palette_count,
-                                 direct_f24(draw.palette_count), palette_id, fade, model->mesh,
-                                 draw.first_index, draw.index_count);
-      }
+      ctr_gpu_draw_skinned_env(&st, clip, palette_rows, draw.palette_count,
+                               direct_f24(draw.palette_count), palette_id, fade, mesh,
+                               draw.first_index, draw.index_count);
       m_stats.draws++;
       continue;
     }
@@ -1775,51 +1732,8 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     if (opaque && n_base_ranges < 32) {  // (AI-assisted, shinefold)
       base_ranges[n_base_ranges++] = (u64)draw.first_index << 32 | draw.index_count;
     }
-    if (tex_sort && opaque && draw.eye_id == 0xff) {
-      if (q_clip == ~0u) {
-        q_clip = queue_floats(clip, 16);
-      }
-      if (q_rows == ~0u) {
-        q_rows = queue_floats(palette_rows, 12 * std::min<int>(draw.palette_count, CTR_MAX_PALETTE));
-      }
-      if (q_lights == ~0u) {
-        q_lights = queue_floats(light_data, 28);
-      }
-      if (model_rank == ~0u) {
-        auto it = std::find(m_q_models.begin(), m_q_models.end(), (const void*)draws);
-        model_rank = (u32)(it - m_q_models.begin());
-        if (it == m_q_models.end()) {
-          m_q_models.push_back(draws);
-        }
-      }
-      QueuedDraw q;
-      q.st = st;
-      q.clip = q_clip;
-      q.rows = q_rows;
-      q.rows_f24 = queue_f24(draw.palette_count);
-      q.bones_id = palette_id;
-      q.lights = q_lights;
-      q.palette_count = draw.palette_count;
-      memset(q.fade, 0, sizeof(q.fade));
-      q.mesh = model->mesh;
-      q.first_index = (int)draw.first_index;
-      q.index_count = (int)draw.index_count;
-      q.model_rank = model_rank;
-      q.draw_index = (u32)(&draw - draws->data());
-      m_q_opaque.push_back(q);
-      m_stats.draws++;
-      continue;
-    }
-    // (AI-assisted) envmap_batch / merc_tex_sort: the queues before a draw that blends or doesn't
-    // write depth (it would change what the shine adds to, or be covered by it), and before any
-    // draw of a sorted model that isn't queued (an eye: after its face, as in the model)
-    if ((!m_q_env.empty() || !m_q_opaque.empty()) && (!opaque || tex_sort)) {
-      flush_queues();
-      q_clip = q_rows = q_lights = q_f24 = ~0u;
-      model_rank = ~0u;
-    }
     ctr_gpu_draw_skinned(&st, clip, palette_rows, draw.palette_count,
-                         direct_f24(draw.palette_count), palette_id, light_data, model->mesh,
+                         direct_f24(draw.palette_count), palette_id, light_data, mesh,
                          draw.first_index, draw.index_count);
     m_stats.draws++;
   }

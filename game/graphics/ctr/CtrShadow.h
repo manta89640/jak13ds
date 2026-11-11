@@ -85,7 +85,6 @@ class CtrShadowVolumes {
     int bad_entries = 0;      // triangles / edges with an index outside the vertex tables
     int bad_packets = 0;      // index lists that didn't fit their transfer, unknown entry points
     int no_camera = 0;        // index lists before the constants and matrix
-    int capped = 0;           // (AI-assisted) left out by shadow_casters (smallest / furthest)
     int clipped = 0;          // triangles cut to the guard band (or the near / far plane)
     int cut_planes[6] = {};   // ... per plane (outcode bits 0-5)
   };
@@ -102,16 +101,6 @@ class CtrShadowVolumes {
   void set_output(ctr_clip_vertex* verts, u16* front);
   //! The transfer starts an object (its vertex table): the output is needed from here on.
   static bool starts_object(const DmaTransfer& t);
-  //! (AI-assisted) config shadow_casters: how big the object whose vertex table starts with this
-  //! transfer looks from the camera (its vertices' bounding sphere radius over the distance of its
-  //! nearest side); 0 for bad numbers. center: its bounding box's center (camera space), if asked.
-  static float object_score(const DmaTransfer& t, float center[3] = nullptr);
-  //! (AI-assisted) after begin: only the objects k with keep[k] != 0 (in DMA order; objects past
-  //! n are kept) are drawn; nullptr: all
-  void set_keep(const u8* keep, int n) {
-    m_keep = keep;
-    m_keep_n = n;
-  }
   //! One DMA transfer of the shadow bucket: the constants, matrix, vertex tables, index lists with
   //! their MSCAL, and the end packets with the shadow color; anything else is ignored.
   void transfer(const DmaTransfer& t);
@@ -190,9 +179,6 @@ class CtrShadowVolumes {
 
   Stats m_stats;
   std::vector<Prim>* m_trace = nullptr;
-  const u8* m_keep = nullptr;
-  int m_keep_n = 0;
-  int m_obj_index = 0;  // the objects started this frame
 };
 
 /*! The shadow bucket: the volumes of all objects in three draws (see the top of this file). */
@@ -209,13 +195,6 @@ class CtrShadowRenderer : public CtrBucketRenderer {
   u16* m_indices = nullptr;
   bool m_reserved = false;
   int m_no_room = 0;  // frames whose GPU vertex memory was full (logged at most every 300)
-  // (AI-assisted) shadow_casters: each object's score, which ones are drawn
-  std::vector<float> m_scores;
-  std::vector<u8> m_keep;
-  std::vector<int> m_order;
-  // (AI-assisted) the objects' centers this frame, and those of the ones drawn last frame (an
-  // object near one of those scores kIncumbent x more: no blinking at the cut)
-  std::vector<std::array<float, 3>> m_centers, m_kept_prev;
 };
 
 /*!

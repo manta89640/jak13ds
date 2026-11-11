@@ -22,9 +22,9 @@ constexpr int kTopVertexDataAddr = 4;
 constexpr int kBottomVertexDataAddr = 174;
 constexpr int kCapIndexDataAddr = 344;
 constexpr int kWallIndexDataAddr = 600;
-// the frame's vertex memory taken (u16 indices)
+// the frame's vertex memory taken (u16 indices: 1.5 per vertex), at most and at least
 constexpr int kReserveVerts = 12000;
-constexpr int kReserveIndices = 18000;
+constexpr int kMinReserveVerts = 64;
 }  // namespace
 
 CtrShadowJak2Renderer::CtrShadowJak2Renderer(std::string name, int id)
@@ -34,25 +34,20 @@ CtrShadowJak2Renderer::CtrShadowJak2Renderer(std::string name, int id)
 
 bool CtrShadowJak2Renderer::reserve() {
   if (!m_reserved && !m_full) {
-    // (AI-assisted, j2gaps) the whole reservation is ~372 KB of the frame's 512 KB of vertex
-    // memory: after a busy particle bucket (SHADOW2 comes after PARTICLES) it didn't fit and the
-    // bucket drew no shadow at all. Smaller ones before giving up (a frame's shadow volumes
-    // usually take a few thousand vertices); the room not used goes back after the draw.
-    // (a step that can't fit isn't asked for: a refused reservation counts as a dropped draw)
+    // As many vertices (and 1.5 indices each) as the frame's vertex memory has left, at most
+    // kReserveVerts; the room not used goes back after the draw. Was 1/1, 1/2, 1/4 or 1/8 of it:
+    // with less than the smallest step (46.5 KB) left, every shadow of the frame was dropped even
+    // when the bucket needed a few KB.
     const size_t room = ctr_gpu_vertex_room();
-    for (int div = 1; div <= 8 && !m_reserved; div *= 2) {
-      const size_t need =
-          (((size_t)(kReserveVerts / div) * sizeof(ctr_clip_vertex) + 15) & ~(size_t)15) +
-          (((size_t)(kReserveIndices / div) * 2 + 15) & ~(size_t)15);
-      if (need > room && div < 8) {
-        continue;
-      }
-      m_reserved = ctr_gpu_clip_reserve(kReserveVerts / div, kReserveIndices / div, &m_verts,
-                                        &m_indices) != 0;
-      if (m_reserved) {
-        m_cap_verts = kReserveVerts / div;
-        m_cap_indices = kReserveIndices / div;
-      }
+    const size_t per_vert = sizeof(ctr_clip_vertex) + 3;
+    const int verts =
+        (int)std::min<size_t>(kReserveVerts, room > 64 ? (room - 64) / per_vert : 0) & ~7;
+    if (verts >= kMinReserveVerts) {
+      m_reserved = ctr_gpu_clip_reserve(verts, verts / 2 * 3, &m_verts, &m_indices) != 0;
+    }
+    if (m_reserved) {
+      m_cap_verts = verts;
+      m_cap_indices = verts / 2 * 3;
     }
     m_full = !m_reserved;
     if (m_reserved && (int)m_back.size() < m_cap_indices) {

@@ -33,7 +33,6 @@
 
 #include "game/graphics/ctr/CtrRenderer.h"
 #include "game/graphics/ctr/CtrKeiraRig.h"
-#include "game/graphics/ctr/CtrTodPulse.h"
 #include "game/graphics/ctr/c3l_format.h"
 #include "game/graphics/ctr/c3l_reader.h"
 #include "game/graphics/ctr/ctr_gpu.h"
@@ -109,6 +108,9 @@ struct CtrMercModelData {
   // (AI-assisted) where the mesh's data is in the file, to make it again after a load that ran out
   // of memory: first MercVertex and count, merc index range (index_end 0: not possible)
   u32 file_vertex = 0, vertex_count = 0, index_first = 0, index_end = 0;
+  // models whose vertices are rewritten (blend shapes, mod): the mesh's indices, for the copies of
+  // the instances drawn after the first in a frame (CtrMercRenderer)
+  std::vector<u16> indices;
 };
 
 // The PS2's shine distance of Jak 1's envmapped ties (draw-inline-array-instance-tie): an instance
@@ -431,14 +433,6 @@ struct CtrLevelData {
     u32 apal_mask = 0;
     u8 wa[8] = {};
     u32 keep_alpha = 0xff000000u;
-    // per entry the palettes holding it back (tod_pulse_step) would put it a color unit or
-    // more off; the held palettes' own versions (pal_hver, hlut: only the moves taken while held,
-    // so a group with none of those palettes bright skips the moves in between)
-    std::vector<u8> color_bright;
-    u32 pal_hver[8] = {};
-    u32 hlut[256] = {};
-    u8 held_w[8][3] = {};
-    u8 held_wa[8] = {};
     // "light" palettes: used by few colors (the lamps, the lava glow: the game moves their weights
     // every frame); per chunk its vertices with a light color (by the light palettes they use),
     // rewritten alone when only those move
@@ -450,18 +444,6 @@ struct CtrLevelData {
     u8 weights[8][3] = {};
     u8 target_w[8][3] = {};
     bool blended_valid = false;  // weights taken at least once
-    // (AI-assisted, citadel) config tod_pulse_step: per palette its pulse detector (CtrTodPulse.h;
-    // levellod), the frame of its last move, the palettes logged as pulsing, and the level draws a
-    // pulsing palette was held (statistics)
-    CtrTodPulse pulse[8];
-    u64 pulse_move[8] = {};
-    u8 pulse_logged = 0;
-    u32 pulse_held = 0;
-    // the palettes found pulsing in an earlier load of the level (TodSeen) and the frame of the
-    // level's first draw: those count as pulsing from the start (until they don't turn around for
-    // as long as a pulse is recognised by)
-    u8 pulse_known = 0;
-    u64 first_frame = 0;
     // versions: + 1 per change of target_w (dver: of its day palettes); per palette its last;
     // lut[mask]: the last of the palettes in mask
     u32 ver = 0, dver = 0;
@@ -493,7 +475,6 @@ struct CtrLevelData {
     std::vector<u16> run_group;  // per run (CtrLevelData::vis_runs): its group in the chunk
     std::vector<u32> chunk_min_ver, chunk_min_dver, chunk_light_ver;
     std::vector<u8> chunk_mask, chunk_scanned;
-    std::vector<u8> chunk_bright;  // its groups' bright palettes (VisGroup::bright)
     std::vector<int> chunk_mesh;
     // the title's fast day: per chunk its vertices' table entries (CtrLevel.cpp tod_entries), so a
     // whole rewrite reads 2 bytes a vertex, not its 12-byte record; gone with the title or the mesh
@@ -507,7 +488,7 @@ struct CtrLevelData {
       }
       return (u32)(colors.size() + muls.size() * sizeof(c3l::TodMul) + color_mask.size() +
                    table.size() * 8 + cver.size() * 4 + group_list.size() * 4 + akind.size() +
-                   akinds.size() * 13 + color_bright.size() +
+                   akinds.size() * 13 +
                    groups.size() * sizeof(VisGroup) + run_group.size() * 2 +
                    chunk_group_first.size() * 24 + chunk_entries.size() * 4 + entries_bytes) +
              lights;
@@ -1582,7 +1563,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_tod_black_late = 0;   // group rewrites left to a later frame while the screen is black
   // (AI-assisted) groups rewritten, chunks drawn behind; sampled level draws, the most day moves a
   // group drawn was behind, draws with one 2 or more behind
-  u64 m_tod_spread = 0, m_tod_fresh = 0, m_tod_held = 0;
+  u64 m_tod_spread = 0, m_tod_fresh = 0;
   // (AI-assisted, fable1) heavy frames (the last level draw's vertices drawn >= 3x the table):
   // every second one takes no new weights (draw_level); the count for the statistics
   bool m_tod_heavy = false;

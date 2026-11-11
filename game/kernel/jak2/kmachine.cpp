@@ -13,7 +13,6 @@
 #include "common/util/string_util.h"
 
 #include "game/external/discord_jak2.h"
-#include "game/graphics/ctr/CtrButtonArt.h"
 #include "game/graphics/display.h"
 #include "game/graphics/jak2_texture_remap.h"
 #include "game/kernel/common/Symbol4.h"
@@ -776,22 +775,17 @@ void InitMachine_PCPort() {
         on ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
   });
 #endif
-  // config.ini shadows: only full draws Jak II's shadow volumes (CtrShadowJak2;
-  // Jak II has no blob shadow, so blob is off), and only with the stencil buffer (not depth16 =
-  // on). Otherwise the game doesn't make them either (drawable.gc, TARGET_3DS: no
-  // shadow-execute-all). Other builds: always.
-  // shadows = all: every caster at any distance (the PC port's extended shadows); full: the
-  // PS2's distances (foreground.gc, citizen.gc, vehicle.gc, mountain-obs.gc)
+  // config.ini shadows: full draws Jak II's shadow volumes (CtrShadowJak2) at the PS2's
+  // distances, only with the stencil buffer (not depth16 = on); off: the game doesn't make them
+  // either (drawable.gc, TARGET_3DS: no shadow-execute-all). Other builds: always.
   {
     bool volumes = true;
-    bool all = false;
 #ifdef __3DS__
     char v[32];
     if (ctr_config_get("shadows", v, sizeof(v))) {
       const std::string sh(v);
       volumes = !(sh == "blob" || sh == "off" || sh == "0" || sh == "no" || sh == "false" ||
                   sh == "none");
-      all = sh == "all";
     }
     if (volumes && ctr_config_bool("depth16", 0)) {
       volumes = false;
@@ -799,8 +793,6 @@ void InitMachine_PCPort() {
 #endif
     intern_from_c("*pc-3ds-shadow-volumes?*")->value() =
         volumes ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
-    intern_from_c("*pc-3ds-shadow-all?*")->value() =
-        all ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
   }
   // (AI-assisted, j2cuts) config.ini anim_lod (default on, Jak 1's rule) and anim_lod_far (default
   // off): joint math of far models every 2nd-4th frame (process-drawable.gc execute-math-engine).
@@ -861,13 +853,14 @@ void InitMachine_PCPort() {
 #endif
     intern_from_c("*pc-3ds-shadow-count*")->value() = (u32)count;
   }
-  // config.ini ocean = full: the PS2 ocean's DMA (draw-ocean) for CtrOceanFull instead of
-  // ocean-3ds-packet's for CtrOceanRenderer (ocean.gc, TARGET_3DS)
+  // config.ini ocean (on unless off): the PS2 ocean's DMA (draw-ocean) for CtrOceanFull, else
+  // no ocean (ocean.gc, TARGET_3DS)
   {
     bool ocean_full = false;
 #ifdef __3DS__
     char v[32];
-    ocean_full = ctr_config_get("ocean", v, sizeof(v)) && std::string(v) == "full";
+    const std::string o = ctr_config_get("ocean", v, sizeof(v)) ? v : "on";
+    ocean_full = !(o == "off" || o == "0" || o == "false" || o == "no");
 #else
     if (const char* e = getenv("OPENGOAL_OCEAN_FULL")) {
       ocean_full = e[0] == '1';
@@ -875,22 +868,6 @@ void InitMachine_PCPort() {
 #endif
     intern_from_c("*pc-3ds-ocean-full*")->value() =
         ocean_full ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
-  }
-  // config.ini button_art, off by default as Jak 1's (game/graphics/ctr/CtrButtonArt.h)
-  {
-    bool button_art = false;
-#ifdef __3DS__
-    button_art = ctr_config_bool("button_art", 0);
-#else
-    if (const char* e = getenv("OPENGOAL_BUTTON_ART")) {
-      button_art = atoi(e) != 0;
-    }
-#endif
-    ctr_button_art::set_jak2(true);
-    ctr_button_art::set_enabled(button_art);
-    intern_from_c("*pc-3ds-button-art*")->value() =
-        button_art ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
-    lg::info("3DS button symbols {} (config.ini button_art)", button_art ? "on" : "off");
   }
 }
 

@@ -39,9 +39,8 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"skip_clear", "off"},       {"early_depth", "off"},
     {"tie_lod", "off"},          {"gpu_micro", "off"},         {"merc_fog", "off"},
     {"streaming", "off"}, /* (AI-assisted, streaming) */
-    {"particle_fill", "off"}, /* (AI-assisted, perfv2) */
     /* (AI-assisted, fidelity2) the full texture and shine detail */
-    {"mip_bias", "0"},   {"envmap_min_px", "0"},
+    {"mip_bias", "0"},
     /* the Nov 11 options, on by default */
     {"vram_vertices", "off"}, {"index_u8", "off"},
     {"merc_one_bone", "off"}, {"vfp_vector", "off"},    {"anim_lod_far", "off"},
@@ -57,7 +56,7 @@ static const ctr_cfg_kv ctr_cfg_preset_bench[] = {
 /* full: every civilian, particle and shadow (slower: under 30 fps in busy places) */
 static const ctr_cfg_kv ctr_cfg_preset_full[] = {
     {"traffic_density", "1"},
-    {"particle_density", "1"}, {"shadows", "all"},
+    {"particle_density", "1"},
 };
 /* (AI-assisted, j2cuts) fast: normal plus Jak II's behaviour-changing cuts of the game thread
  * (jak2_perf.md "Behaviour-changing cuts"): far citizens' joint math at 15 / 10 Hz, lower detail
@@ -100,12 +99,8 @@ typedef struct {
 } ctr_cfg_alias;
 
 static const ctr_cfg_alias ctr_cfg_aliases[] = {
-    {"particles", "full", "max_sprites", "2176"},
-    {"particles", "full", "sprite_max_size", "0"},
-    {"particles", "full", "sprite_min_alpha", "2"},
-    {"particles", "reduced", "max_sprites", "1000"},
-    {"particles", "reduced", "sprite_max_size", "0.5"},
-    {"particles", "reduced", "sprite_min_alpha", "6"},
+    {"particles", "full", "sprites", "on"},
+    {"particles", "reduced", "sprites", "on"},
     /* (AI-assisted, j1ocean) the safe preset's particles = reduced keeps the old 0.7 density */
     {"particles", "reduced", "particle_density", "0.7"},
     {"text_size", NULL, "text_scale", NULL},
@@ -156,7 +151,6 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"depth16", "off"},
     {"text_scale", "1"},
     {"text_min_height", "9"},
-    {"button_art", "off"},
 };
 
 /* Keys that were removed (with their code): ignored with a note, not an "unknown setting".
@@ -185,6 +179,11 @@ static const char* const ctr_cfg_removed[] = {
     "depth_reuse", "depth_reuse_min", "min_run_px", "cone_cull", "far_copy", "far_copy_distance",
     "cull_terrain", "ps2_lod_scale", "auto_detail", "auto_detail_gpu_ms", "shrub_distance_max",
     "tie_distance_scale_max", "shrub_scale_max",
+    /* models / effects strip: removed with their code */
+    "ocean_near_alpha", "envmap_batch", "merc_tex_sort", "envmap_min_px",
+    "max_sprites", "sprite_max_size", "sprite_min_alpha", "particle_fill",
+    "proctex_glows", "shadow_casters", "tod_pulse_step",
+    "button_art",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

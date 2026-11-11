@@ -25,10 +25,10 @@ fog = on
 # how far away scenery is drawn, in meters (bigger = further but slower; 0 = no limit)
 draw_distance = 500
 
-# shadows: full (every shadow, like the PS2) | blob (only a dark spot under Jak) | off
+# shadows: full (every shadow, like the PS2) | off
 shadows = full
 
-# particles (smoke, sparks, glows): full (like the PS2) | reduced (fewer and smaller, faster)
+# particles (smoke, sparks, glows): full (like the PS2) | reduced (fewer, faster)
 particles = full
 
 # size of all game text: 1 = normal, 2 = twice as big, 0.5 = half
@@ -45,8 +45,7 @@ ocean = full
   beyond 150 m drawn by their simpler vista copies (both games; the fixed detail floor); Jak II
   also half the city's civilians and civilian vehicles (`traffic_density = 0.5`), 70% of the
   particles (`particle_density = 0.7`) and shadows at the PS2's distances (`shadows = full`).
-- **full**: `traffic_density = 1`, `particle_density = 1`, `shadows = all` (every shadow at any
-  distance).
+- **full**: `traffic_density = 1`, `particle_density = 1`.
   Slower: Jak II's Haven City runs under 30 fps with it.
 - **fast** (AI-assisted, Nov 11; not yet run on a console): normal plus Jak II's cuts of the game
   thread, which change what you see a little: far city people animate at 15 or 10 frames a second

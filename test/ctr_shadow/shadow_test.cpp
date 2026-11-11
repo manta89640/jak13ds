@@ -61,7 +61,7 @@ void ctr_gpu_set_skip_color_clear(int) {}
 int ctr_gpu_top_histogram(unsigned int*) {
   return 0;
 }
-// (AI-assisted) the renderer reads shadow_casters (the test drives the decoder directly)
+// the renderer reads the settings (the test drives the decoder directly)
 namespace ctr_settings_detail {
 const CtrSettings* g_settings = nullptr;
 const CtrSettings& first_use() {

@@ -47,33 +47,16 @@ struct CtrSettings {
   // renderers
   bool merc = true;
   bool sprites = true;
+  // config ocean = on | off (full: on): the PS2 ocean (draw-ocean, CtrOceanFull)
   bool ocean = true;
-  // (AI-assisted) config ocean = off | flat | waves | full (on = flat). flat: CtrOcean's static grid;
-  // waves: the grid plus real waves near the camera; full: the PS2 ocean (draw-ocean)
-  enum class OceanMode { Flat, Waves, Full };
-  OceanMode ocean_mode = OceanMode::Full;  // (AI-assisted) full since the Oct 16 config cleanup
   // (AI-assisted) ocean = full: the wave texture is made every nth frame (1 = every frame; the
   // render thread's 1-1.7 ms for it, half as often by default)
   int ocean_texture_rate = 2;
-  // (AI-assisted) ocean = full: the near ocean's alpha is at least this (0..1; the PS2's is 0.5
-  // within 12 m of the camera, 1 from 24 m on). (j1ocean) 0 = the PS2's own alpha: the sky
-  // reflection is drawn now (ctr_gpu_ocean_full_draw_env), the old 0.6 stood in for it.
-  float ocean_near_alpha = 0.f;
   // the sprite distorter: particles that warp what's behind them (portals, heat haze); each frame
   // with such particles costs one copy of the screen
   bool distort = true;  // (AI-assisted) on (Oct 16 config cleanup; was off: square sprites on hardware, fixed)
   // the envmap shine of merc models (power cells, precursor metal): a second pass over their draws
   bool envmap = true;
-  // (AI-assisted, fidelity2) envmap_min_px: no shine pass for models smaller than this on the top
-  // screen (their bounding sphere's diameter in pixels; 0 = every model). HUD models always keep it
-  float envmap_min_px = 0.f;
-  // (AI-assisted) the envmap draws of a merc bucket queued and drawn together at its end (or before
-  // a blended / no depth write draw): one skin -> env shader switch pair instead of one per draw
-  bool envmap_batch = true;
-  // (AI-assisted) a merc bucket's opaque draws of models drawn more than once (crates, yetis, ...)
-  // drawn draw by draw across the instances: one texture bind per draw of the model instead of
-  // per instance, but the bones are uploaded for each draw then
-  bool merc_tex_sort = true;  // (AI-assisted) on: Snowy host stats -7..-45% merc texture binds
   // (AI-assisted) models with only lod0 (the yeti, ...) switch to the converter's generated low LOD
   // (c3l::kMercGenLodSuffix: same vertices, ~40-60% of the triangles) beyond max(25 m, 12.5 x the
   // model's size) x merc_lod_scale. Needs .c3l files from a converter with --gen-lod
@@ -86,17 +69,12 @@ struct CtrSettings {
   // room, and distort sprites under 8 pixels are left out (no copy at all when none is left).
   // full: every frame with distort sprites copies the whole screen into linear memory (as before)
   bool distort_copy_rows = true;
-  // (AI-assisted) config shadows = full | blob | off (on = full). full: the game's shadow volumes
-  // (Jak, enemies, objects; the game runs shadow-execute-all, CtrShadow draws them with the stencil
-  // buffer); blob: a dark spot under Jak only (the game's fake shadow, no volumes); off: none.
-  // full needs the stencil buffer: with depth16 it is blob (the game applies the same rule).
-  enum class ShadowMode { Off, Blob, Full };
+  // config shadows = full | off (on = full). full: the game's shadow volumes (Jak, enemies,
+  // objects; the game runs shadow-execute-all, CtrShadow draws them with the stencil buffer).
+  // full needs the stencil buffer: with depth16 it is off (the game applies the same rule).
+  enum class ShadowMode { Off, Full };
   ShadowMode shadows = ShadowMode::Full;
-  bool shadows_full_wanted = false;  // full in config.ini, blob because of depth16 (for the log)
-  // (AI-assisted) shadows = full: at most this many objects' shadows per frame, the ones that look
-  // biggest from the camera (bounding sphere over distance: Jak's normally is one); 0 = all
-  // (AI-assisted) default 0 since Oct 12 (all casters, like the PS2); 6 was the 30 fps era cut
-  int shadow_casters = 0;
+  bool shadows_full_wanted = false;  // full in config.ini, off because of depth16 (for the log)
   // the sky (time of day sky texture, clouds); off: the screen is cleared to the fog color
   bool sky = true;
   // (AI-assisted) the clouds over the sky (one added pass over the sky's part of the screen)
@@ -124,10 +102,6 @@ struct CtrSettings {
   // (AI-assisted) frame_pacing: steady (default) shows each frame a fixed time after the game
   // made it, so motion is even; fast shows it as soon as the GPU is done (lower latency, uneven)
   bool steady_pacing = true;
-  // world space sprites (particles) per frame; the HUD is always drawn
-  // (AI-assisted) default 2176 since Oct 12: the game's own particle capacity (1920 2d + 256 3d,
-  // sparticle.gc), so nothing the PS2 draws is left out; 1000 was the 30 fps era cut
-  int max_sprites = 2176;
   // RGBA4 level/model textures stored as RGBA8 (twice the memory): Azahar renders RGBA4 as noise.
   // Default (auto): on in the emulator, off on the 3DS.
   bool rgba4_as_rgba8 = false;
@@ -150,9 +124,7 @@ struct CtrSettings {
   // moment and the GPU time without it is logged ([ctr] gpu profile). The picture flickers.
   bool gpu_profile = false;
   // (AI-assisted) gpu_profile = ab: instead, the switches of the A/B table (CtrRenderer.cpp
-  // kAbSwitches: run_culling, cull_ties, vista, fog_stage_skip, shadows, envmap, distort, and the
-  // snow-gpu-impl keys distort_copy, shadow_casters, sprite_*, envmap_batch, merc_*, clouds) are
-  // turned on and off in turns, in windows of ~1.5 s, and the GPU busy time of each setting is
+  // kAbSwitches) are turned on and off in turns, in windows of ~1.5 s, and the GPU busy time of each setting is
   // logged per level ([ctr] gpu ab). Nothing vanishes for good; the picture changes slightly.
   bool gpu_profile_ab = false;
   // (AI-assisted) the GPU's own counters (busy % of each pipeline stage, memory traffic) over 10 s
@@ -215,27 +187,15 @@ struct CtrSettings {
   // on: that target always (a test; early depth still needs its self-test)
   int top_block32 = 0;  // off: on hardware, game frames lose blocks with block32 early depth
   // (AI-assisted) 16-bit depth buffer instead of 24-bit + stencil: half the depth traffic, but
-  // 256x coarser depth (z-fighting far away) and no stencil (shadows = full becomes blob, the
-  // ocean = waves marks are left out). Off by default.
+  // 256x coarser depth (z-fighting far away) and no stencil (shadows = full becomes off). Off by
+  // default.
   bool depth16 = false;
   // sprite and HUD textures in the smallest 3DS format that holds them (8 / 16 bits per texel),
   // and in reserved VRAM (with vram_textures)
   bool compact_textures = true;
-  // glows (radial gradient textures) from the procedural texture unit: no texels read
-  bool proctex_glows = true;
-  // world sprites (particles, glows) at most this fraction of the screen height (0 = no limit)
-  float sprite_max_size = 0.f;  // (AI-assisted) 0 since Oct 12, as the PS2 (0.5 was the 30 fps cut)
-  // (AI-assisted) world sprites with a half size over ~20 pixels are left out below this alpha
-  // (the game's 0..128); 2: none (only sprites drawn with alpha 0 are skipped, where that changes
-  // no pixel)
-  int sprite_min_alpha = 2;
   // (AI-assisted) blended world sprites drop their alpha 0 fragments (alpha test, where alpha 0
   // adds nothing): no framebuffer traffic for them; the picture is the same. off: no alpha test
   bool sprite_alpha_discard = true;
-  // (AI-assisted, perfv2) particle_fill = off | on | strong. strong: big faint overlapping 2D
-  // particles thinned by alike slot pairs (CtrSprite draw_chunk_mode; an approximation); off and
-  // on draw every particle (each one over its texture's alpha box only, always: the same picture)
-  int particle_fill = 1;
   // the game's own visibility data (which parts of a level can be seen from the camera's spot)
   // hides level parts behind walls and hills (needs .c3l v10 files)
   bool vis_culling = true;
@@ -274,13 +234,6 @@ struct CtrSettings {
   // (AI-assisted, streaming) diagnostic: a log line for each near chunk that is late (and the
   // camera's speed, its score before)
   bool stream_debug = false;
-  // (AI-assisted, citadel) time of day, an approximation: a day palette that pulses (CtrTodPulse.h:
-  // up and down around a steady mean within ~6 s; Gol and Maia's Citadel's update-mood-light on
-  // palette 1, which 71% of its colors use, moves 1/64 every ~2 frames) is taken only when it
-  // moved this many 64ths from the weight last taken, or once it stood still for 8 frames
-  // (CtrLevel.cpp tod_update; never on the title screen). 0 (default): every move, exact as the
-  // PC (a rewrite writes only the vertices whose color changed: cheaper than the hold was)
-  int tod_pulse_step = 0;
   // (AI-assisted, title-popin) files with shape errors (current converter): a group switches to its
   // far version where the far version's shape error is at most this many pixels on screen (this
   // frame's projection), not at the PS2 distance (3 px median, up to 19 px pops in village1).
@@ -349,9 +302,7 @@ struct CtrSettings {
   // and its time is logged per stats window ([ctr] gpu breakdown). Serialises the GPU: slower
   // while on. Profiling only, off; needs pipeline = on
   bool gpu_breakdown = false;
-  // (AI-assisted, gpu-rt) ocean_tex_half: the flat / waves ocean's shading texture is made every
-  // second frame (the heights still every frame for the near grid); ocean = full has
-  // ocean_texture_rate
+  // ocean_tex_half: no effect since the flat / waves ocean was removed (kept for a hardware A/B)
   bool ocean_tex_half = true;
   // (AI-assisted) c3l v15 opaque alpha: the alpha tests / blending ctr_level_converter took out of
   // level draws whose texture alpha is 1.0 in every texel of every mip level and whose vertex alpha
