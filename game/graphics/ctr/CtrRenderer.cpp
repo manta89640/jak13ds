@@ -501,25 +501,10 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
       lg::info("[ctr] render thread frame {}: {:.0f} ms in level loads", m_rs.frame_idx, load_ms);
     }
   }
-  // (AI-assisted) skip_clear: only the depth is cleared when this frame's opaque sky roof covers
-  // the whole screen (looking up): every pixel's color is drawn over
+  // (AI-assisted, j2gaps) only the depth is cleared when Jak II's menu opens: bucket 3 copies the
+  // last frame for its background before anything is drawn (CtrJak2BlitRenderer)
   {
     bool covered = false;
-    if (ctr_settings().skip_clear && m_sky_draw && ctr_settings().sky && !m_jak2) {
-      const u32 base = chain_offset + 16;  // see dispatch_buckets_jak1
-      const u32 id = (u32)jak1::BucketId::SKY_DRAW;
-      DmaFollower dma(ee_mem, base + 16 * id);
-      for (int k = 0; k < 64 && dma.current_tag_offset() != base + 16 * (id + 1); k++) {
-        auto data = dma.read_and_advance();
-        if (data.vifcode1().kind == VifCode::Kind::PC_PORT &&
-            data.size_bytes == CtrSky::kPacketBytes) {
-          covered = m_sky_draw->roof_covers_screen(data.data, m_rs);
-          break;
-        }
-      }
-    }
-    // (AI-assisted, j2gaps) Jak II: a menu opens; bucket 3 copies the last frame for its
-    // background before anything is drawn (CtrJak2BlitRenderer)
     if (m_jak2 && ctr_jak2_frame_copies_screen(
                       ee_mem, bucket_tag(chain_offset, (int)jak2::BucketId::BUCKET_3),
                       bucket_tag(chain_offset, (int)jak2::BucketId::BUCKET_3 + 1))) {
@@ -742,7 +727,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
                    ? fmt::format(", {} draws SKIPPED (mesh not there)", m_timing.dead_draws)
                    : std::string()),
           m_timing.color_clears_skipped
-              ? fmt::format(", {} frames without the color clear (skip_clear)",
+              ? fmt::format(", {} frames without the color clear (menu screen copy)",
                             m_timing.color_clears_skipped)
               : std::string(),
           // (AI-assisted, gpu-home) frame_overlap2 = on: drains of a full GX queue (gpu-wait)

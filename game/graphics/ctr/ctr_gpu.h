@@ -513,8 +513,8 @@ void ctr_gpu_run_sky_hook(void);
  * of their own (the depth map's scale 0, offset 0): with ztest GEQUAL they draw only where nothing
  * has drawn yet (the sky after the opaque geometry) */
 void ctr_gpu_set_depth_far(int on);
-/* (AI-assisted) config.ini skip_clear: the next frame begin clears only the depth buffer (the
- * renderer knows every pixel's color gets drawn: the opaque sky roof covers the screen) */
+/* (AI-assisted) the next frame begin clears only the depth buffer (Jak II's menu copies the last
+ * frame's color before anything is drawn) */
 void ctr_gpu_set_skip_color_clear(int on);
 /* (AI-assisted) config.ini frame_overlap2 (with the pipeline): off = the frame end waits for the
  * GPU, then hands the frame's command list over with a cache flush; on = no wait at the frame
@@ -848,7 +848,7 @@ typedef struct {
   unsigned int compact_bytes;
   int compact_in_vram;
   int nofog_draws;   /* (AI-assisted) level draws without the fog stage (fog_stage_skip) */
-  int color_clear_skipped; /* (AI-assisted) skip_clear: this frame cleared only the depth */
+  int color_clear_skipped; /* (AI-assisted) this frame cleared only the depth */
   int unit1_toggles; /* (AI-assisted) texture unit 1 switched off or on (fog_stage_skip,
                       * tex1_gating) */
   int fog_alpha_draws; /* (AI-assisted) level draws with the fog in the vertex alpha (fog_alpha) */

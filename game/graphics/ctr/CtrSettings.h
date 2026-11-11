@@ -112,9 +112,6 @@ struct CtrSettings {
   // dropped by the depth test (before blending and writing; with the early depth test, before
   // texturing). Same picture
   bool sky_last = true;
-  // (AI-assisted) frames whose opaque sky roof covers the whole screen (looking up) clear only the
-  // depth buffer, not the color. Same picture
-  bool skip_clear = true;
   // GPU starts on each part of a frame while the CPU builds the rest (off: at the frame end)
   bool overlap = true;
   // CPU builds frame N+1 while the GPU draws frame N

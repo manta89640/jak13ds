@@ -3132,7 +3132,7 @@ static void pipeline_frame_begin(u32 clear) {
   const u32 px = (u32)fb->width * fb->height;
   u32* color_end = (u32*)((uint8_t*)color + px * 4);
   if (s_skip_color_clear) {
-    /* (AI-assisted) skip_clear: the depth only (VRAM) */
+    /* (AI-assisted) the depth only (VRAM): Jak II's menu copies the last frame */
     GX_MemoryFill(depth, 0, (u32*)((uint8_t*)depth + px * 4),
                   GX_FILL_TRIGGER | GX_FILL_32BIT_DEPTH, NULL,
                   0, NULL, 0);
@@ -3212,7 +3212,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
     write_screenshot();
     g.screenshot_state = 0;
   }
-  /* (AI-assisted) skip_clear: the depth only */
+  /* (AI-assisted) Jak II's menu: the depth only */
   C3D_RenderTargetClear(g.top, s_skip_color_clear ? C3D_CLEAR_DEPTH : C3D_CLEAR_ALL,
                         color_fill_value(r, gr, b), 0);
   C3D_FrameDrawOn(g.top);

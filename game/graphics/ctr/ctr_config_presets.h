@@ -36,7 +36,6 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"sky_last", "off"},
     {"c3l_read_buffer", "0"},    {"fog_stage_skip", "off"},
     {"ocean_tex_half", "off"},
-    {"skip_clear", "off"},
     {"tie_lod", "off"},          {"gpu_micro", "off"},         {"merc_fog", "off"},
     {"streaming", "off"}, /* (AI-assisted, streaming) */
     {"particle_fill", "off"}, /* (AI-assisted, perfv2) */
@@ -182,7 +181,7 @@ static const char* const ctr_cfg_removed[] = {
     "impostors", "impostor_distance", "impostor_error", "impostor_budget", "impostor_atlas",
     "fine_vis", "fine_vis_kb", "occ_cull", "occ_cull_tris", "occ_cull_dist", "vista_untextured",
     /* renderer strip: removed with their code */
-    "tex_cache_clear", "opaque_alpha", "distort_copy", "mip_bias", "proctex_glows", "merc_one_bone", "index_u8", "vram_vertices", "shader_basic", "shader_opt", "color_stream", "color16", "depth16", "top_block32", "early_depth_clear", "early_depth_func", "early_depth", "vram_probe", "gpu_micro_ident", "cmd_dump", "cpu_bench",
+    "skip_clear", "tex_cache_clear", "opaque_alpha", "distort_copy", "mip_bias", "proctex_glows", "merc_one_bone", "index_u8", "vram_vertices", "shader_basic", "shader_opt", "color_stream", "color16", "depth16", "top_block32", "early_depth_clear", "early_depth_func", "early_depth", "vram_probe", "gpu_micro_ident", "cmd_dump", "cpu_bench",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */
