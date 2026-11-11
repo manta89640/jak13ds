@@ -484,11 +484,6 @@ int ctr_gpu_set_pipeline(int on);
 /* (AI-assisted) the next frame begin clears only the depth buffer (Jak II's menu copies the last
  * frame's color before anything is drawn) */
 void ctr_gpu_set_skip_color_clear(int on);
-/* (AI-assisted) config.ini frame_overlap2 (with the pipeline): off = the frame end waits for the
- * GPU, then hands the frame's command list over with a cache flush; on = no wait at the frame
- * end: the list is queued behind the frame the GPU is drawing (the next frame begin waits for the
- * frame before that instead, whose buffers it reuses). on needs frame_pacing = steady (else off). */
-void ctr_gpu_set_frame_overlap2(int on);
 /* 1 when running in an emulator (Azahar / Citra: svcGetSystemInfo 0x20000). */
 int ctr_gpu_is_emulator(void);
 
@@ -811,8 +806,6 @@ typedef struct {
    * frames it finished since the last frame end (gpu_busy_frames of them; 0 without frame_pacing =
    * steady, whose fence marks a frame done): done(N) - max(first work handed over(N), done(N-1)) */
   float gpu_wait_ms;
-  /* (AI-assisted, gpu-home) frame_overlap2 = on: a full running GX queue drained (in gpu_wait_ms) */
-  int queue_drains;
   float gpu_busy_ms;
   int gpu_busy_frames;
   /* (AI-assisted) the same frames from the moment their command list was handed to the GPU

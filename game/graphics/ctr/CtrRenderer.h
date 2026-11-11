@@ -137,7 +137,6 @@ class CtrRenderer {
     // (AI-assisted) see ctr_gpu_stats: waiting for the GPU in C3D_FrameBegin, the GPU time of the
     // frames measured by the steady pacing fence, triangles, the vertex buffer's busiest frame
     double gpu_wait_ms = 0;
-    int queue_drains = 0;  // (AI-assisted, gpu-home) frame_overlap2 = on: full GX queue drained
     double gpu_busy_ms = 0;
     int gpu_busy_frames = 0;
     double gpu_active_ms = 0;  // (AI-assisted) from each frame's command list on

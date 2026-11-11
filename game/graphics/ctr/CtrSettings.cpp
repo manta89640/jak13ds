@@ -145,8 +145,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.overlap = parse_bool(v);
     } else if (key == "pipeline") {
       s.pipeline = parse_bool(v);
-    } else if (key == "frame_overlap2") {
-      s.frame_overlap2 = parse_bool(v) || v == "2";
     } else if (key == "frame_pacing") {
       s.steady_pacing = v != "fast";
     } else if (key == "fps_cap") {
@@ -473,7 +471,7 @@ std::string CtrSettings::summary() const {
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
       "merc {} sprites {} ({}) "
-      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} distort {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} envmap_min_px {:.0f} "
+      "pipeline {} ocean {} sky {} clouds {} distort {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} envmap_min_px {:.0f} "
       "compact_textures {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} particle_fill {} "
       "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} lowres_vista {} vista {:.0f}m cull_ties {} cull_merc {} merc_fog {} raw_cmds {} asm_tex {} asm_mem {} "
       "ocean_tex_half {} fast_clock {} "
@@ -498,7 +496,7 @@ std::string CtrSettings::summary() const {
                     : fmt::format("{:.1f}", tie_distance_scale),
       fog ? "on" : "off",
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, pipeline ? "on" : "off",
-      frame_overlap2 ? "on" : "off", !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
+      !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
       sky ? "on" : "off", clouds ? "on" : "off",
       distort ? "on" : "off",
       envmap ? "on" : "off", envmap_batch ? "on" : "off", merc_tex_sort ? "on" : "off",

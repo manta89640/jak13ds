@@ -3792,7 +3792,6 @@ unsigned int ctr_gpu_cmd_buffer_kb() {
 int ctr_gpu_set_pipeline(int) {
   return 0;
 }
-void ctr_gpu_set_frame_overlap2(int) {}  // (AI-assisted) no GPU queue here
 void ctr_gpu_set_skip_color_clear(int on) {
   s_skip_color_clear = on != 0;
 }

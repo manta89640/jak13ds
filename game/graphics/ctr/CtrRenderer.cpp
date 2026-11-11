@@ -484,7 +484,6 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   }
   ctr_gpu_frame_begin(clear[0], clear[1], clear[2]);
   ctr_gpu_set_cull(ctr_settings().cull_ties ? 1 : 0, ctr_settings().cull_flip ? 1 : 0);
-  ctr_gpu_set_frame_overlap2(ctr_settings().frame_overlap2 ? 1 : 0);
   ctr_gpu_set_raw_cmds(ctr_settings().raw_cmds ? 1 : 0);          // (AI-assisted, hud3)
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
@@ -555,7 +554,6 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.tex_binds += gs.tex_binds;
   m_timing.draws += gs.draws;
   m_timing.gpu_wait_ms += gs.gpu_wait_ms;
-  m_timing.queue_drains += gs.queue_drains;  // (AI-assisted, gpu-home)
   m_timing.gpu_busy_ms += gs.gpu_busy_ms;
   m_timing.gpu_busy_frames += gs.gpu_busy_frames;
   m_timing.gpu_active_ms += gs.gpu_active_ms;
@@ -648,7 +646,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
           "[ctr] render ms/frame over {} frames: wait-gpu {:.2f}, build {:.2f}, submit {:.2f} "
           "(cpu total {:.2f}; gpu-wait {:.2f}); gpu {:.2f} (draw {:.2f}, busy {}); {:.0f} "
           "triangles, {:.0f} draws, {:.0f} texture binds, {:.0f} KB commands (peak {:.0f} of {} KB); "
-          "vertex buffer peak {} of {} KB{}{}{}{}",
+          "vertex buffer peak {} of {} KB{}{}{}",
           m_timing.frames, m_timing.begin_ms / n, m_timing.build_ms / n, m_timing.end_ms / n,
           (m_timing.begin_ms + m_timing.build_ms + m_timing.end_ms) / n,
           m_timing.gpu_wait_ms / n, m_timing.gpu_ms / n, m_timing.gpu_draw_ms / n, busy,
@@ -671,10 +669,6 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
           m_timing.color_clears_skipped
               ? fmt::format(", {} frames without the color clear (menu screen copy)",
                             m_timing.color_clears_skipped)
-              : std::string(),
-          // (AI-assisted, gpu-home) frame_overlap2 = on: drains of a full GX queue (gpu-wait)
-          m_timing.queue_drains
-              ? fmt::format(", {} GX queue drains (queue full)", m_timing.queue_drains)
               : std::string());
       lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB "
                "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB ({} in reserved "
