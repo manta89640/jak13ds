@@ -1927,3 +1927,18 @@ in the raw command path (`raw_draw_elements_fmt`: the index format word) and cit
 (`C3D_UNSIGNED_BYTE`). The same triangles. Level and merc draws keep u16 (their chunks and
 models have more vertices). `index_u8` and `merc_one_bone` are applied every frame and are in
 `gpu_profile = ab`'s switch table, which prices each on a console.
+
+### 13. Model vertices in VRAM (vramvtx)
+
+The GPU fetches vertex data over the same FCRAM bus the CPUs use; textures moved to VRAM long
+ago (c3l v8), vertex buffers never did. `config.ini vram_vertices` (default off) copies the merc
+models' vertex buffers (static: made by `ctr_gpu_mesh_create`, never rewritten) into VRAM with GX
+copies, 8 meshes a frame at frame begin (after the texture pools' residency), only while 1.5 MB of
+VRAM stays free; the raw draws read a mesh's copy (`verts_pa`) from the frame after its copy was
+queued (copies queued at frame begin run ahead of that frame's draws, as the pools'). The
+textures come first: a pool that finds no room takes every copy back (verts_pa back to the
+linear buffer at once, the VRAM freed 3 frames later), so does a VRAM loss
+(`vram_copies_lost`), and a mesh whose vertices get rewritten (blend shapes:
+`ctr_gpu_mesh_vertices`) drops its copy. citro3d's non-raw path keeps reading the linear buffer.
+Not measured: compare render times and the GPU counters' memory traffic (`gpu_counters`) with it
+on and off in one place on a console.

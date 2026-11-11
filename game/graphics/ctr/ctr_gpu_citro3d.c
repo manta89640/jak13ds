@@ -333,6 +333,11 @@ typedef struct {
   int ext;
   u32 tail_off, tail_bytes; /* ctr_gpu_mesh_begin_tail / _ext_tail: at verts + tail_off */
   u32 col_off; /* ctr_gpu_mesh_split_colors: the colors' buffer at verts + col_off (0: none) */
+  /* (AI-assisted, vramvtx) vram_vertices: a static mesh (ctr_gpu_mesh_create: merc models) may get
+   * a copy of its vertices in VRAM (vram_verts); vram_state 0 none, 1 copy queued (verts_pa moves
+   * to it from frame vram_frame), 2 in use */
+  void* vram_verts;
+  int vram_want, vram_state, vram_frame;
   u32 lin_bytes; /* the linear heap's bytes of verts and indices (0: ext) */
 } MeshSlot;
 static void (*s_ext_free)(void* mem); /* (AI-assisted, streaming) ctr_gpu_set_ext_free */
@@ -987,6 +992,11 @@ static void process_pending_deletes(int hold) {
       if (m->verts_alt) {
         linearFree(m->verts_alt);
       }
+      if (m->vram_verts) {
+        vramFree(m->vram_verts); /* (AI-assisted, vramvtx) the GPU is done with it (held) */
+      }
+      m->vram_verts = NULL;
+      m->vram_want = m->vram_state = 0;
       m->verts = NULL;
       m->indices = NULL;
       m->verts_alt = NULL;
@@ -2146,6 +2156,8 @@ void ctr_gpu_exit(void) {
 }
 
 static void update_pool_residency(void);
+static void vram_vertices_step(void);         /* (AI-assisted, vramvtx) */
+static void vram_vertices_release(int now);
 static int g_vram_textures;
 
 /* (AI-assisted) citro3d's internal context (source/internal.h of the citro3d that libcitro3d.a is
@@ -3530,6 +3542,7 @@ static void pipeline_frame_begin(u32 clear) {
   bd_frame_begin(); /* (AI-assisted, gpu-rt) gpu_breakdown: the frame before is done first */
   gt_note_first(); /* (AI-assisted) the clear below starts the GPU on this frame */
   update_pool_residency();
+  vram_vertices_step(); /* (AI-assisted, vramvtx) */
   if (!s_bd.frame) {
     vprobe_frame();
   }
@@ -3633,6 +3646,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   process_pending_deletes(0);
   /* before any draw: copies to VRAM are queued ahead of this frame's draws */
   update_pool_residency();
+  vram_vertices_step(); /* (AI-assisted, vramvtx) */
   vprobe_frame();
   if (g.screenshot_state == 2) {
     write_screenshot();
@@ -4571,6 +4585,7 @@ static void arena_leave_vram(int back);
 /* nothing in VRAM is what was copied there any more (after the HOME Menu or sleep, or a failed
  * check): everything is read from linear memory; back: and copied to VRAM again from there */
 static void vram_copies_lost(int back) {
+  vram_vertices_release(1); /* (AI-assisted, vramvtx) */
   ctr_linear_lock();
   for (int i = 0; i < MAX_POOLS; i++) {
     if (g.pools[i].used == 1 && g.pools[i].vram) {
@@ -4581,6 +4596,127 @@ static void vram_copies_lost(int back) {
   ctr_linear_unlock();
   arena_leave_vram(back);
   s_vcheck.pool = -1;
+}
+
+/* (AI-assisted, vramvtx) config.ini vram_vertices: static meshes' vertices (merc models) copied into
+ * VRAM a few per frame, while VRAM keeps VRAM_VTX_RESERVE free for the texture pools; the GPU then
+ * fetches them there instead of from FCRAM, which the CPUs share. A texture pool that finds no room
+ * takes the copies back (verts_pa back to the linear buffer at once, the VRAM freed 3 frames
+ * later, when no queued draw reads it). */
+#define VRAM_VTX_RESERVE (1536u * 1024u)
+#define VRAM_VTX_PER_FRAME 8
+#define VRAM_VTX_DEFER 64
+static int s_vram_vertices;
+static int s_vram_vtx_cursor;
+static void* s_vram_vtx_defer[VRAM_VTX_DEFER];
+static int s_vram_vtx_defer_frame[VRAM_VTX_DEFER];
+static int s_vram_vtx_defer_n;
+static unsigned int s_vram_vtx_bytes;
+void ctr_gpu_set_vram_vertices(int on) {
+  s_vram_vertices = on ? 1 : 0;
+}
+/* one mesh's copy: verts_pa back to its linear buffer, the VRAM freed 3 frames later */
+static void vram_vertices_drop(MeshSlot* m) {
+  m->verts_pa = osConvertVirtToPhys(m->verts);
+  if (s_vram_vtx_defer_n < VRAM_VTX_DEFER) {
+    s_vram_vtx_defer[s_vram_vtx_defer_n] = m->vram_verts;
+    s_vram_vtx_defer_frame[s_vram_vtx_defer_n++] = g.frame_no;
+  } else {
+    ctr_linear_lock();
+    vramFree(m->vram_verts);
+    ctr_linear_unlock();
+  }
+  m->vram_verts = NULL;
+  m->vram_state = 0;
+}
+static void vram_vertices_release(int now) {
+  ctr_linear_lock();
+  for (int i = 0; i < MAX_MESHES; i++) {
+    MeshSlot* m = &g.meshes[i];
+    if (!m->vram_verts) {
+      continue;
+    }
+    m->verts_pa = osConvertVirtToPhys(m->verts);
+    if (now || s_vram_vtx_defer_n == VRAM_VTX_DEFER) {
+      vramFree(m->vram_verts);
+    } else {
+      s_vram_vtx_defer[s_vram_vtx_defer_n] = m->vram_verts;
+      s_vram_vtx_defer_frame[s_vram_vtx_defer_n++] = g.frame_no;
+    }
+    m->vram_verts = NULL;
+    m->vram_state = 0;
+    m->vram_want = 0; /* (not again for this mesh) */
+  }
+  s_vram_vtx_bytes = 0;
+  ctr_linear_unlock();
+}
+static void vram_vertices_step(void) {
+  /* the deferred frees whose frames are done */
+  int kept = 0;
+  for (int i = 0; i < s_vram_vtx_defer_n; i++) {
+    if (g.frame_no - s_vram_vtx_defer_frame[i] > 3) {
+      ctr_linear_lock();
+      vramFree(s_vram_vtx_defer[i]);
+      ctr_linear_unlock();
+    } else {
+      s_vram_vtx_defer[kept] = s_vram_vtx_defer[i];
+      s_vram_vtx_defer_frame[kept++] = s_vram_vtx_defer_frame[i];
+    }
+  }
+  s_vram_vtx_defer_n = kept;
+  if (!s_vram_vertices) {
+    int any = 0;
+    for (int i = 0; i < MAX_MESHES && !any; i++) {
+      any = g.meshes[i].vram_verts != NULL;
+    }
+    if (any) {
+      vram_vertices_release(0);
+    }
+    return;
+  }
+  int started = 0;
+  for (int k = 0; k < MAX_MESHES && started < VRAM_VTX_PER_FRAME; k++) {
+    const int i = (s_vram_vtx_cursor + k) % MAX_MESHES;
+    MeshSlot* m = &g.meshes[i];
+    if (m->used != 1) {
+      continue;
+    }
+    if (m->vram_verts && (m->verts_alt || !m->vram_want)) {
+      vram_vertices_drop(m); /* rewritten since (blend shapes) */
+      continue;
+    }
+    if (m->vram_state == 1 && g.frame_no >= m->vram_frame) {
+      m->verts_pa = osConvertVirtToPhys(m->vram_verts);
+      m->vram_state = 2;
+      continue;
+    }
+    if (!m->vram_want || m->vram_verts || m->verts_alt || m->ext || m->tail_bytes ||
+        m->col_off || !m->fill_vbytes) {
+      continue;
+    }
+    const u32 bytes = (m->fill_vbytes + 15u) & ~15u;
+    if ((size_t)vramSpaceFree() < bytes + VRAM_VTX_RESERVE) {
+      break;
+    }
+    ctr_linear_lock();
+    void* v = vramAlloc(bytes);
+    ctr_linear_unlock();
+    if (!v) {
+      break;
+    }
+    if (!queue_texture_copy(m->verts, v, bytes)) {
+      ctr_linear_lock();
+      vramFree(v);
+      ctr_linear_unlock();
+      break;
+    }
+    m->vram_verts = v;
+    m->vram_state = 1;
+    m->vram_frame = g.frame_no + 1;
+    s_vram_vtx_bytes += bytes;
+    started++;
+  }
+  s_vram_vtx_cursor = (s_vram_vtx_cursor + 64) % MAX_MESHES;
 }
 
 /* At frame begin, before any draw: copy the pools that want to be in VRAM there, most wanted
@@ -4722,6 +4858,10 @@ static void update_pool_residency(void) {
       /* (not while the screen copy's VRAM waits in the deferred deletes: retried each frame) */
       if (g.frame_no - s_copy_released_frame > 3) {
         p->no_room_frame = g.frame_no;
+      }
+      /* (AI-assisted, vramvtx) the textures come first: the mesh copies make way */
+      if (s_vram_vtx_bytes) {
+        vram_vertices_release(0);
       }
       continue;
     }
@@ -8789,7 +8929,11 @@ int ctr_gpu_mesh_create(const void* verts, int vertex_count, const uint16_t* ind
   }
   memcpy(v, verts, (size_t)vertex_count * 16);
   memcpy(ix, indices, (size_t)index_count * 2);
-  return ctr_gpu_mesh_end(mesh, 1);
+  const int done = ctr_gpu_mesh_end(mesh, 1);
+  if (done >= 0) {
+    g.meshes[done].vram_want = 1; /* (AI-assisted, vramvtx) never rewritten: may go to VRAM */
+  }
+  return done;
 }
 
 void ctr_gpu_mesh_delete(int mesh) {
@@ -9676,11 +9820,17 @@ int ctr_gpu_skinned_mesh_create(const void* verts, int vertex_count, const uint1
   return slot;
 }
 
+static void vram_vertices_drop(MeshSlot* m);
 void* ctr_gpu_mesh_vertices(int mesh) {
   if (mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1) {
     return NULL;
   }
   MeshSlot* m = &g.meshes[mesh];
+  /* (AI-assisted, vramvtx) rewritten vertices (blend shapes): never from a VRAM copy */
+  m->vram_want = 0;
+  if (m->vram_verts) {
+    vram_vertices_drop(m);
+  }
   if (s_pipeline && m->vbytes) {
     /* (AI-assisted) the frame on the GPU may still read these vertices: from the first rewrite in
      * a frame on, write the other buffer (the frame before is done). Every rewrite covers all of
