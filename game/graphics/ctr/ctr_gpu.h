@@ -471,8 +471,6 @@ void ctr_gpu_set_proctex(int on);
 void ctr_gpu_set_merc_one_bone(int on);
 /* (AI-assisted, idx8) config.ini index_u8: quad batches of up to 64 quads with u8 indices */
 void ctr_gpu_set_index_u8(int on);
-/* (AI-assisted, vramvtx) config.ini vram_vertices: static meshes' vertices copied into VRAM */
-void ctr_gpu_set_vram_vertices(int on);
 void ctr_gpu_set_compact_textures(int on);
 /* (AI-assisted) Overlap: hand the draws so far to the GPU in the middle of a frame (after a
  * renderer bucket, when enough draws piled up), so the GPU draws them while the CPU builds the

@@ -46,7 +46,7 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"occluders", "off"},     {"horizon", "off"},       {"title_vis", "off"},
     {"cell_vis", "off"},      {"ps2_lod_scale", "1"},   {"min_run_px", "0"},
     {"far_copy", "off"},      {"cull_terrain", "off"},  {"cone_cull", "off"},
-    {"depth_reuse", "off"},   {"vram_vertices", "off"}, {"index_u8", "off"},
+    {"depth_reuse", "off"},   {"index_u8", "off"},
     {"merc_one_bone", "off"}, {"vfp_vector", "off"},    {"anim_lod_far", "off"},
     {"merc_lod_scale", "1"},  {"shadow_count", "0"},
 };
@@ -182,7 +182,7 @@ static const char* const ctr_cfg_removed[] = {
     "impostors", "impostor_distance", "impostor_error", "impostor_budget", "impostor_atlas",
     "fine_vis", "fine_vis_kb", "occ_cull", "occ_cull_tris", "occ_cull_dist", "vista_untextured",
     /* renderer strip: removed with their code */
-    "shader_basic", "shader_opt", "color_stream", "color16", "depth16", "top_block32", "early_depth_clear", "early_depth_func", "early_depth", "vram_probe", "gpu_micro_ident", "cmd_dump", "cpu_bench",
+    "vram_vertices", "shader_basic", "shader_opt", "color_stream", "color16", "depth16", "top_block32", "early_depth_clear", "early_depth_func", "early_depth", "vram_probe", "gpu_micro_ident", "cmd_dump", "cpu_bench",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

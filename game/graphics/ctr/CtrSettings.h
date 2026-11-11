@@ -188,11 +188,6 @@ struct CtrSettings {
   // (AI-assisted, idx8) quad batches (sprites, HUD, text) of up to 64 quads with u8 indices
   // instead of u16: half the index reads. Off until gpu_profile = ab prices it on a console
   bool index_u8 = true;
-  // (AI-assisted, vramvtx) merc models' vertices copied into VRAM (8 meshes a frame, while 1.5 MB
-  // stays free for the texture pools, which take it back when they find no room): the GPU fetches
-  // them without the FCRAM traffic the CPUs share. Off until a console's gpu_profile counters /
-  // render times with it on and off say so
-  bool vram_vertices = true;
   // (AI-assisted) 3DS hardware features (docs/3ds-port/config_ini.md):
   // sprite and HUD textures in the smallest 3DS format that holds them (8 / 16 bits per texel),
   // and in reserved VRAM (with vram_textures)
