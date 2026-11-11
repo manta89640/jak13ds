@@ -342,11 +342,6 @@ struct CtrSettings {
   // second frame (the heights still every frame for the near grid); ocean = full has
   // ocean_texture_rate
   bool ocean_tex_half = true;
-  // (AI-assisted) tex_cache_clear = always | uploads (default): always clears the GPU's texture
-  // cache at every texture bind (citro3d's way, ~300 per frame); uploads skips it only for binds
-  // that keep a level pool texture and change its sampling settings (switches between level pool
-  // textures skipped it too until the minecart red patches, see bind_texture)
-  bool tex_cache_uploads = true;
   // (AI-assisted) hardware hang bisect switches (Oct 3 optimisations; off = the Oct 2 behaviour):
   // asm_tex: the 4x2 group / LDM-STM texture tiling, 64-bit PSMCT32 uploads and SIMD sky loops
   // (off: the old per texel loops); asm_mem: ctr_mem.S memcpy/memmove/memset (off: byte/word C

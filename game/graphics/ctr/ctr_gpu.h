@@ -397,11 +397,6 @@ void ctr_gpu_set_mip_mode(int mode);
  * read */
 void ctr_gpu_submit_now(void);
 int ctr_gpu_top_histogram(unsigned int counts[256]);
-/* (AI-assisted) config.ini tex_cache_clear: 0 always (each texture unit 0 bind clears the GPU's
- * texture cache, as citro3d does), 1 uploads (a bind that keeps a level pool texture and only
- * changes its sampling settings doesn't clear it unless a pool was filled or moved since the last
- * clear; every switch to another texture and the first bind of a frame clear). Any time. */
-void ctr_gpu_set_tex_cache_clear(int mode);
 /* (AI-assisted) config.ini skin_rows_f24: merc bone rows uploaded as float24 (3 words per vector,
  * rounded to nearest; the GPU computes in float24 anyway) instead of float32 (4 words): 216
  * instead of 288 data words per 24-bone palette. Raw draws only. Any time. */
@@ -854,7 +849,6 @@ typedef struct {
   int compact_in_vram;
   int nofog_draws;   /* (AI-assisted) level draws without the fog stage (fog_stage_skip) */
   int color_clear_skipped; /* (AI-assisted) skip_clear: this frame cleared only the depth */
-  int tex_clears_skipped;  /* (AI-assisted) tex_cache_clear = uploads: binds without the clear */
   int unit1_toggles; /* (AI-assisted) texture unit 1 switched off or on (fog_stage_skip,
                       * tex1_gating) */
   int fog_alpha_draws; /* (AI-assisted) level draws with the fog in the vertex alpha (fog_alpha) */

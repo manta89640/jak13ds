@@ -2850,17 +2850,6 @@ void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* drop
 
 static void migrate_small_textures(void);
 
-/* (AI-assisted) config.ini tex_cache_clear (ctr_gpu_set_tex_cache_clear): 1 = uploads. A bind
- * that keeps unit 0's level pool texture (only its filter, wrap or mip settings change) skips the
- * cache clear unless a pool was filled (ctr_gpu_pool_ready) or moved (pool_repoint) or a new frame
- * began since the last clear (s_tex_dirty). Every switch to another texture clears (see
- * bind_texture). */
-static int s_tex_clear_mode = 0;
-static volatile int s_tex_dirty = 1;
-void ctr_gpu_set_tex_cache_clear(int mode) {
-  s_tex_clear_mode = mode ? 1 : 0;
-}
-
 /* (AI-assisted) config.ini skin_rows_f24 */
 static int s_skin_f24 = 0;
 /* (AI-assisted) config.ini skin_clip_f24: merc clip matrix and lights as float24 too */
@@ -3060,7 +3049,6 @@ static void frame_state_reset(void) {
   g.cur_prog = PROG_NONE;
   g.last_state_valid = 0;
   g.bound_tex = NULL;
-  s_tex_dirty = 1; /* (AI-assisted) tex_cache_clear = uploads: the frame's first bind clears */
   g.ocean_full_open = 0; /* (AI-assisted) a ctr_gpu_ocean_full_reserve never drawn */
   g.mesh_nofog = 0;      /* (AI-assisted) and unit 1 on again with the ramp (bound below) */
   clip_reserve_reset();  /* (AI-assisted) and a ctr_gpu_clip_reserve */
@@ -3868,7 +3856,6 @@ void ctr_gpu_pool_ready(int pool) {
     return;
   }
   TexPool* p = &g.pools[pool];
-  s_tex_dirty = 1; /* (AI-assisted) tex_cache_clear = uploads (loader thread: a flag) */
   cache_flush_now(p->linear, p->bytes);
   ctr_linear_lock();
   p->ready = 1;
@@ -3909,7 +3896,6 @@ static void pool_repoint(int pool) {
     }
   }
   g.bound_tex = NULL;
-  s_tex_dirty = 1; /* (AI-assisted) tex_cache_clear = uploads */
 }
 
 /* a linear buffer the GPU may still read (a queued copy, the frame in flight): freed at the next
@@ -4605,7 +4591,6 @@ static void arena_leave_vram(int back) {
   s_arena.nfree = 1;
   s_small_waiting = back;
   g.bound_tex = NULL;
-  s_tex_dirty = 1;
 }
 
 /* (AI-assisted) C3D_TexGenerateMipmap for an RGBA8 texture in linear memory, the same tiled walk
@@ -4956,7 +4941,6 @@ static void apt_resume_state(void) {
   g.last_skin_valid = 0;
   g.skin_bl_valid = 0;
   g.bound_tex = NULL;
-  s_tex_dirty = 1;
   if (g_vram_textures) {
     vram_copies_lost(1);
   }
@@ -4989,7 +4973,6 @@ static void bd_resend(void) {
   g.last_skin_valid = 0;
   g.skin_bl_valid = 0;
   g.bound_tex = NULL;
-  s_tex_dirty = 1;
 }
 
 static void apt_gate_enter(void) {
@@ -5549,9 +5532,6 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
       tex->maxLevel == max_level) {
     return;
   }
-  /* (AI-assisted) the same texels as the unit has (only the filter, wrap or mip settings change):
-   * tex_cache_clear = uploads may keep the cache */
-  const int same_texels = g.bound_tex == tex && g.bound_data == tex->data;
   tex->param = param;
   tex->maxLevel = max_level;
   if (raw) {
@@ -5616,20 +5596,9 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
       ctx->texConfig |= 1;
       p = raw_w(p, GPUREG_TEXUNIT_CONFIG, 0xB, ctx->texConfig);
     }
-    /* (AI-assisted) tex_cache_clear = uploads: the clear is left out only when the unit keeps
-     * its texture (a level pool's, no pool filled or moved since the last clear) and just its
-     * sampling settings change. It used to be left out at every switch between level pool
-     * textures, on the idea that the cache holds texels by address (never checked). The suspected
-     * cause of the red patches on the Volcanic Crater minecarts on hardware (oct12b, the first
-     * build with uploads; Azahar has no texture cache): the carts' body is one 8x8 texture (128
-     * bytes, less than a texture unit's 256-byte L1 cache) in a level of red lava textures, as if
-     * the cache kept the previous texture's texels. citro3d clears at every texture change too. */
-    if (!s_tex_clear_mode || slot->pool < 0 || s_tex_dirty || !same_texels) {
-      s_tex_dirty = 0;
-      p = raw_w(p, GPUREG_TEXUNIT_CONFIG, 0x4, BIT(16));
-    } else {
-      g.cur.tex_clears_skipped++;
-    }
+    /* every bind clears the texture cache, as citro3d does (skipping it left stale texels:
+     * the red patches on the Volcanic Crater minecarts) */
+    p = raw_w(p, GPUREG_TEXUNIT_CONFIG, 0x4, BIT(16));
     raw_end(p);
   } else {
     C3D_TexBind(0, tex);
@@ -7200,7 +7169,6 @@ void ctr_gpu_rt_end(void) {
   s_sky_hook_arg = s_rtc.hook_arg;
   /* the texture cache may hold the tile's old texels: the next bind clears it */
   g.bound_tex = NULL;
-  s_tex_dirty = 1;
   s_rtc.active = 0;
 }
 

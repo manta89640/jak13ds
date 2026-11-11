@@ -3768,7 +3768,6 @@ int ctr_gpu_top_histogram(unsigned int counts[256]) {
   }
   return 1;
 }
-void ctr_gpu_set_tex_cache_clear(int) {}  // (AI-assisted) no texture cache
 void ctr_gpu_set_skin_rows_f24(int) {}
 // (AI-assisted) no float24 uniforms here: the draws never get the words
 int ctr_gpu_skin_rows_f24_on(void) {
