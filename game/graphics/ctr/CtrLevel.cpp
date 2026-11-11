@@ -6419,7 +6419,6 @@ void build_draw_order(CtrLevelData* out) {
   out->ordered_draws.clear();
   out->early_draws.clear();
   out->draw_states.reserve(out->draws.size());
-  out->opaque_alpha_applied = ctr_settings().opaque_alpha;
   for (auto& d : out->draws) {
     DrawMode mode;
     mode.as_int() = d.mode;
@@ -6459,8 +6458,8 @@ void build_draw_order(CtrLevelData* out) {
       st.flags |= CTR_STATE_EARLY_DEPTH;
     }
     // (AI-assisted) c3l v15: the alpha test / blending the converter took out, back with
-    // config opaque_alpha = off
-    set_opaque_alpha(&st, d, ctr_settings().opaque_alpha, min_alpha);
+    // the converter's dropped alpha tests / blending back (texture animation can change alpha)
+    set_opaque_alpha(&st, d, false, min_alpha);
     out->draw_states.push_back(st);
   }
   // sort keys: texture first (a texture change clears the GPU's texture cache), then the rest of
@@ -13062,16 +13061,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       ctr_haze_note_vista(rs.frame_idx);  // (merc's haze: CtrHaze.h)
     }
     ctr_gpu_set_mesh_fog(fog0, fog1, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
-  }
-  // (AI-assisted) config opaque_alpha (gpu_profile = ab switches it): the v15 draws' alpha tests /
-  // blending back, or out again
-  if (lev.opaque_alpha_applied != settings.opaque_alpha) {
-    lev.opaque_alpha_applied = settings.opaque_alpha;
-    for (size_t di = 0; di < lev.draws.size() && di < lev.draw_states.size(); di++) {
-      const auto& d = lev.draws[di];
-      set_opaque_alpha(&lev.draw_states[di], d, settings.opaque_alpha,
-                       d.texture < lev.tex_min_alpha.size() ? lev.tex_min_alpha[d.texture] : 255);
-    }
   }
   // this level's textures: VRAM first if the camera is in it (see ctr_gpu_pool_create)
   set_tex_priority(lev.tex_pools, far_level ? 1 : 2);
