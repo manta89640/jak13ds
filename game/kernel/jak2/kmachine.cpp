@@ -861,13 +861,14 @@ void InitMachine_PCPort() {
 #endif
     intern_from_c("*pc-3ds-shadow-count*")->value() = (u32)count;
   }
-  // config.ini ocean = full: the PS2 ocean's DMA (draw-ocean) for CtrOceanFull instead of
-  // ocean-3ds-packet's for CtrOceanRenderer (ocean.gc, TARGET_3DS)
+  // config.ini ocean (on unless off): the PS2 ocean's DMA (draw-ocean) for CtrOceanFull, else
+  // no ocean (ocean.gc, TARGET_3DS)
   {
     bool ocean_full = false;
 #ifdef __3DS__
     char v[32];
-    ocean_full = ctr_config_get("ocean", v, sizeof(v)) && std::string(v) == "full";
+    const std::string o = ctr_config_get("ocean", v, sizeof(v)) ? v : "on";
+    ocean_full = !(o == "off" || o == "0" || o == "false" || o == "no");
 #else
     if (const char* e = getenv("OPENGOAL_OCEAN_FULL")) {
       ocean_full = e[0] == '1';

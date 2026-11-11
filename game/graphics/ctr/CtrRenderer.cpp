@@ -37,7 +37,6 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #include "game/graphics/ctr/CtrRendererJak2.h"
 #include "game/graphics/ctr/CtrSky.h"
 #include "game/graphics/ctr/CtrMerc.h"
-#include "game/graphics/ctr/CtrOcean.h"
 #include "game/graphics/ctr/CtrOceanFull.h"
 #include "game/graphics/ctr/CtrShadow.h"
 #include "game/graphics/ctr/CtrSprite.h"
@@ -594,16 +593,13 @@ CtrRenderer::CtrRenderer()
     }
   }
   // the ocean (after the level and merc, like the PS2's ocean-near)
-  if (ctr_settings().ocean && ctr_settings().ocean_mode == CtrSettings::OceanMode::Full) {
-    // (AI-assisted) config.ini ocean = full: the PS2 ocean's DMA (draw-ocean), both buckets
+  if (ctr_settings().ocean) {
+    // the PS2 ocean's DMA (draw-ocean), both buckets
     auto full = std::make_shared<CtrOceanFull>();
     set(BucketId::OCEAN_MID_AND_FAR, std::make_unique<CtrOceanFullBucket>(
                                          "ocean", (int)BucketId::OCEAN_MID_AND_FAR, full, false));
     set(BucketId::OCEAN_NEAR,
         std::make_unique<CtrOceanFullBucket>("ocean", (int)BucketId::OCEAN_NEAR, full, true));
-  } else {
-    set(BucketId::OCEAN_NEAR,
-        std::make_unique<CtrOceanRenderer>("ocean", (int)BucketId::OCEAN_NEAR));
   }
   // the sky (CtrSky: render-sky-3ds's packet), or the background when there is no sky (the ND
   // logo, interiors): a full screen gradient in the time of day's erase color. The sky textures

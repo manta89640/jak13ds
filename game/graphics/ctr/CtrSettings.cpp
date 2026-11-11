@@ -111,19 +111,9 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
     } else if (key == "sprites") {
       s.sprites = parse_bool(v);
     } else if (key == "ocean") {
-      if (v == "flat" || v == "waves" || v == "full") {
-        s.ocean = true;
-        s.ocean_mode = v == "full"    ? CtrSettings::OceanMode::Full
-                       : v == "waves" ? CtrSettings::OceanMode::Waves
-                                      : CtrSettings::OceanMode::Flat;
-      } else {
-        s.ocean = parse_bool(v);
-        s.ocean_mode = CtrSettings::OceanMode::Flat;
-      }
+      s.ocean = !(v == "off" || v == "0" || v == "false" || v == "no");
     } else if (key == "ocean_texture_rate") {
       s.ocean_texture_rate = std::clamp(std::atoi(v.c_str()), 1, 8);  // (AI-assisted)
-    } else if (key == "ocean_near_alpha") {
-      s.ocean_near_alpha = std::clamp(f, 0.f, 1.f);  // (AI-assisted)
     } else if (key == "distort") {
       s.distort = parse_bool(v);
     } else if (key == "envmap") {
@@ -560,7 +550,7 @@ std::string CtrSettings::summary() const {
       "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} fog_alpha {} tex1_gating {} shader_opt {} cmd_dedup {} cull_ties {} cull_merc {} merc_fog {} raw_cmds {} opaque_alpha {} tex_cache_clear {} asm_tex {} asm_mem {} "
       "ocean_tex_half {} fast_clock {} "
       // (AI-assisted) Oct 16: the rest of the keys, so the line holds every setting
-      "fog_start {:.2f} overlap {} frame_pacing {} fps_cap {} ocean_texture_rate {} ocean_near_alpha {:.2f} "
+      "fog_start {:.2f} overlap {} frame_pacing {} fps_cap {} ocean_texture_rate {} "
       "shader_basic {} defer_flush {} cmd_dump {} render_watchdog {} stats_period {:.0f}s "
       "color_stream {}"
       "{}{}{}{}{}{}{}",
@@ -581,7 +571,7 @@ std::string CtrSettings::summary() const {
                     : fmt::format("{:.1f}", tie_distance_scale),
       fog ? "on" : "off",
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, pipeline ? "on" : "off",
-      frame_overlap2 == 2 ? "on" : (frame_overlap2 == 1 ? "clean" : "off"), !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
+      frame_overlap2 == 2 ? "on" : (frame_overlap2 == 1 ? "clean" : "off"), ocean ? "on" : "off",
       sky ? "on" : "off", clouds ? "on" : "off", sky_last ? "on" : "off",
       skip_clear ? "on" : "off", distort ? "on" : "off", distort_copy_rows ? "rows" : "full",
       envmap ? "on" : "off", envmap_batch ? "on" : "off", merc_tex_sort ? "on" : "off",
@@ -620,7 +610,7 @@ std::string CtrSettings::summary() const {
       asm_mem ? "on" : "off",
       ocean_tex_half ? "on" : "off",
       fast_clock ? "on" : "off", fog_start, overlap ? "on" : "off", steady_pacing ? "steady" : "fast",
-      fps_cap, ocean_texture_rate, ocean_near_alpha, shader_basic ? "new" : "old",
+      fps_cap, ocean_texture_rate, shader_basic ? "new" : "old",
       defer_flush ? "on" : "off", cmd_dump ? "on" : "off", render_watchdog ? "on" : "off",
       stats_period, color_stream ? "on" : "off",
       gpu_profile ? " gpu_profile" : (gpu_profile_ab ? " gpu_profile ab" : ""),

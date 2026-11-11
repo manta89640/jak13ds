@@ -820,10 +820,9 @@ int depth_clip_test() {
 }
 
 int main(int argc, char** argv) {
-  // (AI-assisted) as the 3DS draws, but the wave texture every frame and the near ocean's alpha
-  // as the program's (config.ini ocean_texture_rate, ocean_near_alpha): the same as emulated
+  // as the 3DS draws, but the wave texture every frame (config.ini ocean_texture_rate): the same
+  // as emulated
   g_settings.ocean_texture_rate = 1;
-  g_settings.ocean_near_alpha = 0.f;
   const int transition_errors = depth_clip_test() + transition_test();
   if (argc < 2) {
     printf("(no dump file: ocean_replay ocean_dump.bin [iterations] replays one)\n%s\n",

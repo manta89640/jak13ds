@@ -723,13 +723,14 @@ void InitMachine_PCPort() {
     memcpy(&bits, &lod_scale, 4);
     intern_from_c("*pc-3ds-merc-lod-scale*")->value = bits;
   }
-  // (AI-assisted) config.ini ocean = full: the game builds the PS2 ocean's DMA (draw-ocean) for
-  // CtrOceanFull instead of draw-ocean-3ds's packet for CtrOcean (drawable.gc, SKIP_OCEAN_DRAW)
+  // config.ini ocean (on unless off): the game builds the PS2 ocean's DMA (draw-ocean) for
+  // CtrOceanFull, else no ocean (drawable.gc, SKIP_OCEAN_DRAW)
   {
     bool ocean_full = false;
 #ifdef __3DS__
     char v[32];
-    ocean_full = ctr_config_get("ocean", v, sizeof(v)) && std::string(v) == "full";
+    const std::string o = ctr_config_get("ocean", v, sizeof(v)) ? v : "on";
+    ocean_full = !(o == "off" || o == "0" || o == "false" || o == "no");
 #else
     // (AI-assisted) host test hook: OPENGOAL_OCEAN_FULL=1 runs draw-ocean like the 3DS default
     // (render-ocean-quad and the other ocean natives, e.g. for OPENGOAL_MIPS2C_VERIFY runs)

@@ -705,12 +705,10 @@ CtrOceanFull::CtrOceanFull()
     : m_mid(std::make_unique<CtrOceanMidVu>()),
       m_near(std::make_unique<CtrOceanNearVu>()),
       m_batch(std::make_unique<CtrOceanBatch>()) {
-  // (AI-assisted) config.ini ocean_texture_rate, ocean_near_alpha (CtrSettings.h)
+  // (AI-assisted) config.ini ocean_texture_rate (CtrSettings.h)
   const CtrSettings& s = ctr_settings();
   m_tex_rate = std::clamp(s.ocean_texture_rate, 1, 8);
   m_refl_rate = m_tex_rate;
-  const int floor = (int)(std::clamp(s.ocean_near_alpha, 0.f, 1.f) * 128.f + 0.5f);
-  m_near->set_alpha_floor(floor);
   m_mid->set_env_hook(this);  // (AI-assisted, j1ocean) the sky reflection
   m_near->set_env_hook(this);
   m_jak2 = ctr_is_jak2();
@@ -722,9 +720,8 @@ CtrOceanFull::CtrOceanFull()
     // the last one between)
     m_tex_rate = 1;
   }
-  lg::info("[ctr] ocean full: wave texture by the {} every {} frame(s), near ocean alpha at least "
-           "{:.2f}",
-           m_wave_rt >= 0 ? "GPU" : "CPU", m_tex_rate, floor / 128.0);
+  lg::info("[ctr] ocean full: wave texture by the {} every {} frame(s)",
+           m_wave_rt >= 0 ? "GPU" : "CPU", m_tex_rate);
 }
 
 CtrOceanFull::~CtrOceanFull() {

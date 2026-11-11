@@ -224,9 +224,6 @@ class CtrOceanNearVu {
   bool run(DmaFollower& dma, CtrOceanBatch* batch);
   //! the native program (default) or the emulated VU program (for the host replay test)
   void set_native(bool on) { m_native = on; }
-  //! (AI-assisted) config.ini ocean_near_alpha: the native program's vertex alpha is at least
-  //! this (GS units, 0x80 = opaque; 0: the program's own, 0x40 within 12 m of the camera)
-  void set_alpha_floor(int a) { m_alpha_floor = a < 0 ? 0 : (a > 0x80 ? 0x80 : a); }
   //! (AI-assisted, j1ocean) see CtrOceanEnvHook
   void set_env_hook(CtrOceanEnvHook* h) { m_env_hook = h; }
   //! Jak II's program (one more constant: the fade in constants5, the addresses after it + 1)
@@ -239,7 +236,6 @@ class CtrOceanNearVu {
   // (AI-assisted) the native program (CtrOceanNative.cpp): call 39's textured pass, in clip space
   void native_patch();
   bool m_native = true;
-  int m_alpha_floor = 0;
 
   void run_call0_vu2c();
   void run_call0_vu2c_jak2();

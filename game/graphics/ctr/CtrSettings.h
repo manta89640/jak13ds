@@ -60,18 +60,11 @@ struct CtrSettings {
   // renderers
   bool merc = true;
   bool sprites = true;
+  // config ocean = on | off (full: on): the PS2 ocean (draw-ocean, CtrOceanFull)
   bool ocean = true;
-  // (AI-assisted) config ocean = off | flat | waves | full (on = flat). flat: CtrOcean's static grid;
-  // waves: the grid plus real waves near the camera; full: the PS2 ocean (draw-ocean)
-  enum class OceanMode { Flat, Waves, Full };
-  OceanMode ocean_mode = OceanMode::Full;  // (AI-assisted) full since the Oct 16 config cleanup
   // (AI-assisted) ocean = full: the wave texture is made every nth frame (1 = every frame; the
   // render thread's 1-1.7 ms for it, half as often by default)
   int ocean_texture_rate = 2;
-  // (AI-assisted) ocean = full: the near ocean's alpha is at least this (0..1; the PS2's is 0.5
-  // within 12 m of the camera, 1 from 24 m on). (j1ocean) 0 = the PS2's own alpha: the sky
-  // reflection is drawn now (ctr_gpu_ocean_full_draw_env), the old 0.6 stood in for it.
-  float ocean_near_alpha = 0.f;
   // the sprite distorter: particles that warp what's behind them (portals, heat haze); each frame
   // with such particles costs one copy of the screen
   bool distort = true;  // (AI-assisted) on (Oct 16 config cleanup; was off: square sprites on hardware, fixed)
@@ -410,9 +403,7 @@ struct CtrSettings {
   // and its time is logged per stats window ([ctr] gpu breakdown). Serialises the GPU: slower
   // while on. Profiling only, off; needs pipeline = on
   bool gpu_breakdown = false;
-  // (AI-assisted, gpu-rt) ocean_tex_half: the flat / waves ocean's shading texture is made every
-  // second frame (the heights still every frame for the near grid); ocean = full has
-  // ocean_texture_rate
+  // ocean_tex_half: no effect since the flat / waves ocean was removed (kept for a hardware A/B)
   bool ocean_tex_half = true;
   // (AI-assisted) c3l v15 opaque alpha: the alpha tests / blending ctr_level_converter took out of
   // level draws whose texture alpha is 1.0 in every texel of every mip level and whose vertex alpha
