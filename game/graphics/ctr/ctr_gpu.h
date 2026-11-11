@@ -452,10 +452,6 @@ void ctr_gpu_set_overlap(int on);
 /* (AI-assisted) config.ini raw_cmds: the draws write their GPU commands themselves instead of
  * through citro3d (much less CPU per draw, fewer command words). Can change at any time. */
 void ctr_gpu_set_raw_cmds(int on);
-/* (AI-assisted) config.ini cmd_dedup (on: register writes that give a register the value it has
- * are left out: texture unit 0's type) and cmd_dedup_draw (the raw draws' PRIMITIVE_CONFIG mode
- * and VERTEX_OFFSET writes too). Each frame (gpu_profile = ab switches them). */
-void ctr_gpu_set_cmd_dedup(int on, int draw);
 /* (AI-assisted, gpu-rt) config.ini gpu_breakdown (profiling, off): every 4th frame (pipeline on) each
  * part of the frame goes to the GPU alone and is waited for, timed from its submission to its GSP
  * event (P3D, PSC, PPF): the phases below. ctr_gpu_phase: the commands built from now on belong to
@@ -839,7 +835,6 @@ typedef struct {
   int unit1_toggles; /* (AI-assisted) texture unit 1 switched off or on (fog_stage_skip,
                       * tex1_gating) */
   int fog_alpha_draws; /* (AI-assisted) level draws with the fog in the vertex alpha (fog_alpha) */
-  unsigned int cmd_dedup_words; /* (AI-assisted) command words cmd_dedup(_draw) left out */
   /* (AI-assisted) vertex program switches, of them with a shader code upload (another shbin), and
    * uniform vectors written at the switches */
   int prog_switches, prog_uploads, prog_unif_vectors;

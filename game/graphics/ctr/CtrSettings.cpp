@@ -255,10 +255,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.fog_alpha = parse_bool(v);  // (AI-assisted)
     } else if (key == "tex1_gating") {
       s.tex1_gating = parse_bool(v);  // (AI-assisted)
-    } else if (key == "cmd_dedup") {
-      s.cmd_dedup = parse_bool(v);  // (AI-assisted)
-    } else if (key == "cmd_dedup_draw") {
-      s.cmd_dedup_draw = parse_bool(v);  // (AI-assisted)
     } else if (key == "skin_clip_f24") {
       s.skin_clip_f24 = parse_bool(v);  // (AI-assisted)
     } else if (key == "cull_ties") {
@@ -489,7 +485,7 @@ std::string CtrSettings::summary() const {
       "merc {} sprites {} ({}) "
       "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} distort {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} envmap_min_px {:.0f} skin_rows_f24 {} skin_clip_f24 {} "
       "compact_textures {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} particle_fill {} "
-      "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} fog_alpha {} tex1_gating {} cmd_dedup {} cull_ties {} cull_merc {} merc_fog {} raw_cmds {} asm_tex {} asm_mem {} "
+      "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} fog_alpha {} tex1_gating {} cull_ties {} cull_merc {} merc_fog {} raw_cmds {} asm_tex {} asm_mem {} "
       "ocean_tex_half {} fast_clock {} "
       // (AI-assisted) Oct 16: the rest of the keys, so the line holds every setting
       "fog_start {:.2f} overlap {} frame_pacing {} fps_cap {} ocean_texture_rate {} ocean_near_alpha {:.2f} "
@@ -529,7 +525,7 @@ std::string CtrSettings::summary() const {
       vis_culling ? "on" : "off", run_culling ? "on" : "off", tie_lod ? "on" : "off",
       streaming ? fmt::format("on ({} KB, reserve {} KB)", stream_kb, stream_reserve_kb)
                 : std::string("off"),
-      tod_pulse_step, neighbour_vis ? "on" : "off", lowres_vista ? "on" : "off", vista_distance, fog_stage_skip ? "on" : "off", fog_alpha ? "on" : "off", tex1_gating ? "on" : "off", cmd_dedup ? (cmd_dedup_draw ? "on+draw" : "on") : "off", cull_ties ? (cull_flip ? "flip" : "on") : "off", cull_merc ? "on" : "off",
+      tod_pulse_step, neighbour_vis ? "on" : "off", lowres_vista ? "on" : "off", vista_distance, fog_stage_skip ? "on" : "off", fog_alpha ? "on" : "off", tex1_gating ? "on" : "off", cull_ties ? (cull_flip ? "flip" : "on") : "off", cull_merc ? "on" : "off",
       merc_fog ? "on" : "off",
       raw_cmds ? "on" : "off",
       asm_tex ? "on" : "off",

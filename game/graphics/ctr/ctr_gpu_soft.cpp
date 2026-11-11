@@ -3776,7 +3776,6 @@ int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba) {
 }
 void ctr_gpu_set_overlap(int) {}
 void ctr_gpu_set_raw_cmds(int) {}
-void ctr_gpu_set_cmd_dedup(int, int) {}  // (AI-assisted) no command lists here
 // (AI-assisted, gpu-rt) a pass's level draws, one by one
 void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n) {
   for (int i = 0; i < n; i++) {

@@ -447,8 +447,8 @@ static struct {
   float merc_haze_k, merc_haze_c; /* (AI-assisted, mercsprite) ctr_gpu_set_merc_haze */
   uint32_t merc_fog_gen, skin_mfog_gen;
   float skin_wrow[4];
-  /* (AI-assisted) cmd_dedup: the last ctr_gpu_draw_skinned_env's matrix and bones (env_valid: still
-   * in the env program's registers) */
+  /* (AI-assisted) the last ctr_gpu_draw_skinned_env's matrix and bones (env_valid: still in the
+   * env program's registers) */
   int env_valid;
   int last_env_palette_count;
   float last_env_clip[16];
@@ -1267,8 +1267,8 @@ int ctr_config_bool(const char* key, int def); /* platform/3ds/port */
  * the bits of s_micro. */
 enum {
   MICRO_RESIDENT = 1,   /* shader_resident's one code image */
-  MICRO_TEXREGS = 2,    /* texture unit 0: only the registers that change (with cmd_dedup) */
-  MICRO_GAS = 4,        /* GAS_DELTAZ_DEPTH only with a new depth function (with cmd_dedup) */
+  MICRO_TEXREGS = 2,    /* (unused: was texture unit 0's changed registers with cmd_dedup) */
+  MICRO_GAS = 4,        /* (unused: was GAS_DELTAZ_DEPTH with cmd_dedup) */
   MICRO_PROCLUT = 8,    /* the procedural texture tables kept in the GPU's LUT memory */
   MICRO_ATLAS = 16,     /* the mesh scales written raw */
   MICRO_FENCE = 32,     /* steady pacing's fence words in the vertex buffer */
@@ -4709,40 +4709,7 @@ static struct {
   const void* vbuf_va; /* g.vbuf and its physical address */
   u32 vbuf_pa;
   u32 quad_pa;    /* physical address of g.quad_indices */
-  /* (AI-assisted) config.ini cmd_dedup: register writes that would give a register the value it
-   * has are left out (texture unit 0's type); cmd_dedup_draw: the draw template's primitive mode
-   * and vertex offset too. prim: PRIMITIVE_CONFIG's mode byte as the GPU has it, voff0: its
-   * VERTEX_OFFSET is 0 (-1 / 0: unknown: the frame start, the HOME Menu, a citro3d draw) */
-  int dedup, dedup_draw;
-  int prim, voff0;
-  const C3D_Tex* tex0_ctx; /* cmd_dedup: unit 0's texture after the last raw bind, its type */
-  u32 tex0_fmt;
-  /* (AI-assisted, micro-gpu) cmd_dedup: unit 0's border, dim, param, lod and address registers
-   * as the last raw bind wrote them (valid while tex0_ctx is: see bind_texture) */
-  u32 tex0_regs[5];
-  int tex0_regs_ok; /* tex0_regs hold what the GPU has */
-} s_raw = {.on = 1, .dedup = 1, .prim = -1};
-
-/* (AI-assisted) a citro3d draw writes the draw registers itself (c3d_draw_* below) */
-static inline void raw_forget_draw_regs(void) {
-  s_raw.prim = -1;
-  s_raw.voff0 = 0;
-}
-static inline void raw_forget_regs(void) {
-  raw_forget_draw_regs();
-  s_raw.tex0_ctx = NULL;
-}
-static inline void c3d_draw_arrays_(GPU_Primitive_t prim, int first, int size) {
-  raw_forget_draw_regs();
-  C3D_DrawArrays(prim, first, size);
-}
-static inline void c3d_draw_elements_(GPU_Primitive_t prim, int count, int type,
-                                      const void* indices) {
-  raw_forget_draw_regs();
-  C3D_DrawElements(prim, count, type, indices);
-}
-#define C3D_DrawArrays c3d_draw_arrays_
-#define C3D_DrawElements c3d_draw_elements_
+} s_raw = {.on = 1};
 
 #define RAW_BUF_BASE 0x18000000u /* citro3d's attribute buffer base (BufInfo_Init) */
 #define RAW_HDR(reg, mask) ((u32)(reg) | ((u32)(mask) << 16))
@@ -4983,11 +4950,6 @@ static int gx_lost(void) {
   return s_apt.lost;
 }
 
-void ctr_gpu_set_cmd_dedup(int on, int draw) {
-  s_raw.dedup = on ? 1 : 0;
-  s_raw.dedup_draw = draw ? 1 : 0;
-}
-
 static inline u32* raw_ptr(void) {
   return gpuCmdBuf + gpuCmdBufOffset;
 }
@@ -5029,7 +4991,6 @@ static void raw_note_unif(void) {
 
 /* a frame starts with citro3d's state (frame_state_reset) */
 static void raw_frame_reset(void) {
-  raw_forget_regs();
   s_raw.unif_pending = 1;
 }
 
@@ -5049,7 +5010,6 @@ static void raw_check_epoch(void) {
   if (s_raw.apt_epoch != s_raw.seen_epoch) {
     s_raw.seen_epoch = s_raw.apt_epoch;
     raw_gas_flags_clear();
-    raw_forget_regs();
     g.env_valid = 0;
     g.last_mesh_valid = 0;
     g.etie_valid = 0;
@@ -5207,42 +5167,7 @@ static const u32 kRawArrays[22] = {
 /* an indexed triangle list: index_pa = physical address of the first u16 index */
 static void raw_draw_elements(u32 index_pa, u32 count) {
   u32* p = raw_ptr();
-  if (s_raw.dedup_draw && s_raw.prim == GPU_GEOMETRY_PRIM && s_raw.voff0) {
-    /* (AI-assisted) cmd_dedup_draw: the GPU has this mode and vertex offset 0 already: the
-     * template without its PRIMITIVE_CONFIG and VERTEX_OFFSET writes (20 words), then the
-     * post-vertex cache clear */
-    p[0] = 1;
-    p[1] = RAW_HDR(GPUREG_RESTART_PRIMITIVE, 0xF);
-    p[2] = (index_pa - RAW_BUF_BASE) | BIT(31);
-    p[3] = RAW_HDR(GPUREG_INDEXBUFFER_CONFIG, 0xF);
-    p[4] = count;
-    p[5] = RAW_HDR(GPUREG_NUMVERTICES, 0xF);
-    p[6] = 0x100;
-    p[7] = RAW_HDR(GPUREG_GEOSTAGE_CONFIG, 0x2);
-    p[8] = 0x100;
-    p[9] = RAW_HDR(GPUREG_GEOSTAGE_CONFIG2, 0x2);
-    p[10] = 0;
-    p[11] = RAW_HDR(GPUREG_START_DRAW_FUNC0, 0x1);
-    p[12] = 1;
-    p[13] = RAW_HDR(GPUREG_DRAWELEMENTS, 0xF);
-    p[14] = 1;
-    p[15] = RAW_HDR(GPUREG_START_DRAW_FUNC0, 0x1);
-    p[16] = 0;
-    p[17] = RAW_HDR(GPUREG_GEOSTAGE_CONFIG, 0x2);
-    p[18] = 0;
-    p[19] = RAW_HDR(GPUREG_GEOSTAGE_CONFIG2, 0x2);
-    /* raw_vc_clear */
-    p[20] = 1;
-    p[21] = RAW_HDR(GPUREG_VTX_FUNC, 0xF);
-    p[22] = 0;
-    p[23] = RAW_HDR(GPUREG_PRIMITIVE_CONFIG, 0x8);
-    p[24] = 0;
-    p[25] = RAW_HDR(GPUREG_PRIMITIVE_CONFIG, 0x8);
-    g.cur.cmd_dedup_words += 4;
-    raw_end(p + 26);
-    __C3D_Context.flags |= C3DiF_DrawUsed;
-    return;
-  } else {
+  {
     for (int i = 0; i < 24; i += 4) { /* (4 words per ldm / stm) */
       p[i] = kRawElements[i];
       p[i + 1] = kRawElements[i + 1];
@@ -5253,8 +5178,6 @@ static void raw_draw_elements(u32 index_pa, u32 count) {
     p[6] = count;
     p += 24;
   }
-  s_raw.prim = GPU_GEOMETRY_PRIM;
-  s_raw.voff0 = 1;
   raw_end(raw_vc_clear(p));
   __C3D_Context.flags |= C3DiF_DrawUsed;
 }
@@ -5269,8 +5192,6 @@ static void raw_draw_arrays(u32 count, u32 prim) {
   p[0] = prim;
   p[6] = count;
   raw_end(p + 22);
-  s_raw.prim = (int)prim; /* (AI-assisted) cmd_dedup_draw: what the template left */
-  s_raw.voff0 = 1;
   __C3D_Context.flags |= C3DiF_DrawUsed;
 }
 
@@ -5535,58 +5456,10 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
     C3Di_Context* ctx = &__C3D_Context;
     const u32 regs[5] = {tex->border, tex->dim, tex->param, tex->lodParam,
                          osConvertVirtToPhys(tex->data) >> 3};
-    /* (AI-assisted) cmd_dedup: the registers the last raw bind wrote are still the GPU's when
-     * citro3d hasn't bound or sent a texture on unit 0 since (the context's texture is still the
-     * one written then, and not marked for sending; citro3d's own binds here forget them) */
-    const int known = s_raw.dedup && s_raw.tex0_ctx && ctx->tex[0] == s_raw.tex0_ctx &&
-                      !(ctx->flags & C3DiF_Tex(0));
     u32* p = raw_ptr();
-    if (known && s_raw.tex0_regs_ok && (s_micro & MICRO_TEXREGS)) {
-      /* (AI-assisted, micro-gpu) only the registers that change (mostly the address): one write
-       * each, or one burst over the changed span when that is shorter. The others already hold
-       * these values: the same registers at the draw (libctru's GPU_SetTexture writes them one
-       * by one too) */
-      u32 diff = 0;
-      int first = -1, last = -1, n = 0;
-      for (int k = 0; k < 5; k++) {
-        if (regs[k] != s_raw.tex0_regs[k]) {
-          diff |= 1u << k;
-          first = first < 0 ? k : first;
-          last = k;
-          n++;
-        }
-      }
-      u32 w = 0;
-      if (n) {
-        const u32 span = (u32)(last - first + 1);
-        const u32 burst = span + 1 + ((span & 1) ? 0 : 1);
-        if (2u * (u32)n <= burst) {
-          for (int k = 0; k < 5; k++) {
-            if (diff & (1u << k)) {
-              p = raw_w(p, GPUREG_TEXUNIT0_BORDER_COLOR + (u32)k, 0xF, regs[k]);
-            }
-          }
-          w = 2u * (u32)n;
-        } else {
-          p = raw_n(p, GPUREG_TEXUNIT0_BORDER_COLOR + (u32)first, regs + first, span, 1);
-          w = burst;
-        }
-      }
-      g.cur.cmd_dedup_words += 6 - w;
-    } else {
-      p = raw_n(p, GPUREG_TEXUNIT0_BORDER_COLOR, regs, 5, 1);
-    }
-    memcpy(s_raw.tex0_regs, regs, sizeof(regs));
-    s_raw.tex0_regs_ok = 1;
-    /* (AI-assisted) cmd_dedup: the type only when it changes (as the registers above) */
-    if (known && s_raw.tex0_fmt == (u32)tex->fmt) {
-      g.cur.cmd_dedup_words += 2;
-    } else {
-      p = raw_w(p, GPUREG_TEXUNIT0_TYPE, 0xF, tex->fmt);
-      s_raw.tex0_fmt = (u32)tex->fmt;
-    }
+    p = raw_n(p, GPUREG_TEXUNIT0_BORDER_COLOR, regs, 5, 1);
+    p = raw_w(p, GPUREG_TEXUNIT0_TYPE, 0xF, tex->fmt);
     ctx->tex[0] = tex;
-    s_raw.tex0_ctx = tex;
     if (!(ctx->texConfig & 1)) {
       ctx->texConfig |= 1;
       p = raw_w(p, GPUREG_TEXUNIT_CONFIG, 0xB, ctx->texConfig);
@@ -5597,7 +5470,6 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
     raw_end(p);
   } else {
     C3D_TexBind(0, tex);
-    s_raw.tex0_ctx = NULL; /* (AI-assisted, micro-gpu) citro3d sends unit 0 (cmd_dedup) */
   }
   g.bound_tex = tex;
   g.bound_data = tex->data;
@@ -6136,15 +6008,8 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     p = raw_w(p, GPUREG_FRAGOP_ALPHA_TEST, 0xF, e.alphaTest);
   }
   if (e.depthTest != c->depthTest && !stencil_block) {
-    /* (AI-assisted, micro-gpu) cmd_dedup: GAS_DELTAZ_DEPTH's byte only depends on the depth
-     * function (citro3d writes it from the context's, which is the GPU's): left out when only the
-     * enable or the write mask changes */
-    if (!s_raw.dedup || !(s_micro & MICRO_GAS) || ((e.depthTest ^ c->depthTest) & 0x70u)) {
-      p = raw_w(p, GPUREG_GAS_DELTAZ_DEPTH, 0x8,
-                (u32)GPU_MAKEGASDEPTHFUNC((e.depthTest >> 4) & 7) << 24);
-    } else {
-      g.cur.cmd_dedup_words += 2;
-    }
+    p = raw_w(p, GPUREG_GAS_DELTAZ_DEPTH, 0x8,
+              (u32)GPU_MAKEGASDEPTHFUNC((e.depthTest >> 4) & 7) << 24);
     p = raw_w(p, GPUREG_DEPTH_COLOR_MASK, 0xF, e.depthTest);
   }
   if (e.blendClr != c->blendClr) {
@@ -8857,13 +8722,7 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
     raw_vertex_buffer(ms->verts_pa, 0x543210, RAW_BUF_FLAGS1(24, 6, 0));
     raw_sync();
   }
-  /* (AI-assisted) cmd_dedup: the shine draws come one after another (envmap_batch), all with the
-   * camera's matrix and each model's draws with the same bones: each uploaded again only when it
-   * changed or another program used the registers since (use_program clears env_valid) */
-  const int dd = s_raw.dedup && g.env_valid;
-  if (dd && words_equal(g.last_env_clip, clip, 16)) {
-    g.cur.cmd_dedup_words += 18;
-  } else if (raw) {
+  if (raw) {
     /* (AI-assisted, gpuopt) the base pass's words for this instance (skin_clip_words): the same
      * bits, made once */
     const SkinClipEnt* ce = skin_clip_words(clip, 1u | (s_skin_clip_f24 ? 2u : 0u) |
@@ -8878,10 +8737,7 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_env_clip, &m);
     memcpy(g.last_env_clip, clip, sizeof(g.last_env_clip));
   }
-  if (dd && g.last_env_palette_count == palette_count && bones_id &&
-      g.last_env_bones_id == bones_id) {
-    g.cur.cmd_dedup_words += (u32)(12 * palette_count) + 6;
-  } else {
+  {
     if (raw && palette_count > 0 && s_skin_f24) {
       u32 tmp[9 * CTR_MAX_PALETTE];
       raw_skin_rows_f24(g.ps->uloc_env_rows,
@@ -8905,9 +8761,7 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
     g.last_env_palette_count = palette_count;
   }
   /* the texture stage multiplies merc colors by 4: half the fade gives texture * fade * 2 */
-  if (dd && words_equal(g.last_env_fade, fade, 3)) {
-    g.cur.cmd_dedup_words += 6;
-  } else {
+  {
     if (raw) {
       /* (C3D_FVec order: w, z, y, x) */
       const float fv[4] = {0.5f, fade[2] * 0.5f, fade[1] * 0.5f, fade[0] * 0.5f};

@@ -131,7 +131,6 @@ class CtrRenderer {
     int frames = 0;
     double cmd_kb = 0;
     double cmd_kb_peak = 0;  // (AI-assisted, j2-mem2) the most in one frame
-    double dedup_kb = 0;  // (AI-assisted) command words cmd_dedup left out
     int dropped = 0;
     int tex_binds = 0;
     int draws = 0;

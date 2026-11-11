@@ -494,8 +494,6 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_set_skin_clip_f24(ctr_settings().skin_clip_f24 ? 1 : 0);         // (AI-assisted)
   ctr_gpu_set_fog_alpha(ctr_settings().fog_alpha ? 1 : 0);
   ctr_gpu_set_tex1_gating(ctr_settings().tex1_gating ? 1 : 0);
-  ctr_gpu_set_cmd_dedup(ctr_settings().cmd_dedup ? 1 : 0,           // (AI-assisted)
-                        ctr_settings().cmd_dedup_draw ? 1 : 0);
   ctr_gpu_set_raw_cmds(ctr_settings().raw_cmds ? 1 : 0);          // (AI-assisted, hud3)
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
@@ -562,7 +560,6 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.splits += gs.cmd_splits;
   m_timing.cmd_kb += gs.cmd_bytes / 1024.0;
   m_timing.cmd_kb_peak = std::max(m_timing.cmd_kb_peak, gs.cmd_bytes / 1024.0);
-  m_timing.dedup_kb += gs.cmd_dedup_words * 4 / 1024.0;
   m_timing.dropped += gs.dropped_draws;
   m_timing.tex_binds += gs.tex_binds;
   m_timing.draws += gs.draws;
@@ -659,13 +656,13 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
       lg::info(
           "[ctr] render ms/frame over {} frames: wait-gpu {:.2f}, build {:.2f}, submit {:.2f} "
           "(cpu total {:.2f}; gpu-wait {:.2f}); gpu {:.2f} (draw {:.2f}, busy {}); {:.0f} "
-          "triangles, {:.0f} draws, {:.0f} texture binds, {:.0f} KB commands (peak {:.0f} of {} KB; {:.1f} KB left "
-          "out by cmd_dedup); vertex buffer peak {} of {} KB{}{}{}{}",
+          "triangles, {:.0f} draws, {:.0f} texture binds, {:.0f} KB commands (peak {:.0f} of {} KB); "
+          "vertex buffer peak {} of {} KB{}{}{}{}",
           m_timing.frames, m_timing.begin_ms / n, m_timing.build_ms / n, m_timing.end_ms / n,
           (m_timing.begin_ms + m_timing.build_ms + m_timing.end_ms) / n,
           m_timing.gpu_wait_ms / n, m_timing.gpu_ms / n, m_timing.gpu_draw_ms / n, busy,
           m_timing.triangles / n, m_timing.draws / n, m_timing.tex_binds / n,
-          m_timing.cmd_kb / n, m_timing.cmd_kb_peak, ctr_gpu_cmd_buffer_kb(), m_timing.dedup_kb / n,
+          m_timing.cmd_kb / n, m_timing.cmd_kb_peak, ctr_gpu_cmd_buffer_kb(),
           m_timing.vbuf_peak / 1024,
           m_timing.vbuf_size / 1024,
           m_timing.vbuf_dropped

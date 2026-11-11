@@ -298,12 +298,6 @@ struct CtrSettings {
   // shadows never read it). Both on (preset safe: off).
   bool fog_alpha = true;
   bool tex1_gating = true;
-  // (AI-assisted) cmd_dedup: register writes that would give a register the value it already has
-  // are left out of the command list (texture unit 0's type at a texture change). The same
-  // registers, the same picture; on. cmd_dedup_draw: the raw draws' PRIMITIVE_CONFIG mode and
-  // VERTEX_OFFSET writes too (4 of their ~30 words; citro3d writes them before every draw)
-  bool cmd_dedup = true;
-  bool cmd_dedup_draw = true;
   // (AI-assisted) skin_clip_f24: each merc model's clip matrix and lights as float24 uniforms like
   // the bone rows (skin_rows_f24): 11 words less per model. Not bit-identical (rounding): off until
   // priced (pica_bench B2.unif_f24 vs B2.unif_f32, the same line as skin_rows_f24)

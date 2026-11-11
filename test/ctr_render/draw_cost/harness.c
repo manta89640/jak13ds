@@ -34,7 +34,6 @@ static void setup(void) {
   gpuCmdBufSize = sizeof(s_cmd) / 4;
   gpuCmdBufOffset = 0;
   g.ready = 1;
-  s_raw.dedup_draw = 1;
   g.in_frame = 1;
   g.ps = &s_ps[1];
   s_ps[1].ok = 1;
