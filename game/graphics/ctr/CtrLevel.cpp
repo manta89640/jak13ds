@@ -3058,24 +3058,6 @@ inline bool tod_weight_jump(const CtrLevelData::Tod& t, int p, const u8 w[3], u8
   }
   return jump;
 }
-// Whether the game's weights jump in a day palette since the table's last blend (a lightning
-// flash: draw_level's heavy frames in Jak II)
-bool tod_day_jump(const CtrLevelData::Tod& t, const CtrBackgroundCamera& cam) {
-  if (!t.blended_valid) {
-    return true;
-  }
-  u8 w[8][3];
-  tod_weights(cam, w);
-  u8 wa[8];
-  tod_alpha_weights(cam, wa);
-  for (u32 m = t.track_mask & ~t.light_mask; m; m &= m - 1) {
-    const int p = __builtin_ctz(m);
-    if (tod_weight_jump(t, p, w[p], wa[p])) {
-      return true;
-    }
-  }
-  return false;
-}
 int tod_update_w(CtrLevelData::Tod& t, const std::string& level, const u8 (*w)[3], const u8* wa,
                  u64 frame, bool fast_day) {
   if (t.fast_day && !fast_day) {
@@ -12684,27 +12666,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   if (lev.tod) {
     const double t0 = tod_now_ms();
     m_tod_frames++;
-    // (AI-assisted, fable1) a heavy frame (the frame before drew 3x the table's entries in
-    // vertices or more: the title's fast day, citadel's pulse, where a move comes nearly every
-    // frame and every group drawn is rewritten after it) takes the game's new weights every second
-    // frame only: the table and the groups are then rewritten once per two frames, together, and
-    // the colors drawn are at most one frame behind the PC's blend (2-8 color units at the title's
-    // 20x day; the same for every group). Half the time of day work there; gameplay (a move every
-    // few frames, few vertices) is unchanged. Azahar, title: performance.md "Time of day".
-    // (AI-assisted, j2pop) Jak II: every third frame (at most two frames behind). Its city levels'
-    // light palettes move every frame (mood-funcs.gc update-mood-ctysluma: the neon's random
-    // 0.8-1.0 flicker, the flames), so each update rewrites every light vertex in view: HW Oct
-    // 25, the title flight over the slums (ctysluma, 0 day moves) 5.1-5.3 ms of time of day per
-    // frame, build 22-27 ms, 40-66 of 150 frames at 3 vblanks (the game thread waiting 5-10 ms
-    // per frame for the render thread). A flicker at 10 Hz instead of 15 looks the same.
-    // Jak 1 leaves frames out on the title only: in play (village2 draws 3x its table every frame)
-    // every frame's weights are drawn. Jak II never leaves out a frame where a day palette jumps
-    // (a lightning flash: a new weight every frame).
-    // Jak 1's title takes new weights every fourth frame (its 20x day moves every palette)
-    const u64 tod_period = g_game_version == GameVersion::Jak2 ? 3 : 4;
-    const bool tod_skip =
-        m_tod_heavy && (rs.frame_idx % tod_period) != 0 &&
-        (g_game_version == GameVersion::Jak2 ? !tod_day_jump(*lev.tod, cam) : title_on);
+    // (AI-assisted, fable1) Jak 1's title: a heavy frame (the frame before drew 3x the table's
+    // entries in vertices or more: its 20x day moves every palette) takes the game's new weights
+    // every fourth frame only. Gameplay in both games takes every frame's weights.
+    const bool tod_skip = m_tod_heavy && title_on && (rs.frame_idx % 4) != 0;
     m_tod_skipped += tod_skip;
     if (!tod_skip) {
       m_tod_blends += tod_update(*lev.tod, lev.name, cam, rs.frame_idx, title_on) == 2;
