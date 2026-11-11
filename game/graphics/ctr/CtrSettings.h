@@ -256,11 +256,6 @@ struct CtrSettings {
   // pieces of ~96 triangles made at load) tested against the view on their own: only the ones on
   // screen are drawn (bounding spheres made at load, 8 bytes per piece)
   bool run_culling = true;
-  // (AI-assisted, occluders) level geometry hidden behind the occluder_count biggest occluders near
-  // the camera (boxes inside closed tie surfaces, c3l::ExtOcc: levels converted with the current
-  // ctr_level_converter) is not drawn (docs/3ds-port/culling.md). Off: not yet seen on a console
-  bool occluders = false;
-  int occluder_count = 6;
   // (AI-assisted, horizon) level geometry entirely beyond horizon_radius meters and below the
   // terrain's horizon (c3l::ExtHorizon: the hills of the level the camera is over) is not drawn
   // (docs/3ds-port/culling.md). Off: not yet seen on a console

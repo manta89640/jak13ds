@@ -33,12 +33,12 @@
 #include "ctr_texture.h"
 #include "keira_model.h"
 #include "horizon.h"
-#include "occluders.h"
 #include "c3l_compare.h"
 #include "texshare.h"
 #include "tfrag_lod.h"
 #include "tie_lod.h"
 #include "fmt/format.h"
+#include "game/graphics/ctr/CtrCull.h"
 #include "game/graphics/ctr/c3l_format.h"
 #include "game/graphics/ctr/CtrTexAnimJak2Defs.h"
 #include "third-party/BS_thread_pool.hpp"
@@ -193,8 +193,6 @@ struct Options {
   // (AI-assisted) v13: tie strips wound consistently (odd strip triangles flipped), closed tie
   // surfaces oriented outward and marked for back face culling (c3l::kDrawCullBack)
   bool tie_winding = true;
-  // (AI-assisted, occluders) c3l::ExtOcc: boxes inside the closed tie surfaces (needs tie_winding)
-  bool occluders = true;
   // (AI-assisted, horizon) c3l::ExtHorizon: the terrain grid for horizon culling
   bool horizon = true;
   // (AI-assisted, farcopy) c3l::ExtFarCopy: simplified copies of the plain tie geometry (off: the
@@ -1966,136 +1964,6 @@ struct Converter {
       far_groups++;
     }
   }
-  // (AI-assisted, occluders) boxes inside closed tie surfaces (c3l::Occluder), before the tie LOD
-  // margin (occluder_table shrinks them by the shape error of the LOD groups around them)
-  struct OccCand {
-    ctr_cull::Box box;
-    u16 vis;
-    float margin;  // how far the surface's morph moves a vertex (game units)
-    std::vector<u32> tris;  // the surface's triangles (their draws' final modes: occluder_table)
-  };
-  std::vector<OccCand> occ_cands;
-  size_t occ_tried = 0;
-  void occ_candidate(const std::vector<u32>& members,
-                     const std::vector<u32>& ids,
-                     const std::vector<occluders::Tri>& closed,
-                     u16 vis) {
-    occluders::Params p;
-    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
-    float margin = 0;
-    for (u32 t : members) {
-      const auto& tri = tris[ids[t]];
-      if (tri.proto != 0xffff) {
-        return;  // a prototype the game hides by task state (Jak II): not always there
-      }
-      for (int c = 0; c < 3; c++) {
-        const auto& v = verts[tri.v[c]];
-        if (v.wind != UINT32_MAX) {
-          return;  // moved by the wind
-        }
-        const float q[3] = {v.x, v.y, v.z};
-        for (int k = 0; k < 3; k++) {
-          lo[k] = std::min(lo[k], q[k]);
-          hi[k] = std::max(hi[k], q[k]);
-        }
-        if (v.mband) {
-          const float a = std::sqrt(v.mdelta[0] * v.mdelta[0] + v.mdelta[1] * v.mdelta[1] +
-                                    v.mdelta[2] * v.mdelta[2]);
-          const float b = std::sqrt(v.mdelta2[0] * v.mdelta2[0] + v.mdelta2[1] * v.mdelta2[1] +
-                                    v.mdelta2[2] * v.mdelta2[2]);
-          margin = std::max(margin, a + b);
-        }
-      }
-    }
-    // (most surfaces are too small for a box of the minimum size: no voxels for them)
-    for (int k = 0; k < 3; k++) {
-      if (hi[k] - lo[k] < 2.2 * p.min_half) {
-        return;
-      }
-    }
-    occ_tried++;
-    ctr_cull::Box b;
-    if (occluders::inscribed_box(closed, p, &b)) {
-      std::vector<u32> own;
-      own.reserve(members.size());
-      for (u32 t : members) {
-        own.push_back(ids[t]);
-      }
-      occ_cands.push_back({b, vis, margin, std::move(own)});
-    }
-  }
-  //! the occluders to write: each candidate shrunk by its morph and the shape error of the tie
-  //! LOD groups around its center (a box inside every version), small ones dropped, the same
-  //! box of a node once, the biggest kMaxOccluders
-  std::vector<c3l::Occluder> occluder_table() const {
-    constexpr size_t kMaxOccluders = 1024;
-    const occluders::Params p;
-    struct Sized {
-      float size;
-      c3l::Occluder o;
-    };
-    std::vector<Sized> out;
-    for (const auto& c : occ_cands) {
-      // a surface drawn blended (key_cullable takes Cs As + Cd (1 - As) blending, which the draw
-      // optimisations drop only where every texel is opaque): see-through, not an occluder
-      bool blended = false;
-      for (u32 ti : c.tris) {
-        DrawMode mode;
-        mode.as_int() = draw_keys[tris[ti].draw_key].mode;
-        blended = blended || mode.get_ab_enable();
-      }
-      if (blended) {
-        continue;
-      }
-      float m = c.margin;
-      for (size_t g = 0; g < lod_groups.size() && g < lod_group_error.size(); g++) {
-        const float* bs = lod_groups[g].bsphere;
-        const float dx = c.box.c[0] - bs[0], dy = c.box.c[1] - bs[1], dz = c.box.c[2] - bs[2];
-        if (dx * dx + dy * dy + dz * dz <= bs[3] * bs[3]) {
-          m = std::max(m, c.margin + lod_group_error[g]);
-        }
-      }
-      c3l::Occluder o{};
-      bool ok = true;
-      for (int k = 0; k < 3; k++) {
-        o.c[k] = c.box.c[k];
-        o.h[k] = c.box.h[k] - m;
-        o.ax0[k] = c.box.ax[0][k];
-        o.ax1[k] = c.box.ax[1][k];
-        ok = ok && o.h[k] >= (float)p.min_half;
-      }
-      if (!ok) {
-        continue;
-      }
-      o.vis = c.vis;
-      const float size = o.h[0] * o.h[1] + o.h[1] * o.h[2] + o.h[2] * o.h[0];
-      if (size < (float)p.min_faces) {
-        continue;
-      }
-      out.push_back({size, o});
-    }
-    std::stable_sort(out.begin(), out.end(), [](const Sized& a, const Sized& b) { return a.size > b.size; });
-    std::vector<c3l::Occluder> res;
-    for (const auto& s : out) {
-      // the same box twice (a node's two versions): once
-      bool dup = false;
-      for (const auto& r : res) {
-        if (r.vis != s.o.vis) {
-          continue;
-        }
-        const float dx = r.c[0] - s.o.c[0], dy = r.c[1] - s.o.c[1], dz = r.c[2] - s.o.c[2];
-        const float hmin = std::min({s.o.h[0], s.o.h[1], s.o.h[2]});
-        dup = dup || dx * dx + dy * dy + dz * dz < 0.25f * hmin * hmin;
-      }
-      if (!dup) {
-        res.push_back(s.o);
-      }
-      if (res.size() == kMaxOccluders) {
-        break;
-      }
-    }
-    return res;
-  }
   /*!
    * (AI-assisted) The tie triangles [first, end): per visibility group (up to 8 instances), the
    * cullable triangles welded by position into surfaces (edges shared by exactly two triangles),
@@ -2463,10 +2331,6 @@ struct Converter {
         if (!encloses(closed, members.size(), vs < 0 ? -1.0 : 1.0)) {
           orient_parity_tris += members.size();
           continue;
-        }
-        // (AI-assisted, occluders) a box inside a surface without planar openings
-        if (opt.occluders && cond_parts.empty()) {
-          occ_candidate(members, ids, closed, vis);
         }
         const u8 inward = vs < 0 ? 1 : 0;
         orient_sealed_tris += sealed_parts ? members.size() : 0;
@@ -7896,10 +7760,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   const bool env_out = ext_out && !out_env_draws.empty();
   const bool wind_out = ext_out && !wind_chunk_verts.empty();
   const bool cond_out = ext_out && !out_cond_sets.empty();
-  // (AI-assisted, occluders) c3l::ExtOcc
-  const std::vector<c3l::Occluder> out_occ =
-      ext_out && opt.occluders ? cv.occluder_table() : std::vector<c3l::Occluder>{};
-  const bool occ_out = !out_occ.empty();
   // (AI-assisted, horizon) c3l::ExtHorizon: the opaque tfrag a camera in the level may see drawn
   // (tiers 0-2, not the low resolution or vista tiers), each tier and geomorph version a version
   horizon::Grid hz_grid;
@@ -7950,7 +7810,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                       : cone_out                         ? c3l::kExtHeaderConeSize
                       : far_out                          ? c3l::kExtHeaderFarCopySize
                       : hz_out                           ? c3l::kExtHeaderHorizonSize
-                      : occ_out                          ? c3l::kExtHeaderOccSize
                       : tfrag_out                        ? c3l::kExtHeaderTfragSize
                       : morph_out                        ? c3l::kExtHeaderMorphSize
                       : cond_out                         ? c3l::kExtHeaderV24Size
@@ -8361,20 +8220,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     ext_put(c3l::kExtHeaderTexKeySize, &ec, sizeof(ec));
     lg::info("{}: culling by opening planes: {} draws, {} planes", level.level_name, cds.size(),
              planes);
-  }
-  if (occ_out) {
-    // (AI-assisted, occluders) the boxes inside closed tie surfaces (load_occluders)
-    c3l::ExtOcc eo{};
-    eo.count = (u32)out_occ.size();
-    eo.offset = append(buf, out_occ.data(), out_occ.size());
-    ext_put(c3l::kExtHeaderTfragSize, &eo, sizeof(eo));
-    double area = 0;
-    for (const auto& o : out_occ) {
-      area += 4.0 * std::max({o.h[0] * o.h[1], o.h[1] * o.h[2], o.h[2] * o.h[0]}) / (4096.0 * 4096.0);
-    }
-    lg::info("{}: occluders: {} boxes (of {} surfaces big enough, {} found), largest faces {:.0f} "
-             "m^2 in all",
-             level.level_name, out_occ.size(), cv.occ_tried, cv.occ_cands.size(), area);
   }
   if (hz_out) {
     // (AI-assisted, horizon) the terrain grid (load_horizon)
@@ -9185,8 +9030,6 @@ int main(int argc, char** argv) {
   app.add_flag("--no-tie-winding", no_tie_winding,
                "keep the strips' triangle order (no flipping, no back face culling marks)");
   app.add_flag("--no-vista", no_vista, "no vista tier (far scenery cells)");
-  bool no_occluders = false;  // (AI-assisted, occluders)
-  app.add_flag("--no-occluders", no_occluders, "no occluders (boxes inside closed tie surfaces)");
   bool no_horizon = false;  // (AI-assisted, horizon)
   app.add_flag("--face-runs", opt.face_runs,
                "back face culled triangles in runs by facing, with normal cones (c3l::ExtCones)");
@@ -9219,7 +9062,6 @@ int main(int argc, char** argv) {
   opt.atlas = !no_atlas;
   opt.opaque_alpha = !no_opaque_alpha;
   opt.tie_winding = !no_tie_winding;
-  opt.occluders = !no_occluders;
   opt.horizon = !no_horizon;
   opt.tie_far_near_colors = !tie_far_own_colors;
   opt.tie_lod = !no_tie_lod;

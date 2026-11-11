@@ -969,16 +969,12 @@ the wall is broken, the sewer hover door, the strip's vents).
   statue wall without the rubble slabs, as the PC; strip hides 13 of 24 (2093 triangles not drawn
   per level draw), sewer its hover door.
 
-## Culling data (ExtOcc and after)
+## Culling data (after ExtTfrag)
 
 (AI-assisted, Nov 11.) Tables for the culling keys of docs/3ds-port/culling.md, each appended to
 the extension header (no version change: an older reader stops at its own `ExtHeader::size`, the
 sections before a present one are zero when the level has none).
 
-- `ExtOcc` (size >= `kExtHeaderOccSize` 224, at ext_offset + 208): `Occluder[count]`, 64 bytes
-  each: center, half extents, two unit axes (the third is their cross product), the tie node
-  (`vis`) whose closed surface holds the box. Written by default (`--no-occluders`: none), read
-  only while config.ini `occluders` is on.
 - `ExtHorizon` (size >= `kExtHeaderHorizonSize` 256, at ext_offset + 224): the terrain grid for
   horizon culling: the corner of cell (0, 0), the cell size (8 m, larger for levels wider than 192
   cells), a base height, then `u16 minh[nz][nx]` (quarter meters above the base, 0xffff: not

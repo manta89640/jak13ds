@@ -705,15 +705,6 @@ struct CtrLevelData {
   // per group its near chunks (stream_units holding its near or mid version) and the frame it was
   // first held coarser in view for want of them
   std::vector<u32> tf_unit_first, tf_unit_count, tf_units, tf_hold_since;
-  // (AI-assisted, occluders) boxes inside closed tie surfaces (c3l::ExtOcc, config.ini occluders).
-  // Per occluder the ordinary tie chunks that hold its node's runs around it (occ_support, made at
-  // the level's first draw: occ_made); an occluder counts only while all of them were drawn
-  // opaque in the main pass the frame before (chunk_opaque_frame)
-  std::vector<c3l::Occluder> occluders;
-  std::vector<std::array<u32, 4>> occ_support;
-  std::vector<u8> occ_support_n;
-  std::vector<u32> chunk_opaque_frame;
-  bool occ_made = false;
   // (AI-assisted, horizon) the terrain grid (c3l::ExtHorizon; hz_nx 0: none, read only while
   // config.ini horizon is on), and the frame + 1 the level was last drawn in near mode
   float hz_x0 = 0, hz_z0 = 0, hz_cell = 0, hz_base_y = 0;
@@ -1624,13 +1615,6 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_fade_runs = 0;
   u64 m_lod_groups_near = 0, m_lod_frames = 0, m_lod_tris[2] = {0, 0};
   u64 m_cull_runs = 0, m_cull_tris = 0, m_cull_chunks = 0, m_cull_frames = 0;
-  // (AI-assisted, occluders) the shadows of the occluders chosen for the level being drawn
-  // (choose_occluders), and statistics: level draws with any, occluders chosen, chunks and runs
-  // they hid, the runs' triangles
-  static constexpr int kMaxOccluders = 16;
-  std::array<ctr_cull::Shadow, kMaxOccluders> m_occ_shadow;
-  int m_occ_n = 0;
-  u64 m_occ_frames = 0, m_occ_used = 0, m_occ_chunks = 0, m_occ_runs = 0, m_occ_tris = 0;
   // (AI-assisted, horizon) this level draw's horizon (frame_horizon) and statistics: level draws,
   // of them with a horizon, chunks and runs it hid, the runs' triangles
   ctr_cull::Horizon m_hz;
@@ -1660,8 +1644,6 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_sz_frames = 0, m_sz_chunks = 0, m_sz_runs = 0, m_sz_tris = 0;
   u64 m_cv_frames = 0, m_cv_ok = 0, m_cv_chunks = 0, m_cv_runs = 0, m_cv_tris = 0;
   u64 m_dr_frames = 0, m_dr_on = 0, m_dr_chunks = 0, m_dr_runs = 0, m_dr_tris = 0;
-  void choose_occluders(CtrLevelData& lev, const CtrBackgroundCamera& cam, u64 frame,
-                        float draw_dist);
   // kDrawCullCond draws of visible chunks, and of them culled (camera inside)
   u64 m_cond_draws = 0, m_cond_culled = 0;
   // (AI-assisted) lowres_vista / neighbour_vis: low resolution chunks drawn in near mode, and the

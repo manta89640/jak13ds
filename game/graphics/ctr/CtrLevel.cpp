@@ -5802,35 +5802,6 @@ void load_cull_cond(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
            lev->cond_boxes.empty() ? " (an older file: both sides drawn)" : "");
 }
 
-// (AI-assisted, occluders) c3l::ExtOcc: the boxes inside closed tie surfaces (read only while
-// config.ini occluders is on: up to kMaxLevelOccluders x 64 bytes of heap otherwise unused)
-void load_occluders(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
-  constexpr u32 kMaxLevelOccluders = 1024;
-  lev->occluders.clear();
-  lev->occ_support.clear();
-  lev->occ_support_n.clear();
-  lev->occ_made = false;
-  if (!ctr_settings().occluders) {
-    return;
-  }
-  c3l::ExtHeader eh;
-  if (!hdr.ext_offset || !read_ext_header(f, hdr, &eh) || eh.size < c3l::kExtHeaderOccSize) {
-    return;
-  }
-  c3l::ExtOcc eo{};
-  if (!f.read(hdr.ext_offset + c3l::kExtHeaderTfragSize, &eo, sizeof(eo)) || !eo.count ||
-      !eo.offset) {
-    return;
-  }
-  const u32 n = std::min<u32>(eo.count, kMaxLevelOccluders);
-  if (!f.read_array(eo.offset, n, &lev->occluders)) {
-    lev->occluders.clear();
-    lg::warn("[ctr] {}: bad occluder table, no occluders", lev->name);
-    return;
-  }
-  lg::info("[ctr] {}: occluders: {} of {}", lev->name, lev->occluders.size(), eo.count);
-}
-
 // (AI-assisted, horizon) c3l::ExtHorizon: the terrain grid (read only while config.ini horizon is
 // on; 3 bytes per cell, at most 192 x 192)
 void load_horizon(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
@@ -7893,7 +7864,6 @@ bool CtrLevels::load_file(const fs::path& path,
   load_env_ties(f, hdr, out);  // (AI-assisted, j2water2) c3l v21 (after the textures, draw order)
   load_wind_ties(f, hdr, out);
   load_cull_cond(f, hdr, out);
-  load_occluders(f, hdr, out);  // (AI-assisted, occluders)
   load_horizon(f, hdr, out);    // (AI-assisted, horizon)
   load_vis_bake(out);           // (AI-assisted, visbake)
   load_far_copy(f, hdr, out);   // (AI-assisted, farcopy)
@@ -10663,81 +10633,6 @@ CTR_HOT bool sphere_in_view(const CtrBackgroundCamera& cam, const float* s) {
   return (all >> 31) != 0;
 }
 
-// (AI-assisted, occluders) per occluder the ordinary tie chunks (not near chunks, not the vista
-// tier) with runs of its node whose sphere reaches its box: while they are drawn opaque, so is the
-// surface around it (in one of its versions: the box is inside all of them). An occluder with
-// none, or with more than four, is never used.
-void make_occ_support(CtrLevelData& lev) {
-  lev.occ_made = true;
-  const size_t n = lev.occluders.size();
-  lev.occ_support.assign(n, {});
-  lev.occ_support_n.assign(n, 0);
-  lev.chunk_opaque_frame.assign(lev.chunks.size(), 0);
-  if (lev.run_spheres.size() < lev.vis_runs.size()) {
-    return;
-  }
-  std::unordered_multimap<u16, u32> by_vis;
-  std::vector<float> rad(n);
-  for (u32 i = 0; i < n; i++) {
-    const auto& o = lev.occluders[i];
-    by_vis.emplace(o.vis, i);
-    rad[i] = std::sqrt(o.h[0] * o.h[0] + o.h[1] * o.h[1] + o.h[2] * o.h[2]);
-  }
-  std::vector<u8> overflow(n, 0);
-  for (size_t ci = 0; ci < lev.chunks.size(); ci++) {
-    const auto& ch = lev.chunks[ci];
-    // (not the far copies: simplified, they needn't hold the box; while a cell's copies are drawn
-    // its sources aren't, so their occluders aren't used)
-    if (ch.kind != c3l::CHUNK_KIND_TIE || lev.is_unit(ci) || !ch.vis_run_count ||
-        (ci < lev.far_role.size() && lev.far_role[ci] == 2)) {
-      continue;
-    }
-    const u32 r0 = lev.chunk_first_run[ci];
-    for (u32 r = r0; r < r0 + ch.vis_run_count; r++) {
-      const u16 vis = lev.vis_runs[r].vis;
-      const auto& sp = lev.run_spheres[r];
-      if (vis == 0xffff || sp.r == 0xffff) {
-        continue;
-      }
-      const float c[3] = {ch.origin[0] + sp.c[0] * ch.scale, ch.origin[1] + sp.c[1] * ch.scale,
-                          ch.origin[2] + sp.c[2] * ch.scale};
-      const float rr = (float)sp.r * ch.scale;
-      auto range = by_vis.equal_range(vis);
-      for (auto it = range.first; it != range.second; ++it) {
-        const u32 i = it->second;
-        const auto& o = lev.occluders[i];
-        const float dx = c[0] - o.c[0], dy = c[1] - o.c[1], dz = c[2] - o.c[2];
-        if (dx * dx + dy * dy + dz * dz > (rr + rad[i]) * (rr + rad[i])) {
-          continue;
-        }
-        auto& sup = lev.occ_support[i];
-        u8& k = lev.occ_support_n[i];
-        bool have = false;
-        for (u8 j = 0; j < k; j++) {
-          have = have || sup[j] == (u32)ci;
-        }
-        if (have) {
-          continue;
-        }
-        if (k == sup.size()) {
-          overflow[i] = 1;
-        } else {
-          sup[k++] = (u32)ci;
-        }
-      }
-    }
-  }
-  size_t used = 0;
-  for (size_t i = 0; i < n; i++) {
-    if (overflow[i]) {
-      lev.occ_support_n[i] = 0;
-    }
-    used += lev.occ_support_n[i] != 0;
-  }
-  lg::info("[ctr] {}: occluders: {} of {} have the tie chunks that draw their surface", lev.name,
-           used, n);
-}
-
 // (AI-assisted) a chunk's draw distance limit (game units, 0: none): the converter's (small and
 // medium objects) times detail_scale. With chunk kinds (newer c3l files): shrubs up to
 // shrub_distance (GPU-bound levels had 200-300k shrub triangles within the converter's 100 m),
@@ -11696,14 +11591,6 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              (double)m_cull_tris / m_cull_frames, m_cull_frames);
     m_cull_runs = m_cull_tris = m_cull_chunks = m_cull_frames = 0;
   }
-  if (rs.log_now && m_occ_frames) {
-    // (AI-assisted, occluders)
-    const double n = (double)m_occ_frames;
-    lg::info("[ctr] {}: occluders: {:.1f} chosen, hid {:.1f} chunks and {:.1f} runs ({:.0f} tris) "
-             "per level draw ({} level draws)",
-             m_name, m_occ_used / n, m_occ_chunks / n, m_occ_runs / n, m_occ_tris / n, m_occ_frames);
-    m_occ_frames = m_occ_used = m_occ_chunks = m_occ_runs = m_occ_tris = 0;
-  }
   if (rs.log_now && m_hz_frames) {
     // (AI-assisted, horizon)
     const double n = (double)m_hz_frames;
@@ -12581,92 +12468,6 @@ bool frame_horizon(const std::vector<const CtrLevelData*>& levels,
     *out = s_hz;
   }
   return s_ok;
-}
-
-// (AI-assisted, occluders) the occluders for this level draw (m_occ_shadow): of those whose node
-// the game's string shows, whose surface was drawn opaque the frame before, in view and within
-// the draw distance, the occluder_count that look biggest from the camera
-void CtrTfragRenderer::choose_occluders(CtrLevelData& lev,
-                                        const CtrBackgroundCamera& cam,
-                                        u64 frame,
-                                        float draw_dist) {
-  m_occ_n = 0;
-  const auto& s = ctr_settings();
-  if (!s.occluders || lev.occluders.empty()) {
-    return;
-  }
-  if (!lev.occ_made || lev.chunk_opaque_frame.size() != lev.chunks.size()) {
-    make_occ_support(lev);
-  }
-  // the camera at least this far outside the box: the surface in front of it is beyond the near
-  // plane (a camera grazing a wall sees through the near plane's cut)
-  constexpr float kMargin = 3.f * 4096.f;
-  const int want = std::clamp(s.occluder_count, 1, kMaxOccluders);
-  struct Pick {
-    float score;
-    u32 i;
-  };
-  Pick best[kMaxOccluders];
-  int nb = 0;
-  const u32 now = (u32)frame + 1;
-  for (u32 i = 0; i < lev.occluders.size(); i++) {
-    const u8 ns = lev.occ_support_n[i];
-    if (!ns) {
-      continue;
-    }
-    const auto& o = lev.occluders[i];
-    if (m_vis && o.vis != 0xffff && !(m_vis[o.vis >> 3] & (0x80 >> (o.vis & 7)))) {
-      continue;
-    }
-    const float dx = o.c[0] - cam.trans[0], dy = o.c[1] - cam.trans[1], dz = o.c[2] - cam.trans[2];
-    const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
-    const float rad = std::sqrt(o.h[0] * o.h[0] + o.h[1] * o.h[1] + o.h[2] * o.h[2]);
-    if (d - rad > draw_dist || d < kMargin) {
-      continue;
-    }
-    const float sph[4] = {o.c[0], o.c[1], o.c[2], rad};
-    if (!sphere_in_view(cam, sph)) {
-      continue;
-    }
-    bool drawn = true;
-    for (u8 k = 0; k < ns && drawn; k++) {
-      const u32 st = lev.chunk_opaque_frame[lev.occ_support[i][k]];
-      drawn = st && now - st <= 1;
-    }
-    if (!drawn) {
-      continue;
-    }
-    const float sc = (o.h[0] * o.h[1] + o.h[1] * o.h[2] + o.h[2] * o.h[0]) / std::max(d * d, 1.f);
-    int at = nb < want ? nb++ : want;
-    if (at == want) {
-      if (!(sc > best[want - 1].score)) {
-        continue;
-      }
-      at = want - 1;
-    }
-    while (at > 0 && best[at - 1].score < sc) {
-      best[at] = best[at - 1];
-      at--;
-    }
-    best[at] = {sc, i};
-  }
-  const float eye[3] = {cam.trans[0], cam.trans[1], cam.trans[2]};
-  for (int k = 0; k < nb; k++) {
-    const auto& o = lev.occluders[best[k].i];
-    ctr_cull::Box b;
-    for (int m = 0; m < 3; m++) {
-      b.c[m] = o.c[m];
-      b.h[m] = o.h[m];
-      b.ax[0][m] = o.ax0[m];
-      b.ax[1][m] = o.ax1[m];
-    }
-    ctr_cull::cross3(b.ax[0], b.ax[1], b.ax[2]);
-    if (ctr_cull::make_shadow(b, eye, kMargin, &m_occ_shadow[m_occ_n])) {
-      m_occ_n++;
-    }
-  }
-  m_occ_frames++;
-  m_occ_used += m_occ_n;
 }
 
 void CtrTfragRenderer::draw_level(CtrLevelData& lev,
@@ -14090,12 +13891,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
 #else
   const bool baking = false;
 #endif
-  // (AI-assisted, occluders) this level draw's occluders (m_occ_shadow)
-  if (!baking) {
-    choose_occluders(lev, cam, rs.frame_idx, draw_dist);
-  } else {
-    m_occ_n = 0;
-  }
   // (AI-assisted, horizon) the frame's horizon (m_hz), and this level's terrain as standing there
   m_hz_ok = false;
   if (settings.horizon && !baking) {
@@ -14208,14 +14003,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
       m_fc_copies += far;
     }
-    // (AI-assisted, occluders) a tie chunk the main pass draws opaque wherever it is in view
-    // (choose_occluders): past the distance, fade, vista and far copy decisions, before the view
-    // test and the culls below (a chunk an occluder's own shadow hides still draws its surface
-    // where that is on screen: its part in view is in other chunks, which are drawn)
-    if (!lev.chunk_opaque_frame.empty() && !vista_chunk && !vista_tier &&
-        m_tie_fade[ci] >= kRunOpaque) {
-      lev.chunk_opaque_frame[ci] = (u32)rs.frame_idx + 1;
-    }
     const bool sel_last = lev.pop_sel[ci] == pf_last;
     lev.pop_sel[ci] = pf;
     const float cfloor = lev.chunk_floor(ci, std::max<u32>((u32)rs.frame_idx, 1u));
@@ -14245,17 +14032,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             cross |= acc[i] < s[3] ? 1u << i : 0u;
           }
         }
-      }
-      // (AI-assisted, occluders) a chunk inside an occluder's shadow is hidden whole; the
-      // occluders whose shadow it reaches into test its runs (below, after the run loop)
-      u32 occ_mask = 0;
-      for (int i = 0; i < m_occ_n; i++) {
-        const int c = ctr_cull::classify(m_occ_shadow[i], ch.bsphere, ch.bsphere[3]);
-        if (c == 2) {
-          m_occ_chunks++;
-          return;
-        }
-        occ_mask |= c ? 1u << i : 0u;
       }
       // (AI-assisted, horizon) a chunk below the horizon is hidden whole; one partly below it has
       // its runs tested (below)
@@ -14390,15 +14166,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           tmorph = !(w <= m_tf_still_w);
         }
       }
-      // (AI-assisted, occluders) the runs inside an occluder's shadow (the occluders the chunk
-      // reaches into); hidden runs may still be drawn along with their neighbours (the small-gap
-      // merge), as the view test's
+      // the opt-in culls' runs; hidden runs may still be drawn along with their neighbours (the
+      // small-gap merge), as the view test's
       const bool run_sph = lev.run_spheres.size() >= lev.vis_runs.size();
       const u32 x_nr = vis_test || vista_tier
                            ? ch.vis_run_count
                            : (lev.chunk_run_count[ci] ? lev.chunk_run_count[ci] : ch.vis_run_count);
       const bool cone_runs = m_cone_on && run_sph && !vista_tier;  // (AI-assisted, facecull)
-      if ((((occ_mask || hz_runs || dr_runs || sz_runs || cone_runs) && run_sph) || m_vb_n || m_cv_on) &&
+      if ((((hz_runs || dr_runs || sz_runs || cone_runs) && run_sph) || m_vb_n || m_cv_on) &&
           x_nr) {
         const u32 r0 = lev.chunk_first_run[ci];
         const u32 nr = x_nr;
@@ -14434,14 +14209,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             const float c[3] = {ch.origin[0] + sp.c[0] * ch.scale, ch.origin[1] + sp.c[1] * ch.scale,
                                 ch.origin[2] + sp.c[2] * ch.scale};
             const float rr = (float)sp.r * ch.scale;
-            for (u32 m = occ_mask; m; m &= m - 1) {
-              if (ctr_cull::hidden(m_occ_shadow[__builtin_ctz(m)], c, rr)) {
-                m_run_shown[r] = 0;
-                m_occ_runs++; hid_by = &m_occ_chunks;
-                m_occ_tris += lev.vis_runs[r].index_count / 3;
-                break;
-              }
-            }
             if (hz_runs && m_run_shown[r] && ctr_cull::horizon_classify(m_hz, c, rr) == 2) {
               m_run_shown[r] = 0;
               m_hz_runs++; hid_by = &m_hz_chunks;
