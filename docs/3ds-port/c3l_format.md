@@ -968,3 +968,14 @@ the wall is broken, the sewer hover door, the strip's vents).
 - Host check (pad `platform/3ds/tests/jak2_proto_vis.pad`, the pad's act-2 state): ctypal-tomb shows the
   statue wall without the rubble slabs, as the PC; strip hides 13 of 24 (2093 triangles not drawn
   per level draw), sewer its hover door.
+
+## Culling data (ExtOcc and after)
+
+(AI-assisted, Nov 11.) Tables for the culling keys of docs/3ds-port/culling.md, each appended to
+the extension header (no version change: an older reader stops at its own `ExtHeader::size`, the
+sections before a present one are zero when the level has none).
+
+- `ExtOcc` (size >= `kExtHeaderOccSize` 224, at ext_offset + 208): `Occluder[count]`, 64 bytes
+  each: center, half extents, two unit axes (the third is their cross product), the tie node
+  (`vis`) whose closed surface holds the box. Written by default (`--no-occluders`: none), read
+  only while config.ini `occluders` is on.

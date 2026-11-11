@@ -591,6 +591,33 @@ struct TfragMorphColor {
 static_assert(sizeof(TfragMorphColor) == 16);
 
 /*!
+ * (AI-assisted, occluders) Boxes inside closed tie surfaces (a rock, a house): every ray that
+ * enters one has crossed the surface first, so the level geometry behind it is hidden
+ * (tools/ctr_level_converter occluders.cpp, config.ini `occluders`, docs/3ds-port/culling.md).
+ * Each box is inside every version of its surface: the converter shrinks it by the tie LOD
+ * shape error and the morph offsets around it. ExtHeader::size >= kExtHeaderOccSize, then this at
+ * ext_offset + kExtHeaderTfragSize (the sections before it zero when the level has none). No
+ * version change: older readers stop at their own size.
+ */
+constexpr uint32_t kExtHeaderOccSize = 224;
+struct ExtOcc {
+  uint32_t count;   // Occluder[]
+  uint32_t offset;  // absolute
+  uint32_t pad[2];
+};
+static_assert(sizeof(ExtOcc) == kExtHeaderOccSize - kExtHeaderTfragSize);
+struct Occluder {
+  float c[3];    // center (world, game units)
+  float h[3];    // half extents along the axes
+  float ax0[3];  // the first axis (unit length)
+  float ax1[3];  // the second axis; the third is ax0 x ax1
+  uint16_t vis;  // the tie node (visibility id) whose surface holds it
+  uint16_t pad;
+  float pad2[3];
+};
+static_assert(sizeof(Occluder) == 64);
+
+/*!
  * (AI-assisted, streaming) v19: a run's bounding sphere in its chunk's quantized units (world =
  * origin + c * scale, radius r * scale): the center of the box of the run's vertices (rounded down)
  * and the length of the larger half of the box per axis, ceil + 1 (as the runtime made them from the

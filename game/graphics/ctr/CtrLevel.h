@@ -31,6 +31,7 @@
 #include "common/dma/gs.h"
 #include "common/util/FileUtil.h"
 
+#include "game/graphics/ctr/CtrCull.h"
 #include "game/graphics/ctr/CtrRenderer.h"
 #include "game/graphics/ctr/CtrKeiraRig.h"
 #include "game/graphics/ctr/CtrTodPulse.h"
@@ -703,6 +704,15 @@ struct CtrLevelData {
   // per group its near chunks (stream_units holding its near or mid version) and the frame it was
   // first held coarser in view for want of them
   std::vector<u32> tf_unit_first, tf_unit_count, tf_units, tf_hold_since;
+  // (AI-assisted, occluders) boxes inside closed tie surfaces (c3l::ExtOcc, config.ini occluders).
+  // Per occluder the ordinary tie chunks that hold its node's runs around it (occ_support, made at
+  // the level's first draw: occ_made); an occluder counts only while all of them were drawn
+  // opaque in the main pass the frame before (chunk_opaque_frame)
+  std::vector<c3l::Occluder> occluders;
+  std::vector<std::array<u32, 4>> occ_support;
+  std::vector<u8> occ_support_n;
+  std::vector<u32> chunk_opaque_frame;
+  bool occ_made = false;
   bool tf_morph(size_t ci) const {
     return ci < chunk_tf.size() && chunk_tf[ci] >= 0 && tf_chunks[chunk_tf[ci]].records_offset;
   }
@@ -1579,6 +1589,15 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_fade_runs = 0;
   u64 m_lod_groups_near = 0, m_lod_frames = 0, m_lod_tris[2] = {0, 0};
   u64 m_cull_runs = 0, m_cull_tris = 0, m_cull_chunks = 0, m_cull_frames = 0;
+  // (AI-assisted, occluders) the shadows of the occluders chosen for the level being drawn
+  // (choose_occluders), and statistics: level draws with any, occluders chosen, chunks and runs
+  // they hid, the runs' triangles
+  static constexpr int kMaxOccluders = 16;
+  std::array<ctr_cull::Shadow, kMaxOccluders> m_occ_shadow;
+  int m_occ_n = 0;
+  u64 m_occ_frames = 0, m_occ_used = 0, m_occ_chunks = 0, m_occ_runs = 0, m_occ_tris = 0;
+  void choose_occluders(CtrLevelData& lev, const CtrBackgroundCamera& cam, u64 frame,
+                        float draw_dist);
   // kDrawCullCond draws of visible chunks, and of them culled (camera inside)
   u64 m_cond_draws = 0, m_cond_culled = 0;
   // (AI-assisted) lowres_vista / neighbour_vis: low resolution chunks drawn in near mode, and the

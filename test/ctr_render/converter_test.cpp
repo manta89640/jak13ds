@@ -7,6 +7,7 @@
 
 void run_vram_tests();
 void run_citadel_tests();
+void run_cull_tests();
 
 namespace {
 void test_resize() {
@@ -404,6 +405,7 @@ void test_tfrag_versions() {
 int main() {
   try {
     lg::initialize();
+    run_cull_tests();  // (AI-assisted) before run_vram_tests, which fails on this host (Nov 11)
     test_resize();
     test_vista_seams();
     test_atlas_order(true);

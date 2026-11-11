@@ -40,6 +40,7 @@ add_executable(ctr_level_converter
         ctr_level_converter/tie_lod.cpp
         ctr_level_converter/tfrag_lod.cpp
         ctr_level_converter/keira_model.cpp
+        ctr_level_converter/occluders.cpp
         ctr_level_converter/texshare.cpp
         ctr_level_converter/c3l_compare.cpp
         ${CMAKE_SOURCE_DIR}/game/graphics/ctr/c3l_reader.cpp
@@ -65,6 +66,7 @@ add_executable(ctr_render_regression EXCLUDE_FROM_ALL
         ${CMAKE_SOURCE_DIR}/test/ctr_render/converter_test.cpp
         ${CMAKE_SOURCE_DIR}/test/ctr_render/vram_test.cpp
         ${CMAKE_SOURCE_DIR}/test/ctr_render/citadel_test.cpp
+        ${CMAKE_SOURCE_DIR}/test/ctr_render/cull_test.cpp
         ${CMAKE_SOURCE_DIR}/game/graphics/jak2_texture_remap.cpp
         ${CTR_RENDER_TEST_SOURCES})
 target_link_libraries(ctr_render_regression common)

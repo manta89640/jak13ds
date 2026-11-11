@@ -239,6 +239,10 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.vis_culling = parse_bool(v);
     } else if (key == "run_culling") {
       s.run_culling = parse_bool(v);  // (AI-assisted)
+    } else if (key == "occluders") {
+      s.occluders = parse_bool(v);  // (AI-assisted, occluders)
+    } else if (key == "occluder_count") {
+      s.occluder_count = std::clamp(std::atoi(v.c_str()), 1, 16);
     } else if (key == "tie_lod") {
       s.tie_lod = parse_bool(v);  // (AI-assisted) c3l v17
     } else if (key == "color_stream") {

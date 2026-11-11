@@ -240,6 +240,11 @@ struct CtrSettings {
   // pieces of ~96 triangles made at load) tested against the view on their own: only the ones on
   // screen are drawn (bounding spheres made at load, 8 bytes per piece)
   bool run_culling = true;
+  // (AI-assisted, occluders) level geometry hidden behind the occluder_count biggest occluders near
+  // the camera (boxes inside closed tie surfaces, c3l::ExtOcc: levels converted with the current
+  // ctr_level_converter) is not drawn (docs/3ds-port/culling.md). Off: not yet seen on a console
+  bool occluders = false;
+  int occluder_count = 6;
   // (AI-assisted) c3l v17 tie levels of detail: the instance groups that have a near version
   // (geometry 0) are drawn with it within their PS2 distance, else with the far one (geometry 3).
   // off: the far versions only (as before v17)
