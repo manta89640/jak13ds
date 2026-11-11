@@ -277,6 +277,10 @@ struct CtrSettings {
   // center (docs/3ds-port/culling.md). Off: the sources always (the copies never)
   bool far_copy = false;
   float far_copy_distance = 150.f;
+  // (AI-assisted, terraincull) back faces of the terrain the converter marked (c3l::kDrawCullTerrain,
+  // --terrain-cull: ground whose underside the camera can't get to) are culled, with cull_ties'
+  // winding (needs cull_ties on). Read at level load. Off: both sides (docs/3ds-port/culling.md)
+  bool cull_terrain = false;
   bool depth_reuse = false;
   float depth_reuse_min = 20.f;
   // (AI-assisted) c3l v17 tie levels of detail: the instance groups that have a near version

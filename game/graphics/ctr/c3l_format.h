@@ -772,6 +772,12 @@ constexpr uint16_t kDrawAlpha80 = 0x1000;
 // opening, so from the outer side of its plane. The draw's planes (c3l::ExtCullCond) say when its
 // back faces may be culled; a reader without them draws both sides.
 constexpr uint16_t kDrawCullCond = 0x2000;
+// (AI-assisted, terraincull) kDrawCullTerrain: floor-like opaque tfrag (|normal y| >= 0.7) that is
+// walkable ground itself (collision within 1 m at its center) with no ground more than 2 m below
+// its plane within 20 m (ctr_level_converter --terrain-cull), wound to face up: the camera, always
+// above the ground near it, never sees its back. config.ini cull_terrain culls their back faces
+// (as kDrawCullBack, with cull_ties' winding). No version change: older readers draw both sides.
+constexpr uint16_t kDrawCullTerrain = 0x4000;
 constexpr uint32_t kAtlasVersion = 15;
 
 /*!

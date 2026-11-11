@@ -477,11 +477,81 @@ void test_far_copies() {
   check(untouched == (size_t)kN * kN * 2, "no copy of the wind node");
 }
 
+// (AI-assisted, terraincull) ground at 0 m with a 10 m deep pit at x 60..80 m: a floor triangle
+// far from the pit is marked (and turned to face up), one by the pit's edge, one floating 10 m up
+// and a wall are not
+void test_terrain_cull() {
+  constexpr float m = 4096.f;
+  tfrag3::Level level;
+  auto quad = [&](float x0, float x1, float z0, float z1, float y) {
+    const float p[4][2] = {{x0, z0}, {x1, z0}, {x1, z1}, {x0, z1}};
+    for (const auto& f : {std::array<int, 3>{0, 1, 2}, std::array<int, 3>{0, 2, 3}}) {
+      for (int k : f) {
+        tfrag3::CollisionMesh::Vertex v{};
+        v.x = p[k][0] * m;
+        v.y = y * m;
+        v.z = p[k][1] * m;
+        level.collision.vertices.push_back(v);
+      }
+    }
+  };
+  quad(-100, 60, -100, 100, 0);
+  quad(60, 80, -100, 100, -10);
+  quad(80, 200, -100, 100, 0);
+  Converter cv;
+  cv.level = &level;
+  DrawMode mode;
+  mode.as_int() = 0;
+  mode.set_depth_write_enable(true);
+  mode.set_zt(true);
+  mode.set_depth_test(GsTest::ZTest::GEQUAL);
+  DrawKey k{};
+  k.mode = mode.as_int();
+  k.texture = 0xffff;
+  k.kind = 0;  // tfrag
+  const u32 key = cv.key_id(k);
+  auto add = [&](std::array<std::array<float, 3>, 3> p) {
+    SrcTri t{};
+    for (int c = 0; c < 3; c++) {
+      SrcVertex v{};
+      v.x = p[c][0] * m;
+      v.y = p[c][1] * m;
+      v.z = p[c][2] * m;
+      t.v[c] = (u32)cv.verts.size();
+      cv.verts.push_back(v);
+    }
+    t.draw_key = key;
+    t.tier = 1;
+    cv.tris.push_back(t);
+    return cv.tris.size() - 1;
+  };
+  // wound to face down (the converter turns it up)
+  const size_t floor = add({{{0, 0, 0}, {0, 0, 4}, {4, 0, 0}}});
+  const size_t edge = add({{{50, 0, 0}, {54, 0, 0}, {50, 0, 4}}});
+  const size_t high = add({{{-50, 10, 0}, {-46, 10, 0}, {-50, 10, 4}}});
+  const size_t wall = add({{{10, 0, 0}, {14, 0, 0}, {10, 4, 0}}});
+  cv.mark_terrain_cull();
+  auto marked = [&](size_t i) { return (cv.draw_keys[cv.tris[i].draw_key].kind & c3l::kDrawCullTerrain) != 0; };
+  check(marked(floor), "open ground far from any drop is marked");
+  {
+    const auto& t = cv.tris[floor];
+    const auto& a = cv.verts[t.v[0]];
+    const auto& b = cv.verts[t.v[1]];
+    const auto& c = cv.verts[t.v[2]];
+    const double ny = (double)(b.z - a.z) * (c.x - a.x) - (double)(b.x - a.x) * (c.z - a.z);
+    check(ny > 0, "a marked triangle faces up");
+  }
+  check(!marked(edge), "ground within 20 m of a 10 m drop is not");
+  check(!marked(high), "a floor over no walkable ground of its own is not");
+  check(!marked(wall), "a wall is not");
+}
+
 int main() {
   try {
     lg::initialize();
     run_cull_tests();  // (AI-assisted) before run_vram_tests, which fails on this host (Nov 11)
     test_far_copies();
+    test_terrain_cull();
     test_resize();
     test_vista_seams();
     test_atlas_order(true);
