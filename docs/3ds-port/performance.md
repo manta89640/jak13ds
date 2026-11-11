@@ -1811,3 +1811,21 @@ into code that loses it). The natives' loops over GOAL memory mostly use plain p
   (`fakes.cpp`: the log's level check and config.ini lookups).
 - cpu_bench `vfp.xform256` / `vfp.xform256_unrolled`: the loop through `__restrict` pointers as
   compiled and with `-funroll-loops` (the same checksum): the best case, priced on a console.
+
+### 4. Integer divides (idiv)
+
+ARMv6K has no divide instruction: a `/` or `%` by a value the compiler doesn't know is a call to
+`__aeabi_idiv` / `__aeabi_uidivmod` (tens of cycles). The renderer's files compiled as ARMv6K code
+(GCC 13 `-O2`, the host build's sources) have 28 such calls in 18 functions, almost all once per
+frame, load or draw; the natives (the test build's objects) 2, in the particle spawner;
+GOAL code's divides are 32-bit helpers (`gc_idiv32`: a constant divisor folds to a multiply or a
+shift), 424 uses in all of Jak II, mostly menus, HUD and navigation set-up. Three were in
+per-item loops and are gone, the same results:
+
+- CtrTexAnimJak2's PSMT8 + CLUT animated textures: two divides per texel for the source index,
+  now a column table per image and the row once per row;
+- CtrVram's `sampled_hash` (texture change checks, 128-256 samples): `(k * 37) % stride` per sample,
+  now a stepped remainder;
+- the ocean's CPU clipper: `(k + 1) % count` per edge, now a compare.
+
+cpu_bench pairs `int.mod_per_item` / `int.mod_stepped` and `int.texel_div64` / `int.texel_table64`.

@@ -60,10 +60,17 @@ u32 upload_end_block(u32 dest_block, u32 words) {
 u64 sampled_hash(const u8* src, u32 words, u32 samples, u64 seed) {
   u64 h = seed * 0x9E3779B97F4A7C15ull + words;
   const u32 stride = words / samples;
+  // (AI-assisted, idiv) (k * 37) % stride stepped (r += 37 % stride, less stride when it gets
+  // there) instead of a library divide per sample (ARMv6K has no divide instruction): the same
+  // offsets while k * 37 fits in 32 bits (samples are a few dozen)
+  const u32 step = stride ? 37u % stride : 0;
+  u32 r = 0;
   for (u32 k = 0; k < samples; k++) {
     u32 w;
-    memcpy(&w, src + 4 * ((u64)k * stride + (stride ? (k * 37u) % stride : 0)), 4);
+    memcpy(&w, src + 4 * ((u64)k * stride + r), 4);
     h = (h ^ w) * 1099511628211ull;
+    r += step;
+    r = r >= stride ? r - stride : r;
   }
   h ^= h >> 29;
   h *= 0xBF58476D1CE4E5B9ull;

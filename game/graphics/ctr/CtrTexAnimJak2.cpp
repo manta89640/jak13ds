@@ -343,9 +343,16 @@ void CtrTexAnimJak2::generic_upload(const u8* rec,
     // the GPU's smallest texture is 8 x 8: rows repeated
     const int w = std::max(m_t8_w, 8), h = std::max(m_t8_h, 8);
     m_t8_rgba.resize((size_t)w * h);
+    // (AI-assisted, idiv) the source column of each x once (ARMv6K has no divide instruction: two
+    // library divides per texel before), the source row once per row: the same indices
+    m_t8_col.resize((size_t)w);
+    for (int x = 0; x < w; x++) {
+      m_t8_col[(size_t)x] = (u16)(x * m_t8_w / w);
+    }
     for (int y = 0; y < h; y++) {
+      const u8* const row = m_t8.data() + (size_t)(y * m_t8_h / h) * m_t8_w;
       for (int x = 0; x < w; x++) {
-        const u8 i = m_t8[(size_t)(x * m_t8_w / w) + (size_t)(y * m_t8_h / h) * m_t8_w];
+        const u8 i = row[m_t8_col[(size_t)x]];
         u32 c;
         memcpy(&c, clut + clut_addr(i), 4);
         m_t8_rgba[(size_t)x + (size_t)y * w] = c;

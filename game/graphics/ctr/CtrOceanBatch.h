@@ -250,7 +250,7 @@ class CtrOceanBatch {
       int out = 0;
       for (int k = 0; k < count && out < 7; k++) {
         const auto& p = *poly[k];
-        const auto& q = *poly[(k + 1) % count];
+        const auto& q = *poly[k + 1 < count ? k + 1 : 0];  // (AI-assisted, idiv) no divide
         const float dp = depth_plane(p, plane), dq = depth_plane(q, plane);
         if (dp >= 0) tmp[out++] = &p;
         if ((dp >= 0) != (dq >= 0)) {

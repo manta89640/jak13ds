@@ -174,6 +174,63 @@ uint32_t int_div_const(uint32_t n) {
   return s;
 }
 
+// ---- (AI-assisted, idiv) the rewritten divides: CtrVram's sampled_hash offsets ((k * 37) %
+// stride per sample against a stepped remainder) and CtrTexAnimJak2's scaled texel indices (two
+// divides per texel against a column table and a row per row) ----
+
+uint32_t mod_per_item(uint32_t n) {
+  const uint32_t stride = 1000u + (uint32_t)g_ib;
+  uint32_t s = 0;
+  for (uint32_t k = 0; k < n; k++) {
+    s += (k * 37u) % stride;
+  }
+  return s;
+}
+
+uint32_t mod_stepped(uint32_t n) {
+  const uint32_t stride = 1000u + (uint32_t)g_ib;
+  const uint32_t step = 37u % stride;
+  uint32_t s = 0, r = 0;
+  for (uint32_t k = 0; k < n; k++) {
+    s += r;
+    r += step;
+    r = r >= stride ? r - stride : r;
+  }
+  return s;
+}
+
+// a 64 x 64 output from a 48 x 40 source (n images)
+uint32_t texel_div(uint32_t n) {
+  const int sw = 48 + (g_ib & 0), sh = 40, w = 64, h = 64;
+  uint32_t s = 0;
+  for (uint32_t r = 0; r < n; r++) {
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        s += (uint32_t)((x * sw / w) + (y * sh / h) * sw) * (uint32_t)(x + 1);
+      }
+    }
+  }
+  return s;
+}
+
+uint32_t texel_table(uint32_t n) {
+  const int sw = 48 + (g_ib & 0), sh = 40, w = 64, h = 64;
+  uint16_t col[64];
+  uint32_t s = 0;
+  for (uint32_t r = 0; r < n; r++) {
+    for (int x = 0; x < w; x++) {
+      col[x] = (uint16_t)(x * sw / w);
+    }
+    for (int y = 0; y < h; y++) {
+      const int row = (y * sh / h) * sw;
+      for (int x = 0; x < w; x++) {
+        s += (uint32_t)(row + col[x]) * (uint32_t)(x + 1);
+      }
+    }
+  }
+  return s;
+}
+
 // ---- a call through a register (GOAL C code calls every function so) against a direct call ----
 
 CB_NOINLINE uint32_t callee(uint32_t x) {
@@ -421,6 +478,10 @@ const Case kCases[] = {
     {"vfp.sqrt", vfp_sqrt, 500000, nullptr},
     {"int.div_var", int_div_var, 500000, nullptr},
     {"int.div_const", int_div_const, 500000, "int.div_var"},
+    {"int.mod_per_item", mod_per_item, 500000, nullptr},
+    {"int.mod_stepped", mod_stepped, 500000, "int.mod_per_item"},
+    {"int.texel_div64", texel_div, 200, nullptr},
+    {"int.texel_table64", texel_table, 200, "int.texel_div64"},
     {"call.direct", call_direct, 1000000, nullptr},
     {"call.indirect", call_indirect, 1000000, "call.direct"},
     {"mem.seq256k", mem_seq, 20, nullptr},

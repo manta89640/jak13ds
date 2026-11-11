@@ -106,6 +106,7 @@ class CtrTexAnimJak2 {
   u32 m_t8_dest = 0;
   bool m_t8_waiting = false;
   std::vector<u32> m_t8_rgba;
+  std::vector<u16> m_t8_col;  // (AI-assisted, idiv) each output column's source column
 
   // ---- (AI-assisted) the animated texture slots ----
   struct Src {
