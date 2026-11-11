@@ -529,7 +529,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   }
   ctr_gpu_frame_begin(clear[0], clear[1], clear[2]);
   ctr_gpu_set_cull(ctr_settings().cull_ties ? 1 : 0, ctr_settings().cull_flip ? 1 : 0);
-  ctr_gpu_set_frame_overlap2(ctr_settings().frame_overlap2);
+  ctr_gpu_set_frame_overlap2(ctr_settings().frame_overlap2 ? 1 : 0);
   ctr_gpu_set_tex_cache_clear(ctr_settings().tex_cache_uploads ? 1 : 0);  // (AI-assisted)
   ctr_gpu_set_skin_rows_f24(ctr_settings().skin_rows_f24 ? 1 : 0);         // (AI-assisted)
   ctr_gpu_set_skin_clip_f24(ctr_settings().skin_clip_f24 ? 1 : 0);         // (AI-assisted)

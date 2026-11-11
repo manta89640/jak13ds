@@ -521,13 +521,11 @@ void ctr_gpu_set_depth_far(int on);
 /* (AI-assisted) config.ini skip_clear: the next frame begin clears only the depth buffer (the
  * renderer knows every pixel's color gets drawn: the opaque sky roof covers the screen) */
 void ctr_gpu_set_skip_color_clear(int on);
-/* (AI-assisted) config.ini frame_overlap2 (with the pipeline): 0 off = the frame end waits for
- * the GPU, then hands the frame's command list over with a cache flush (the old way); 1 clean =
- * the list is cleaned from the CPU cache before that wait and handed over without the flush (the
- * GPU's idle gap between two frames is shorter); 2 on = no wait at the frame end: the list is
- * queued behind the frame the GPU is drawing (the next frame begin waits for the frame before
- * that instead, whose buffers it reuses). 2 needs frame_pacing = steady (else 1). Any time. */
-void ctr_gpu_set_frame_overlap2(int mode);
+/* (AI-assisted) config.ini frame_overlap2 (with the pipeline): off = the frame end waits for the
+ * GPU, then hands the frame's command list over with a cache flush; on = no wait at the frame
+ * end: the list is queued behind the frame the GPU is drawing (the next frame begin waits for the
+ * frame before that instead, whose buffers it reuses). on needs frame_pacing = steady (else off). */
+void ctr_gpu_set_frame_overlap2(int on);
 /* 1 when running in an emulator (Azahar / Citra: svcGetSystemInfo 0x20000). */
 int ctr_gpu_is_emulator(void);
 

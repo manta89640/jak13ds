@@ -150,8 +150,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
     } else if (key == "pipeline") {
       s.pipeline = parse_bool(v);
     } else if (key == "frame_overlap2") {
-      // (AI-assisted) off | clean | on
-      s.frame_overlap2 = v == "on" || v == "2" ? 2 : (v == "clean" || v == "1" ? 1 : 0);
+      s.frame_overlap2 = parse_bool(v) || v == "2";
     } else if (key == "frame_pacing") {
       s.steady_pacing = v != "fast";
     } else if (key == "fps_cap") {
@@ -519,7 +518,7 @@ std::string CtrSettings::summary() const {
                     : fmt::format("{:.1f}", tie_distance_scale),
       fog ? "on" : "off",
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, pipeline ? "on" : "off",
-      frame_overlap2 == 2 ? "on" : (frame_overlap2 == 1 ? "clean" : "off"), !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
+      frame_overlap2 ? "on" : "off", !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
       sky ? "on" : "off", clouds ? "on" : "off", sky_last ? "on" : "off",
       skip_clear ? "on" : "off", distort ? "on" : "off",
       envmap ? "on" : "off", envmap_batch ? "on" : "off", merc_tex_sort ? "on" : "off",

@@ -2879,26 +2879,25 @@ int ctr_gpu_skin_rows_f24_on(void) {
  * The pipeline's frame end used to wait for the GX queue to empty (C3D_FrameBegin: frame N - 1 and
  * the parts of N already sent), stop it, and only then hand N's command list over with
  * GX_CMDLIST_FLUSH: the GSP cleans the whole list (130-260 KB) from the CPU cache before the GPU
- * starts on it, while the GPU sits idle. 1 (clean): the list is closed and cleaned before the
- * wait, and handed over without the flush. 2 (on): the queue keeps running and the list is queued
+ * starts on it, while the GPU sits idle. On: the queue keeps running and the list is queued
  * behind frame N - 1; the next frame begin waits for frame N - 1 (whose command and vertex buffers
  * it reuses) with the steady pacing fence instead. libctru's queue only empties its entry list
  * (gxCmdQueueClear, a panic while it runs) when it is idle, and holds 32 entries: an idle queue
  * is emptied before new entries, a full running one waited for (overlap2_room). */
-static int s_overlap2 = 1;
+static int s_overlap2 = 1; /* config.ini frame_overlap2 */
 static u32 s_buf_frame[2]; /* mode 2: the frame drawn from s_cmdbufs / s_vbufs [k] (0: none) */
 static int s_end_mode2;    /* the last pipelined frame end was mode 2 (deletes at the begin) */
 static float s_begin_wait_ms;
 static u32* s_fin_list;    /* the frame's closed command list (pipeline_close_list) */
 static u32 s_fin_words;
 
-void ctr_gpu_set_frame_overlap2(int mode) {
-  s_overlap2 = mode < 0 ? 0 : (mode > 2 ? 2 : mode);
+void ctr_gpu_set_frame_overlap2(int on) {
+  s_overlap2 = on ? 1 : 0;
 }
 
-/* mode 2 needs the fence (frame_pacing = steady) */
+/* it needs the fence (frame_pacing = steady) */
 static int overlap2_on(void) {
-  return s_overlap2 == 2 && s_pres.on;
+  return s_overlap2 && s_pres.on;
 }
 
 /* before adding n entries to the GX queue (mode 2); returns the milliseconds waited (a full
@@ -2972,7 +2971,7 @@ static float overlap2_wait_frame(u32 id) {
   return (float)((double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0));
 }
 
-/* modes 1 and 2: the rest of the frame's command list closed as C3Di_SplitFrame does (the
+/* frame_overlap2: the rest of the frame's command list closed as C3Di_SplitFrame does (the
  * framebuffer flush and the early depth clear after its draws): s_fin_list, s_fin_words (0:
  * nothing left). GSP cleans it from the CPU cache when it takes it (GX_CMDLIST_FLUSH). */
 static void pipeline_close_list(void) {
@@ -3526,13 +3525,11 @@ void ctr_gpu_frame_end(void) {
   if (!bd) {
     g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base) * 4);
   }
-  /* (AI-assisted) frame_overlap2: 0 the old frame end, 1 the list cleaned before the wait, 2 no
-   * wait (the list queued behind the frame the GPU draws) */
-  const int ov2 = s_pipeline ? (overlap2_on() ? 2 : (s_overlap2 ? 1 : 0)) : 0;
-  if (ov2) {
-    pipeline_close_list();
-  }
+  /* (AI-assisted) frame_overlap2: 0 the frame end waits for the GPU, 2 no wait (the list queued
+   * behind the frame the GPU draws) */
+  const int ov2 = s_pipeline && overlap2_on() ? 2 : 0;
   if (ov2 == 2) {
+    pipeline_close_list();
     g.cur.gpu_wait_ms += overlap2_room(5); /* the list, the transfer(s) and the fence */
     if (s_fin_words) {
       gt_note_submit();
@@ -3555,9 +3552,6 @@ void ctr_gpu_frame_end(void) {
     C3D_FrameDrawOn(g.top);
     set_top_viewport();
     gt_note_submit();
-    if (ov2 == 1 && s_fin_words) {
-      GX_ProcessCommandList(s_fin_list, s_fin_words * 4, GX_CMDLIST_FLUSH);
-    }
     s_buf_frame[s_k] = 0;
     s_end_mode2 = 0;
   }
