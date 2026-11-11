@@ -120,9 +120,6 @@ enum { CTR_TCC_FOG = 32 };
  * levels blended (the GS's TEX1 MMIN 5, whatever config.ini mipmaps says); MIP_MAX1: only levels
  * 0 and 1 (TEX1 MXL 1, the near ocean's; also its sky reflection's fade) */
 enum { CTR_TCC_TRILINEAR = 64, CTR_TCC_MIP_MAX1 = 128 };
-/* (AI-assisted) config.ini tex1_gating: texture unit 1 enabled only for draws whose combiner
- * reads it */
-void ctr_gpu_set_tex1_gating(int on);
 void ctr_gpu_set_cull(int enable, int flip);
 void ctr_gpu_cull_reset(void);
 /* (AI-assisted) 1 if the depth buffer has a stencil part (always: D24S8) */
@@ -824,9 +821,8 @@ typedef struct {
   int compact_in_vram;
   int nofog_draws;   /* (AI-assisted) level draws without the fog stage (fog_stage_skip) */
   int color_clear_skipped; /* (AI-assisted) this frame cleared only the depth */
-  int unit1_toggles; /* (AI-assisted) texture unit 1 switched off or on (fog_stage_skip,
-                      * tex1_gating) */
-  int fog_alpha_draws; /* (AI-assisted) level draws with the fog in the vertex alpha (fog_alpha) */
+  int unit1_toggles; /* (AI-assisted) texture unit 1 switched off or on (fog_stage_skip) */
+  int fog_alpha_draws; /* (AI-assisted) level draws with the fog in the vertex alpha (alpha masks) */
   /* (AI-assisted) vertex program switches, of them with a shader code upload (another shbin), and
    * uniform vectors written at the switches */
   int prog_switches, prog_uploads, prog_unif_vectors;

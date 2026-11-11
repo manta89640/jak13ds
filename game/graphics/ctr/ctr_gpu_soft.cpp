@@ -3699,8 +3699,6 @@ void ctr_gpu_set_mesh_fog(const float* fog0, const float* fog1, uint8_t r, uint8
 void ctr_gpu_set_mesh_nofog(int on) {  // (AI-assisted) fog_stage_skip: no fog stage
   s_nofog = on != 0;
 }
-// (AI-assisted) tex1_gating: one texture unit here
-void ctr_gpu_set_tex1_gating(int) {}
 // (AI-assisted) cull_ties: back faces of CTR_TCC_CULL_BACK draws (counter-clockwise front faces
 // on screen, x right / y up; flip: the other way)
 void ctr_gpu_set_cull(int enable, int flip) {

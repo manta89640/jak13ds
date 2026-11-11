@@ -46,7 +46,6 @@ static void setup(void) {
   g.fog_tex_valid = 1;
   g.fog_abgr = 0xff406080u;
   g.fog_gen = 1;
-  g_tex1_gating = 1;
   g_cull_enable = 1;
   __C3D_Context.texConfig = 3; /* units 0, 1 on (the fog ramp) */
   for (int t = 0; t < 24; t++) {

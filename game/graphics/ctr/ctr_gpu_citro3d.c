@@ -3918,8 +3918,6 @@ int ctr_gpu_tex_create_mipmapped(int w, int h, const uint8_t* rgba) {
 /* (AI-assisted) cull_ties: which PICA mode culls the c3l back faces (see ctr_gpu_set_cull_flip) */
 static int g_cull_flip = 0;
 static int g_cull_enable = 0;
-/* (AI-assisted) config.ini tex1_gating */
-static int g_tex1_gating = 0;
 
 void ctr_gpu_set_cull(int enable, int flip) {
   g_cull_enable = enable ? 1 : 0;
@@ -5443,10 +5441,9 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   }
   commit_texenv(1, env1, raw);
   commit_texenv(0, env, raw);
-  /* (AI-assisted) fog_stage_skip (mesh 4), and with tex1_gating every draw whose combiner doesn't
-   * read texture unit 1 (only the fog ramp stages of mesh 1 and 3 do): unit 1 off while nothing
-   * reads it (raw draws: the unit enable bits only, no cache clear; the ramp's texels stay valid,
-   * a new color binds it again through citro3d), on again for the draws that read it. The context's
+  /* (AI-assisted) fog_stage_skip (mesh 4): unit 1 off for those draws (raw draws: the unit enable
+   * bits only, no cache clear; the ramp's texels stay valid, a new color binds it again through
+   * citro3d), on again for the draws that read it. The context's
    * texConfig is what the GPU has (or gets: citro3d recomputes it from its bound textures when a
    * bind is pending, which only turns unit 1 on). */
   /* (AI-assisted, far-fog) a merc draw with the game's fog (CTR_TCC_FOG): the fog ramp stage in
@@ -5463,7 +5460,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   if (g.fog_tex_valid) {
     C3Di_Context* tctx = &__C3D_Context;
     const int need1 = need_ramp || (smask >= 0 && mesh != 2);
-    const int want_off = g_tex1_gating ? !need1 : mesh == 4;
+    const int want_off = mesh == 4;
     const int is_off = !(tctx->texConfig & BIT(1));
     const int gate = raw;
     if (gate && want_off != is_off) {
@@ -7166,10 +7163,6 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
 
 void ctr_gpu_set_mesh_nofog(int on) {
   g.mesh_nofog = on ? 1 : 0;
-}
-
-void ctr_gpu_set_tex1_gating(int on) {
-  g_tex1_gating = on ? 1 : 0;
 }
 
 void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int mesh,
