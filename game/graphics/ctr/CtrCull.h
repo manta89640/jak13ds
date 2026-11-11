@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 
 namespace ctr_cull {
 
@@ -423,8 +424,10 @@ inline int depth_test(const DepthSnap& s, const float* c, float r, float z_limit
     if (!(q[3] > 1e-3f)) {
       return 0;
     }
-    const float sx = (q[0] / q[3] + 1.f) * (kDepthBX * 4.f);
-    const float sy = (1.f - q[1] / q[3]) * (kDepthBY * 4.f);
+    // (AI-assisted, fdiv) one reciprocal per corner, not two divides (19 cycles each on the VFP11)
+    const float iw = 1.f / q[3];
+    const float sx = (q[0] * iw + 1.f) * (kDepthBX * 4.f);
+    const float sy = (1.f - q[1] * iw) * (kDepthBY * 4.f);
     x0 = std::fmin(x0, sx);
     x1 = std::fmax(x1, sx);
     y0 = std::fmin(y0, sy);
@@ -521,6 +524,20 @@ inline void depth_blocks(const float* depth, float* zfar, float* znear) {
  * d spans at most 2 r f d / (z (z - r)) along the screen (the off-axis stretch d / z included).
  * Reaching to the camera's plane: huge.
  */
+//! (AI-assisted, fdiv) sphere_px(...) < lim, without its square root and divide: with positive
+//! z - r both sides of 2 r f d < lim z (z - r) are non-negative, so they compare squared.
+inline bool sphere_px_below(const float* c, float r, const float* eye, const float* fwd,
+                            float focal, float lim) {
+  const float v[3] = {c[0] - eye[0], c[1] - eye[1], c[2] - eye[2]};
+  const float z = dot3(v, fwd);
+  if (!(z - r > 1e-3f * (r + 1.f)) || !(lim > 0)) {
+    return false;
+  }
+  const float a = 2.f * r * focal;
+  const float b = lim * z * (z - r);
+  return a * a * dot3(v, v) < b * b;
+}
+
 inline float sphere_px(const float* c, float r, const float* eye, const float* fwd, float focal) {
   const float v[3] = {c[0] - eye[0], c[1] - eye[1], c[2] - eye[2]};
   const float z = dot3(v, fwd);
@@ -625,8 +642,23 @@ inline uint32_t make_cone(const float* tris, size_t n, float grow) {
   return cone_pack(qa, (float)std::cos(a));
 }
 
-//! Does every triangle of the run (inside sphere c, r) face away from the eye?
-inline bool cone_away(uint32_t cone, const float* c, float r, const float* eye) {
+//! 1 / sqrt(x) for x > 0 without a divide or a square root (the VFP11 takes 19 cycles for each and
+//! holds its multiply-add pipeline meanwhile): the bit trick's estimate (~3.4%) and two Newton
+//! steps (each squares the error: ~5e-6).
+inline float rsqrt_nr(float x) {
+  uint32_t i = ctr_float_bits(x);
+  i = 0x5f375a86u - (i >> 1);
+  float y;
+  memcpy(&y, &i, 4);
+  const float h = 0.5f * x;
+  y = y * (1.5f - h * y * y);
+  y = y * (1.5f - h * y * y);
+  return y;
+}
+
+//! The test before (AI-assisted, fdiv): a cone_unpack (5 divides and a square root) and three
+//! square roots and a divide. Kept for the tests (cull_test.cpp) and cpu_bench.
+inline bool cone_away_ref(uint32_t cone, const float* c, float r, const float* eye) {
   float a[3], ca;
   if (!cone_unpack(cone, a, &ca)) {
     return false;
@@ -640,6 +672,35 @@ inline bool cone_away(uint32_t cone, const float* c, float r, const float* eye) 
   const float st = std::sqrt(std::fmax(0.f, 1.f - ct * ct));
   const float sa = std::sqrt(std::fmax(0.f, 1.f - ca * ca));
   return d * (ct * ca - st * sa) > r;
+}
+
+//! Does every triangle of the run (inside sphere c, r) face away from the eye? (AI-assisted, fdiv)
+//! With p = v . axis and d2 = |v|^2, |v| cos(t + a) > r is p cos a - r > sqrt(d2 - p^2) sin a:
+//! L = p cos a - r > 0 and L^2 > (d2 - p^2)(1 - cos^2 a). Only multiplies (the axis normalized by
+//! rsqrt_nr); the same as cone_away_ref up to rounding, well inside the cone's 3 degree margin.
+inline bool cone_away(uint32_t cone, const float* c, float r, const float* eye) {
+  const int8_t qc = (int8_t)(uint8_t)(cone >> 24);
+  if (qc == -128) {
+    return false;
+  }
+  const float ax = (float)(int8_t)(uint8_t)cone, ay = (float)(int8_t)(uint8_t)(cone >> 8),
+              az = (float)(int8_t)(uint8_t)(cone >> 16);
+  const float l2 = ax * ax + ay * ay + az * az;
+  if (!(l2 > 0)) {
+    return false;
+  }
+  const float v[3] = {c[0] - eye[0], c[1] - eye[1], c[2] - eye[2]};
+  const float d2 = dot3(v, v);
+  if (!(d2 > r * r)) {
+    return false;
+  }
+  const float ca = (float)qc * (1.f / 127.f);
+  const float p = (v[0] * ax + v[1] * ay + v[2] * az) * rsqrt_nr(l2);
+  const float L = p * ca - r;
+  if (!(L > 0)) {
+    return false;
+  }
+  return L * L > std::fmax(0.f, d2 - p * p) * (1.f - ca * ca);
 }
 
 }  // namespace ctr_cull

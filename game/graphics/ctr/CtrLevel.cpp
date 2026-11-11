@@ -12412,9 +12412,12 @@ bool depth_reuse_frame(const std::array<math::Vector4f, 4>& R, float y_scale,
 }
 // (AI-assisted, sizecull) is something `px` pixels across hidden by min_run_px: below it, or below
 // 1.25x it if it was hidden (*state: 1 hidden)
-bool small_size(float px, u8* state) {
+// (AI-assisted, fdiv) sphere_px(...) < the limit (1.25x while hidden) as CtrCull.h's
+// sphere_px_below: no square root or divide per chunk and run
+bool small_size(const float* c, float r, const float* eye, const float* fwd, float focal,
+                u8* state) {
   const float lim = ctr_settings().min_run_px;
-  const bool hide = px < (*state ? 1.25f * lim : lim);
+  const bool hide = ctr_cull::sphere_px_below(c, r, eye, fwd, focal, *state ? 1.25f * lim : lim);
   *state = hide ? 1 : 0;
   return hide;
 }
@@ -14266,7 +14269,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       bool sz_runs = false;
       if (m_sz_focal > 0) {
         const float eye[3] = {cam.trans[0], cam.trans[1], cam.trans[2]};
-        if (small_size(ctr_cull::sphere_px(ch.bsphere, ch.bsphere[3], eye, m_sz_fwd, m_sz_focal),
+        if (small_size(ch.bsphere, ch.bsphere[3], eye, m_sz_fwd, m_sz_focal,
                        &lev.small_chunk[ci])) {
           m_sz_chunks++;
           return;
@@ -14442,7 +14445,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             if (sz_runs && m_run_shown[r]) {
               // (AI-assisted, sizecull)
               const float eye[3] = {cam.trans[0], cam.trans[1], cam.trans[2]};
-              if (small_size(ctr_cull::sphere_px(c, rr, eye, m_sz_fwd, m_sz_focal), &lev.small_run[r])) {
+              if (small_size(c, rr, eye, m_sz_fwd, m_sz_focal, &lev.small_run[r])) {
                 m_run_shown[r] = 0;
                 m_sz_runs++; hid_by = &m_sz_chunks;
                 m_sz_tris += lev.vis_runs[r].index_count / 3;

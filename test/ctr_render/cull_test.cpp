@@ -703,6 +703,41 @@ void test_review_fixes() {
   fmt::print("  review fixes: cell keys, interval lookup, screen edges, move growth\n");
 }
 
+// (AI-assisted, fdiv) cone_away and sphere_px_below without square roots and divides against the
+// formulas they replace: they agree but for rounding at the boundary (rare), and every run
+// cone_away calls facing away still is (test_cones)
+void test_fdiv() {
+  std::mt19937 rng(11);
+  std::uniform_real_distribution<float> u(-1.f, 1.f);
+  int cone_diff = 0, cone_n = 0, px_diff = 0, px_n = 0;
+  for (int i = 0; i < 200000; i++) {
+    float axis[3] = {u(rng), u(rng), u(rng)};
+    const float half = 0.05f + 1.2f * (u(rng) * 0.5f + 0.5f);
+    const uint32_t cone = ctr_cull::cone_pack(axis, std::cos(half));
+    const float c[3] = {u(rng) * 50.f, u(rng) * 50.f, u(rng) * 50.f};
+    const float eye[3] = {u(rng) * 60.f, u(rng) * 60.f, u(rng) * 60.f};
+    const float r = (u(rng) * 0.5f + 0.5f) * 8.f;
+    cone_n++;
+    cone_diff += ctr_cull::cone_away(cone, c, r, eye) != ctr_cull::cone_away_ref(cone, c, r, eye);
+    float fwd[3] = {u(rng), u(rng), u(rng)};
+    const float fl = std::sqrt(fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]) + 1e-6f;
+    for (float& f : fwd) {
+      f /= fl;
+    }
+    const float focal = 300.f + 200.f * u(rng), lim = 1.f + 0.5f * u(rng);
+    px_n++;
+    px_diff += ctr_cull::sphere_px_below(c, r * 0.1f, eye, fwd, focal, lim) !=
+               (ctr_cull::sphere_px(c, r * 0.1f, eye, fwd, focal) < lim);
+  }
+  check(cone_diff * 10000 <= cone_n, "cone_away agrees with the formula it replaces (rounding)");
+  check(px_diff * 10000 <= px_n, "sphere_px_below agrees with sphere_px < lim (rounding)");
+  for (float x : {1e-6f, 0.01f, 1.f, 3.f, 1000.f, 48387.f, 1e9f}) {
+    check(std::fabs(ctr_cull::rsqrt_nr(x) * std::sqrt(x) - 1.f) < 1e-5f, "rsqrt_nr to ~5e-6");
+  }
+  fmt::print("  divides out: cone_away {} of {} differ, sphere_px_below {} of {}\n", cone_diff, cone_n,
+             px_diff, px_n);
+}
+
 }  // namespace
 
 void run_cull_tests() {
@@ -719,4 +754,5 @@ void run_cull_tests() {
   test_sphere_px();
   test_cones();
   test_review_fixes();
+  test_fdiv();
 }

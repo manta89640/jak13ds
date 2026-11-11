@@ -1829,3 +1829,23 @@ per-item loops and are gone, the same results:
 - the ocean's CPU clipper: `(k + 1) % count` per edge, now a compare.
 
 cpu_bench pairs `int.mod_per_item` / `int.mod_stepped` and `int.texel_div64` / `int.texel_table64`.
+
+### 5. Square roots and divides out of the per-run tests (fdiv)
+
+The VFP11's `vdiv` / `vsqrt` take 15-19 cycles and hold its multiply-add pipeline. Counted per
+function in the renderer's ARMv6K code, the ones inside per-chunk or per-run tests were:
+
+- `cone_away` (cone_cull, per run in view): `cone_unpack`'s three `/ 127` and the axis
+  normalization, then three square roots and a divide: 4 `vdiv` + 4 `vsqrt`. Now multiplies only:
+  with p = v . axis and d2 = |v|^2, |v| cos(t + a) > r is L = p cos a - r > 0 and
+  L^2 > (d2 - p^2)(1 - cos^2 a); the axis normalized by `rsqrt_nr` (the bit trick's estimate and
+  two Newton steps, ~5e-6). The old formula stays as `cone_away_ref`.
+- `sphere_px` (min_run_px, per chunk and run): a square root and a divide; the callers only
+  compare it with the limit, so `sphere_px_below` compares 2 r f d < lim z (z - r) squared.
+- `depth_test` (depth_reuse): two divides per box corner, now one reciprocal.
+
+Tests (cull_test.cpp): over 200 000 random cones / views and spheres, the new tests and the
+formulas they replace agree in every case; the cone test's 24 000 views still have every culled
+run's triangles facing away (5571 culled, as before). cpu_bench pair `cull.cone_sqrt_div` /
+`cull.cone_mul` (ARMv6K: 4 `vdiv` + 4 `vsqrt` against none). The ocean's VU code keeps its
+divides: it reproduces the PS2's arithmetic.
