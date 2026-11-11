@@ -165,8 +165,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       }
     } else if (key == "envmap_min_px") {
       s.envmap_min_px = std::clamp(f, 0.f, 400.f);  // (AI-assisted, fidelity2)
-    } else if (key == "skin_rows_f24") {
-      s.skin_rows_f24 = parse_bool(v);  // (AI-assisted)
     } else if (key == "mipmaps") {
       s.mipmaps = v == "off" || v == "0" ? 0 : (v == "trilinear" || v == "2" ? 2 : 1);
     } else if (key == "gpu_profile") {
@@ -477,7 +475,7 @@ std::string CtrSettings::summary() const {
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
       "merc {} sprites {} ({}) "
-      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} distort {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} envmap_min_px {:.0f} skin_rows_f24 {} skin_clip_f24 {} "
+      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} distort {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} envmap_min_px {:.0f} skin_clip_f24 {} "
       "compact_textures {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} particle_fill {} "
       "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} lowres_vista {} vista {:.0f}m cull_ties {} cull_merc {} merc_fog {} raw_cmds {} asm_tex {} asm_mem {} "
       "ocean_tex_half {} fast_clock {} "
@@ -512,7 +510,7 @@ std::string CtrSettings::summary() const {
       rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"),
       envmap_min_px,
-      skin_rows_f24 ? "on" : "off", skin_clip_f24 ? "on" : "off",
+      skin_clip_f24 ? "on" : "off",
       compact_textures ? "on" : "off",
       sprite_max_size, sprite_min_alpha, sprite_alpha_discard ? "on" : "off",
       particle_fill == 2 ? "strong" : (particle_fill ? "on" : "off"),

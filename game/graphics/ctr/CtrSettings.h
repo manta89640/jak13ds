@@ -134,10 +134,6 @@ struct CtrSettings {
   // Mip levels of the level textures (c3l v8): 0 off, 1 nearest level (default: one texel fetch),
   // 2 trilinear (blends two levels, as the PC).
   int mipmaps = 1;
-  // (AI-assisted) merc bone rows uploaded as float24 instead of float32 (a quarter fewer uniform
-  // words; the GPU computes in float24 either way). On: Jak and Daxter identical in Azahar, the
-  // float24 uniform path (raw_unif, raw_pack_f24) already draws the level meshes on hardware
-  bool skin_rows_f24 = true;
   // Measure what each renderer costs the GPU: every few seconds one of them is left out for a
   // moment and the GPU time without it is logged ([ctr] gpu profile). The picture flickers.
   bool gpu_profile = false;

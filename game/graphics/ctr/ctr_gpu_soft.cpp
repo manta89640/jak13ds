@@ -3717,12 +3717,6 @@ int ctr_gpu_top_histogram(unsigned int counts[256]) {
   }
   return 1;
 }
-void ctr_gpu_set_skin_rows_f24(int) {}
-// (AI-assisted) no float24 uniforms here: the draws never get the words
-int ctr_gpu_skin_rows_f24_on(void) {
-  return 0;
-}
-void ctr_gpu_pack_skin_rows_f24(const float*, int, uint32_t*) {}
 void ctr_gpu_set_skin_clip_f24(int) {}  // (AI-assisted)      // (AI-assisted) no uniform formats here
 int ctr_gpu_describe_target(char*, int) {
   return 0;

@@ -30,7 +30,7 @@ typedef struct {
  * Particles come from the particles line (stage_sd.sh --preset safe writes particles = reduced). */
 static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"overlap", "off"},
-    {"frame_overlap2", "off"},    {"skin_rows_f24", "off"},
+    {"frame_overlap2", "off"},
     {"skin_clip_f24", "off"},
     {"cull_merc", "off"},
     {"c3l_read_buffer", "0"},
@@ -179,7 +179,7 @@ static const char* const ctr_cfg_removed[] = {
     "impostors", "impostor_distance", "impostor_error", "impostor_budget", "impostor_atlas",
     "fine_vis", "fine_vis_kb", "occ_cull", "occ_cull_tris", "occ_cull_dist", "vista_untextured",
     /* renderer strip: removed with their code */
-    "fog_stage_skip", "tex1_gating", "fog_alpha", "gpu_micro", "cmd_dedup_draw", "cmd_dedup", "sky_last", "skip_clear", "tex_cache_clear", "opaque_alpha", "distort_copy", "mip_bias", "proctex_glows", "merc_one_bone", "index_u8", "vram_vertices", "shader_basic", "shader_opt", "color_stream", "color16", "depth16", "top_block32", "early_depth_clear", "early_depth_func", "early_depth", "vram_probe", "gpu_micro_ident", "cmd_dump", "cpu_bench",
+    "skin_rows_f24", "fog_stage_skip", "tex1_gating", "fog_alpha", "gpu_micro", "cmd_dedup_draw", "cmd_dedup", "sky_last", "skip_clear", "tex_cache_clear", "opaque_alpha", "distort_copy", "mip_bias", "proctex_glows", "merc_one_bone", "index_u8", "vram_vertices", "shader_basic", "shader_opt", "color_stream", "color16", "depth16", "top_block32", "early_depth_clear", "early_depth_func", "early_depth", "vram_probe", "gpu_micro_ident", "cmd_dump", "cpu_bench",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

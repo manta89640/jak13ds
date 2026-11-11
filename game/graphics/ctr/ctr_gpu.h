@@ -390,10 +390,6 @@ void ctr_gpu_set_mip_mode(int mode);
  * read */
 void ctr_gpu_submit_now(void);
 int ctr_gpu_top_histogram(unsigned int counts[256]);
-/* (AI-assisted) config.ini skin_rows_f24: merc bone rows uploaded as float24 (3 words per vector,
- * rounded to nearest; the GPU computes in float24 anyway) instead of float32 (4 words): 216
- * instead of 288 data words per 24-bone palette. Raw draws only. Any time. */
-void ctr_gpu_set_skin_rows_f24(int on);
 /* (AI-assisted) config.ini skin_clip_f24: each merc model's clip matrix (12 instead of 16 words)
  * and lights (21 instead of 28) as float24 too. Not bit-identical (rounded to nearest where the GPU
  * converts f32 its own way): edge pixels of models can flip. Each frame. */
@@ -623,16 +619,10 @@ void ctr_gpu_flush_range(const void* addr, unsigned int size);
  * ambient. Vertices are c3l::MercVertex (24 bytes, with a normal).
  * (AI-assisted) bones_id: a number new for every palette the caller makes (never reused for other
  * contents while it may still be the last one drawn), so draws compare it instead of the bones; 0:
- * unknown, uploaded at every draw. bones_f24: NULL, or the bones as ctr_gpu_pack_skin_rows_f24
- * made them (used with skin_rows_f24 instead of converting them again). */
+ * unknown, uploaded at every draw. bones_f24: unused (the rows go as float32). */
 void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], const float* bones,
                           int palette_count, const uint32_t* bones_f24, uint32_t bones_id,
                           const float lights[28], int mesh, int first_index, int index_count);
-/* (AI-assisted) skin_rows_f24 is on (the draws take bones_f24), and the float24 words of a palette
- * for them: 9 words per bone, row by row (row r of bone b at out[3 * (r * palette_count + b)]),
- * palette_count <= CTR_MAX_PALETTE. */
-int ctr_gpu_skin_rows_f24_on(void);
-void ctr_gpu_pack_skin_rows_f24(const float* bones, int palette_count, uint32_t* out);
 /* (AI-assisted, far-fog) the fog of the next CTR_TCC_FOG skinned draws, as merc2.vert computes it
  * from the merc camera (Merc2 low memory: hvdf_offset.w, fog min and max): amount =
  * (255 - clamp(hvdf_w - clip w, fog_min, fog_max)) / 255, mixed towards (r, g, b) (the frame's fog

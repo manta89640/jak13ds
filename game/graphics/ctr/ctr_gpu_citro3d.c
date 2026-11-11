@@ -2624,18 +2624,10 @@ void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* drop
 
 static void migrate_small_textures(void);
 
-/* (AI-assisted) config.ini skin_rows_f24 */
-static int s_skin_f24 = 0;
 /* (AI-assisted) config.ini skin_clip_f24: merc clip matrix and lights as float24 too */
 static int s_skin_clip_f24 = 0;
 void ctr_gpu_set_skin_clip_f24(int on) {
   s_skin_clip_f24 = on ? 1 : 0;
-}
-void ctr_gpu_set_skin_rows_f24(int on) {
-  s_skin_f24 = on ? 1 : 0;
-}
-int ctr_gpu_skin_rows_f24_on(void) {
-  return s_skin_f24;
 }
 
 /* ---------------- (AI-assisted) config.ini frame_overlap2 (with the pipeline) ----------------
@@ -7918,47 +7910,6 @@ static void raw_skin_rows(const int* locs, const float* bones, int palette_count
   raw_end(p);
 }
 
-/* (AI-assisted) skin_rows_f24: the same as float24 uniforms (3 words per vector, raw_pack_f24),
- * from the words ctr_gpu_pack_skin_rows_f24 made: per row one config write and one burst (first
- * word, header, the rest, padding: see raw_n). The skin and shine programs' bursts differ only in
- * the config word (locs). */
-static void raw_skin_rows_f24(const int* locs, const u32* words, int palette_count) {
-  u32* p = raw_ptr();
-  const u32 n = 3u * (u32)palette_count;
-  for (int row = 0; row < 3; row++) {
-    p = raw_w(p, GPUREG_VSH_FLOATUNIFORM_CONFIG, 0xF, (u32)locs[row]); /* bit 31 clear: f24 */
-    const u32* src = words + n * (u32)row;
-    p[0] = src[0];
-    p[1] = RAW_HDR(GPUREG_VSH_FLOATUNIFORM_DATA, 0xF) | ((n - 1) << 20);
-    memcpy(p + 2, src + 1, 4u * (n - 1));
-    p += n + 1;
-    if (!(n & 1)) {
-      *p++ = 0;
-    }
-  }
-  raw_end(p);
-}
-
-void ctr_gpu_pack_skin_rows_f24(const float* bones, int palette_count, uint32_t* out) {
-  for (int row = 0; row < 3; row++) {
-    const float* src = bones + 4 * row;
-    for (int b = 0; b < palette_count; b++, src += 12, out += 3) {
-      const float v[4] = {src[3], src[2], src[1], src[0]}; /* C3D_FVec order: w z y x */
-      raw_pack_f24(v, out);
-    }
-  }
-}
-
-/* (AI-assisted) the bones as skin_rows_f24 words: the caller's, else made here */
-static const u32* skin_rows_words(const float* bones, const uint32_t* bones_f24, int palette_count,
-                                  u32* tmp) {
-  if (bones_f24) {
-    return bones_f24;
-  }
-  ctr_gpu_pack_skin_rows_f24(bones, palette_count, tmp);
-  return tmp;
-}
-
 /* (AI-assisted, far-fog) ctr_skin_opt's mfog uniform: [0] the fog amount as a row for the camera
  * space position (merc2.vert: (255 - (hvdf.w - w)) / 255 = w / 255 + 1 - hvdf.w / 255, w = the clip
  * matrix's w row, skin_wrow), [1] x, y: its clamps (fog max, fog min as amounts), [2]
@@ -8113,6 +8064,7 @@ static const SkinLightEnt* skin_light_words(const float lights_in[28], u32 mode)
 void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], const float* bones,
                           int palette_count, const uint32_t* bones_f24, uint32_t bones_id,
                           const float lights[28], int mesh, int first_index, int index_count) {
+  (void)bones_f24; /* the rows go as float32 */
   if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
       index_count < 3) {
     return;
@@ -8168,11 +8120,7 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
    * palette is never changed under its number */
   if (!g.skin_bl_valid || g.last_skin_palette_count != palette_count || !bones_id ||
       g.last_skin_bones_id != bones_id) {
-    if (raw && palette_count > 0 && s_skin_f24) {
-      u32 tmp[9 * CTR_MAX_PALETTE];
-      raw_skin_rows_f24(g.ps->uloc_skin_rows,
-                        skin_rows_words(bones, bones_f24, palette_count, tmp), palette_count);
-    } else if (raw && palette_count > 0) {
+    if (raw && palette_count > 0) {
       raw_skin_rows(g.ps->uloc_skin_rows, bones, palette_count);
     } else {
       for (int row = 0; row < 3; row++) {
@@ -8254,6 +8202,7 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
 void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16], const float* bones,
                               int palette_count, const uint32_t* bones_f24, uint32_t bones_id,
                               const float fade[4], int mesh, int first_index, int index_count) {
+  (void)bones_f24; /* the rows go as float32 */
   if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
       index_count < 3) {
     return;
@@ -8299,11 +8248,7 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
     memcpy(g.last_env_clip, clip, sizeof(g.last_env_clip));
   }
   {
-    if (raw && palette_count > 0 && s_skin_f24) {
-      u32 tmp[9 * CTR_MAX_PALETTE];
-      raw_skin_rows_f24(g.ps->uloc_env_rows,
-                        skin_rows_words(bones, bones_f24, palette_count, tmp), palette_count);
-    } else if (raw && palette_count > 0) {
+    if (raw && palette_count > 0) {
       raw_skin_rows(g.ps->uloc_env_rows, bones, palette_count);
     } else {
       for (int row = 0; row < 3; row++) {
