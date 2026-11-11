@@ -5802,72 +5802,6 @@ void load_cull_cond(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
            lev->cond_boxes.empty() ? " (an older file: both sides drawn)" : "");
 }
 
-// (AI-assisted, visbake) a baked visibility sidecar next to the .c3l (CtrVisBake.h): `ext` .c3b
-// (the title's path, kind 1) or .c3c (cells, kind 2); one made for another version of the level
-// file (other run, chunk or draw counts) is not used
-std::unique_ptr<CtrLevelData::VisBake> read_vis_bake(const CtrLevelData* lev, const char* ext,
-                                                     u32 kind) {
-  std::string p = lev->path;
-  const size_t dot = p.find_last_of('.');
-  const size_t slash = p.find_last_of("/\\");
-  p = (dot != std::string::npos && (slash == std::string::npos || dot > slash) ? p.substr(0, dot) : p) +
-      ext;
-  FILE* fp = fopen(p.c_str(), "rb");
-  if (!fp) {
-    return nullptr;
-  }
-  auto vb = std::make_unique<CtrLevelData::VisBake>();
-  auto& h = vb->hdr;
-  bool ok = fread(&h, sizeof(h), 1, fp) == 1 && !memcmp(h.magic, ctr_vis_bake::kMagic, 4) &&
-            h.version == ctr_vis_bake::kVersion && h.kind == kind && h.sample_count &&
-            h.sample_count <= 65535 && h.interval_count <= (1u << 24);
-  const bool match = ok && h.run_count == lev->vis_runs.size() &&
-                     h.chunk_count == lev->chunks.size() && h.draw_count == lev->draws.size();
-  if (ok && match) {
-    vb->samples.resize(h.sample_count);
-    vb->run_first.resize(h.run_count + 1);
-    vb->iv.resize(h.interval_count);
-    ok = fread(vb->samples.data(), sizeof(ctr_vis_bake::Sample), h.sample_count, fp) ==
-             h.sample_count &&
-         fread(vb->run_first.data(), 4, h.run_count + 1, fp) == h.run_count + 1 &&
-         (!h.interval_count ||
-          fread(vb->iv.data(), sizeof(ctr_vis_bake::Interval), h.interval_count, fp) ==
-              h.interval_count) &&
-         vb->run_first.back() == h.interval_count;
-    for (u32 r = 0; ok && r < h.run_count; r++) {
-      ok = vb->run_first[r] <= vb->run_first[r + 1];
-    }
-    for (u32 i = 1; ok && kind == ctr_vis_bake::kKindCells && i < h.sample_count; i++) {
-      ok = vb->samples[i - 1].cell <= vb->samples[i].cell;  // (sorted: the lookup's binary search)
-    }
-  }
-  fclose(fp);
-  if (!ok || !match) {
-    lg::warn("[ctr] {}: {} {}, not used", lev->name, p,
-             !ok ? "is damaged" : "was baked for another version of the level file");
-    return nullptr;
-  }
-  lg::info("[ctr] {}: baked visibility {}: {} samples, {} intervals ({} KB)", lev->name, ext,
-           h.sample_count, h.interval_count,
-           (h.sample_count * sizeof(ctr_vis_bake::Sample) + (h.run_count + 1) * 4 +
-            h.interval_count * sizeof(ctr_vis_bake::Interval)) / 1024);
-  return vb;
-}
-// read while config.ini title_vis (.c3b) / cell_vis (.c3c) is on
-void load_vis_bake(CtrLevelData* lev) {
-  lev->vis_bake.reset();
-  lev->cell_bake.reset();
-  lev->cell_bits.clear();
-  lev->cell_key = ~0ull;
-  lev->cell_ok = false;
-  if (ctr_settings().title_vis) {
-    lev->vis_bake = read_vis_bake(lev, ".c3b", ctr_vis_bake::kKindPath);
-  }
-  if (ctr_settings().cell_vis) {
-    lev->cell_bake = read_vis_bake(lev, ".c3c", ctr_vis_bake::kKindCells);
-  }
-}
-
 // (AI-assisted, farcopy) c3l::ExtFarCopy: each chunk's role (read always: without it a level
 // converted with --far-copies would draw its copies over their sources)
 void load_far_copy(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
@@ -7823,7 +7757,6 @@ bool CtrLevels::load_file(const fs::path& path,
   load_env_ties(f, hdr, out);  // (AI-assisted, j2water2) c3l v21 (after the textures, draw order)
   load_wind_ties(f, hdr, out);
   load_cull_cond(f, hdr, out);
-  load_vis_bake(out);           // (AI-assisted, visbake)
   load_far_copy(f, hdr, out);   // (AI-assisted, farcopy)
   load_cones(f, hdr, runs_lo, file_runs, out);  // (AI-assisted, facecull)
   // merc models: one skinned mesh per model
@@ -11549,14 +11482,6 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              (double)m_cull_tris / m_cull_frames, m_cull_frames);
     m_cull_runs = m_cull_tris = m_cull_chunks = m_cull_frames = 0;
   }
-  if (rs.log_now && m_vb_frames) {
-    // (AI-assisted, visbake)
-    const double n = (double)m_vb_frames;
-    lg::info("[ctr] {}: title_vis: samples in {:.0f}% of title level draws, hid {:.1f} chunks and "
-             "{:.1f} runs ({:.0f} tris) per level draw ({} level draws)",
-             m_name, 100.0 * m_vb_on / n, m_vb_chunks / n, m_vb_runs / n, m_vb_tris / n, m_vb_frames);
-    m_vb_frames = m_vb_on = m_vb_chunks = m_vb_runs = m_vb_tris = 0;
-  }
   if (rs.log_now && m_dr_frames) {
     // (AI-assisted, depthreuse)
     const double n = (double)m_dr_frames;
@@ -11564,14 +11489,6 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              "runs ({:.0f} tris) per level draw ({} level draws)",
              m_name, 100.0 * m_dr_on / n, m_dr_chunks / n, m_dr_runs / n, m_dr_tris / n, m_dr_frames);
     m_dr_frames = m_dr_on = m_dr_chunks = m_dr_runs = m_dr_tris = 0;
-  }
-  if (rs.log_now && m_cv_frames) {
-    // (AI-assisted, cellvis)
-    const double n = (double)m_cv_frames;
-    lg::info("[ctr] {}: cell_vis usable in {:.0f}% of level draws, hid {:.1f} chunks and {:.1f} runs "
-             "({:.0f} tris) per level draw ({} level draws)",
-             m_name, 100.0 * m_cv_ok / n, m_cv_chunks / n, m_cv_runs / n, m_cv_tris / n, m_cv_frames);
-    m_cv_frames = m_cv_ok = m_cv_chunks = m_cv_runs = m_cv_tris = 0;
   }
   if (rs.log_now && m_cone_frames) {
     // (AI-assisted, facecull)
@@ -11700,501 +11617,6 @@ void CtrTfragRenderer::flush_calls(int /*pass*/) {
 
 CtrTfragRenderer::~CtrTfragRenderer() = default;
 
-// (AI-assisted, visbake) the unit normals of the view's four planes
-void cam_view_normals(const CtrBackgroundCamera& cam, float n[4][3]) {
-  float pl[4][4];
-  for (int c = 0; c < 4; c++) {
-    for (int i = 0; i < 4; i++) {
-      pl[c][i] = cam.planes[c][i];
-    }
-  }
-  ctr_vis_bake::view_normals(pl, n);
-}
-
-#ifndef __3DS__
-// ---- (AI-assisted, visbake) host: baking the runs each camera sees (env CTR_VIS_BAKE=DIR:title) ----
-// The soft renderer tags every level triangle with its level and run (tagger) and reports the
-// tags whose fragments ended in the frame (ctr_gpu_soft_seen_tags). A frame the bake records
-// (title: the title is on and the camera within 4 m of kTitlePath) gives each run seen a hit of
-// the frame's sample: a new sample once the camera has moved 0.5 m or turned 2 degrees since the
-// last one. Written to DIR/<level>.c3b every 900 recorded frames and when recording stops: each
-// sample's runs grown by the runs whose spheres touch theirs (+1 m: the other LOD versions, tiers,
-// near chunks and vista copies of the same place), each run's samples grown by kGrow on each side,
-// as intervals. Runs without a sphere count as seen everywhere.
-namespace visbake {
-constexpr int kGrow = 2;
-struct LevelRec {
-  std::string name;
-  const CtrLevelData* lev = nullptr;
-  u32 runs = 0, chunks = 0, draws = 0;
-  std::vector<std::vector<u16>> hits;  // per run: the samples it was seen in (ascending)
-  std::unordered_map<u32, std::vector<std::pair<u32, u32>>> chunk_runs;  // (first index, run)
-  u64 frame_seen = ~0ull;  // the frame it was last drawn in (lev is valid in it)
-  // per sample: the recorded frames this level was drawn in (a sample it wasn't drawn in says
-  // nothing about its runs: written as such, the runtime doesn't use it for this level)
-  std::vector<u32> sample_frames;
-};
-struct State {
-  int mode = -1;  // -1: not read yet, 0 off, 1 title
-  std::string dir;
-  std::vector<LevelRec> levels;
-  std::unordered_map<int, std::pair<u32, u32>> mesh_of;  // this frame's meshes: (level, chunk)
-  u64 frame = ~0ull;
-  bool pending = false;  // the frame before is to be recorded
-  float pos[3] = {0, 0, 0};
-  float n[4][3] = {};
-  std::vector<ctr_vis_bake::Sample> samples;
-  u64 recorded = 0, written_at = 0;
-  // (AI-assisted, cellvis) cells: each sample's cell (absolute kCellSize indices), the samples by key
-  std::vector<std::array<int, 3>> cell_ijk;
-  std::unordered_map<u64, u16> key_of;
-  int key_ijk[3] = {0, 0, 0};
-  int key_yaw = 0, key_pitch = 0;
-} g;
-// fields that don't overlap: the bin (yaw x 3 + pitch, < 36) bits 0-5, cell z 6-24, y 25-43,
-// x 44-62 (19 bits each, wrapping: +-2000 km of 8 m cells)
-u64 cell_key(const int* ijk, int yaw, int pitch) {
-  return ((u64)(u32)(ijk[0] & 0x7ffff) << 44) | ((u64)(u32)(ijk[1] & 0x7ffff) << 25) |
-         ((u64)(u32)(ijk[2] & 0x7ffff) << 6) | (u64)(yaw * ctr_vis_bake::kPitchBins + pitch);
-}
-
-u32 tagger(int mesh, int first_index) {
-  auto it = g.mesh_of.find(mesh);
-  if (it == g.mesh_of.end()) {
-    return 0;
-  }
-  auto& rec = g.levels[it->second.first];
-  const CtrLevelData& lev = *rec.lev;
-  const u32 ci = it->second.second;
-  auto& tab = rec.chunk_runs[ci];
-  if (tab.empty()) {
-    const auto& ch = lev.chunks[ci];
-    for (u32 k = 0; k < ch.draw_count; k++) {
-      const u32 d = ch.first_draw + k;
-      u32 pos = lev.draws[d].first_index;
-      for (u32 r = lev.draw_first_run[d]; r < lev.draw_first_run[d] + lev.draw_run_count[d]; r++) {
-        tab.push_back({pos, r});
-        pos += lev.vis_runs[r].index_count;
-      }
-    }
-    std::sort(tab.begin(), tab.end());
-    if (tab.empty()) {
-      tab.push_back({0, UINT32_MAX});
-    }
-  }
-  auto at = std::upper_bound(tab.begin(), tab.end(), std::make_pair((u32)first_index, UINT32_MAX));
-  if (at == tab.begin() || std::prev(at)->second == UINT32_MAX) {
-    return 0;
-  }
-  return ((it->second.first + 1) << 24) | (std::prev(at)->second + 1);
-}
-
-void write(LevelRec& rec) {
-  const CtrLevelData& lev = *rec.lev;
-  const u32 ns = (u32)g.samples.size();
-  if (!ns || rec.hits.size() != lev.vis_runs.size()) {
-    return;
-  }
-  const bool cells = g.mode == 2;
-  // (AI-assisted, cellvis) cells: the grid around the cells recorded, the samples sorted by cell,
-  // yaw, pitch (order: new -> old sample, back: old -> new)
-  std::vector<ctr_vis_bake::Sample> samples = g.samples;
-  // each sample's frames with this level drawn: kind 2 in n[0][2], kind 1 in cell (0: not drawn
-  // there, not used for it)
-  for (u32 i = 0; i < ns; i++) {
-    const float f = i < rec.sample_frames.size() ? (float)rec.sample_frames[i] : 0.f;
-    if (g.mode == 2) {
-      samples[i].n[0][2] = f;
-    } else {
-      samples[i].cell = (u32)f;
-    }
-  }
-  std::vector<u32> order(ns), back(ns);
-  for (u32 i = 0; i < ns; i++) {
-    order[i] = i;
-  }
-  float cgrid[4] = {0, 0, 0, 0};
-  u32 cgrid_n[3] = {0, 0, 0};
-  if (cells) {
-    int lo[3] = {INT32_MAX, INT32_MAX, INT32_MAX}, hi[3] = {INT32_MIN, INT32_MIN, INT32_MIN};
-    for (const auto& c : g.cell_ijk) {
-      for (int k = 0; k < 3; k++) {
-        lo[k] = std::min(lo[k], c[k]);
-        hi[k] = std::max(hi[k], c[k]);
-      }
-    }
-    for (int k = 0; k < 3; k++) {
-      cgrid[k] = lo[k] * ctr_vis_bake::kCellSize;
-      cgrid_n[k] = (u32)(hi[k] - lo[k] + 1);
-    }
-    cgrid[3] = ctr_vis_bake::kCellSize;
-    for (u32 i = 0; i < ns; i++) {
-      const auto& c = g.cell_ijk[i];
-      samples[i].cell = (u32)(c[0] - lo[0]) + cgrid_n[0] * ((u32)(c[1] - lo[1]) + cgrid_n[1] * (u32)(c[2] - lo[2]));
-    }
-    std::sort(order.begin(), order.end(), [&](u32 a, u32 b) {
-      const auto& sa = samples[a];
-      const auto& sb = samples[b];
-      return std::tie(sa.cell, sa.n[0][0], sa.n[0][1]) < std::tie(sb.cell, sb.n[0][0], sb.n[0][1]);
-    });
-  }
-  for (u32 i = 0; i < ns; i++) {
-    back[order[i]] = i;
-  }
-  // the runs' world spheres and a grid of them (16 m cells)
-  const u32 nr = (u32)lev.vis_runs.size();
-  std::vector<std::array<float, 4>> sph(nr, {0, 0, 0, -1});
-  for (size_t ci = 0; ci < lev.chunks.size(); ci++) {
-    const auto& ch = lev.chunks[ci];
-    const u32 r0 = lev.chunk_first_run[ci];
-    const u32 n = lev.chunk_run_count[ci] ? lev.chunk_run_count[ci] : ch.vis_run_count;
-    for (u32 r = r0; r < r0 + n && r < nr && r < lev.run_spheres.size(); r++) {
-      const auto& sp = lev.run_spheres[r];
-      if (sp.r != 0xffff) {
-        sph[r] = {ch.origin[0] + sp.c[0] * ch.scale, ch.origin[1] + sp.c[1] * ch.scale,
-                  ch.origin[2] + sp.c[2] * ch.scale, (float)sp.r * ch.scale};
-      }
-    }
-  }
-  constexpr float kCell = 16.f * 4096.f, kMargin = 1.f * 4096.f;
-  auto key = [](int x, int y, int z) {
-    return ((u64)(u32)(x & 0x1fffff) << 42) | ((u64)(u32)(y & 0x1fffff) << 21) | (u32)(z & 0x1fffff);
-  };
-  std::unordered_map<u64, std::vector<u32>> grid;
-  for (u32 r = 0; r < nr; r++) {
-    if (sph[r][3] < 0) {
-      continue;
-    }
-    int lo[3], hi[3];
-    for (int c = 0; c < 3; c++) {
-      lo[c] = (int)std::floor((sph[r][c] - sph[r][3] - kMargin) / kCell);
-      hi[c] = (int)std::floor((sph[r][c] + sph[r][3] + kMargin) / kCell);
-    }
-    for (int x = lo[0]; x <= hi[0]; x++) {
-      for (int y = lo[1]; y <= hi[1]; y++) {
-        for (int z = lo[2]; z <= hi[2]; z++) {
-          grid[key(x, y, z)].push_back(r);
-        }
-      }
-    }
-  }
-  // per sample the runs seen (in the written order), grown by their neighbours
-  std::vector<std::vector<u32>> by_sample(ns);
-  for (u32 r = 0; r < nr; r++) {
-    for (u16 s : rec.hits[r]) {
-      by_sample[back[s]].push_back(r);
-    }
-  }
-  std::vector<std::vector<u16>> grown(nr);
-  std::vector<u32> mark(nr, UINT32_MAX);
-  for (u32 s = 0; s < ns; s++) {
-    for (u32 r : by_sample[s]) {
-      auto add = [&](u32 q) {
-        if (mark[q] != s) {
-          mark[q] = s;
-          grown[q].push_back((u16)s);
-        }
-      };
-      add(r);
-      if (sph[r][3] < 0) {
-        continue;
-      }
-      const auto& a = sph[r];
-      // every cell its own sphere + margin touches: a neighbour that touches it is in one of them
-      // (each run is in every cell its sphere + margin touches)
-      int lo[3], hi[3];
-      for (int c = 0; c < 3; c++) {
-        lo[c] = (int)std::floor((a[c] - a[3] - kMargin) / kCell);
-        hi[c] = (int)std::floor((a[c] + a[3] + kMargin) / kCell);
-      }
-      for (int x = lo[0]; x <= hi[0]; x++) {
-        for (int y = lo[1]; y <= hi[1]; y++) {
-          for (int z = lo[2]; z <= hi[2]; z++) {
-            auto it = grid.find(key(x, y, z));
-            if (it == grid.end()) {
-              continue;
-            }
-            for (u32 q : it->second) {
-              if (mark[q] == s) {
-                continue;
-              }
-              const auto& b = sph[q];
-              const float dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
-              const float rr = a[3] + b[3] + kMargin;
-              if (dx * dx + dy * dy + dz * dz <= rr * rr) {
-                add(q);
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-  std::vector<u32> run_first(nr + 1, 0);
-  std::vector<ctr_vis_bake::Interval> iv, tmp;
-  for (u32 r = 0; r < nr; r++) {
-    run_first[r] = (u32)iv.size();
-    if (sph[r][3] < 0) {
-      iv.push_back({0, (u16)(ns - 1)});
-      continue;
-    }
-    std::sort(grown[r].begin(), grown[r].end());
-    ctr_vis_bake::to_intervals(grown[r], cells ? 0 : kGrow, ns - 1, &tmp);
-    iv.insert(iv.end(), tmp.begin(), tmp.end());
-  }
-  run_first[nr] = (u32)iv.size();
-  ctr_vis_bake::Header h{};
-  memcpy(h.magic, ctr_vis_bake::kMagic, 4);
-  h.version = ctr_vis_bake::kVersion;
-  h.kind = cells ? ctr_vis_bake::kKindCells : ctr_vis_bake::kKindPath;
-  for (int k = 0; k < 4; k++) {
-    h.grid[k] = cgrid[k];
-  }
-  for (int k = 0; k < 3; k++) {
-    h.grid_n[k] = cgrid_n[k];
-  }
-  h.run_count = nr;
-  h.chunk_count = (u32)lev.chunks.size();
-  h.draw_count = (u32)lev.draws.size();
-  h.sample_count = ns;
-  h.interval_count = (u32)iv.size();
-  const std::string path = g.dir + "/" + rec.name + (cells ? ".c3c" : ".c3b");
-  FILE* fp = fopen(path.c_str(), "wb");
-  if (!fp) {
-    lg::error("[visbake] can't write {}", path);
-    return;
-  }
-  fwrite(&h, sizeof(h), 1, fp);
-  for (u32 i = 0; i < ns; i++) {
-    fwrite(&samples[order[i]], sizeof(ctr_vis_bake::Sample), 1, fp);
-  }
-  fwrite(run_first.data(), 4, run_first.size(), fp);
-  fwrite(iv.data(), sizeof(ctr_vis_bake::Interval), iv.size(), fp);
-  fclose(fp);
-  u64 seen = 0;
-  for (u32 r = 0; r < nr; r++) {
-    seen += !grown[r].empty();
-  }
-  lg::info("[visbake] {}: {} samples, {} of {} runs seen, {} intervals ({} KB)", path, ns, seen, nr,
-           iv.size(),
-           (sizeof(h) + ns * sizeof(ctr_vis_bake::Sample) + (nr + 1) * 4 + iv.size() * 4) / 1024);
-}
-
-void write_all(const std::vector<const CtrLevelData*>& loaded) {
-  // the levels drawn in the frame that just ended that are still loaded now (one unloaded since
-  // then: its CtrLevelData is gone)
-  for (auto& rec : g.levels) {
-    if (rec.lev && rec.frame_seen == g.frame &&
-        std::find(loaded.begin(), loaded.end(), rec.lev) != loaded.end()) {
-      write(rec);
-    }
-  }
-  g.written_at = g.recorded;
-}
-
-//! a level draw (render thread, host): the frame before's seen runs, this level's meshes, whether
-//! this frame is recorded
-void level_draw(const CtrLevelData& lev,
-                const CtrBackgroundCamera& cam,
-                u64 frame,
-                bool title_on,
-                const std::vector<const CtrLevelData*>& loaded) {
-  if (g.mode < 0) {
-    g.mode = 0;
-    if (const char* e = getenv("CTR_VIS_BAKE")) {
-      std::string v = e;
-      const size_t c = v.rfind(':');
-      const std::string what = c == std::string::npos ? "" : v.substr(c + 1);
-      g.dir = c == std::string::npos ? v : v.substr(0, c);
-      g.mode = what == "title" ? 1 : (what == "cells" ? 2 : 0);
-      if (!g.mode) {
-        lg::error("[visbake] CTR_VIS_BAKE={}: expected DIR:title or DIR:cells", v);
-      } else {
-        ctr_gpu_soft_set_tagger(tagger);
-        lg::info("[visbake] baking {} into {}", what, g.dir);
-      }
-    }
-  }
-  if (!g.mode) {
-    return;
-  }
-  if (frame != g.frame) {
-    // the frame before ended: its tags
-    if (g.pending) {
-      static std::vector<u32> tags;
-      tags.resize(1 << 20);
-      const int n = std::min(ctr_gpu_soft_seen_tags(tags.data(), (int)tags.size()), (int)tags.size());
-      bool fresh = g.samples.empty();
-      if (g.mode == 2) {
-        // (AI-assisted, cellvis) the sample of the camera's cell and direction: below
-      } else if (!fresh) {
-        const auto& last = g.samples.back();
-        float d2 = 0;
-        for (int c = 0; c < 3; c++) {
-          d2 += (last.pos[c] - g.pos[c]) * (last.pos[c] - g.pos[c]);
-        }
-        fresh = d2 > 0.5f * 4096.f * 0.5f * 4096.f ||
-                ctr_vis_bake::view_match(last.n, g.n) < std::cos(2.f * 3.14159265f / 180.f);
-      }
-      u16 si = 0;
-      if (g.mode == 2) {
-        const u64 key = cell_key(g.key_ijk, g.key_yaw, g.key_pitch);
-        auto it = g.key_of.find(key);
-        if (it == g.key_of.end()) {
-          if (g.samples.size() >= 65535) {
-            g.pending = false;
-          } else {
-            ctr_vis_bake::Sample sm{};
-            sm.n[0][0] = (float)g.key_yaw;
-            sm.n[0][1] = (float)g.key_pitch;
-            it = g.key_of.emplace(key, (u16)g.samples.size()).first;
-            g.samples.push_back(sm);
-            g.cell_ijk.push_back({g.key_ijk[0], g.key_ijk[1], g.key_ijk[2]});
-          }
-        }
-        if (it != g.key_of.end()) {
-          si = it->second;
-        }
-      } else {
-        if (fresh && g.samples.size() < 65535) {
-          ctr_vis_bake::Sample sm{};
-          memcpy(sm.pos, g.pos, sizeof(sm.pos));
-          memcpy(sm.n, g.n, sizeof(sm.n));
-          g.samples.push_back(sm);
-        }
-        si = (u16)(g.samples.size() - 1);
-      }
-      for (int i = 0; i < n; i++) {
-        const u32 li = (tags[i] >> 24) - 1, r = (tags[i] & 0xffffff) - 1;
-        if (g.pending && li < g.levels.size() && r < g.levels[li].hits.size()) {
-          auto& h = g.levels[li].hits[r];
-          if (g.mode == 2) {
-            auto at = std::lower_bound(h.begin(), h.end(), si);
-            if (at == h.end() || *at != si) {
-              h.insert(at, si);
-            }
-          } else if (h.empty() || h.back() != si) {
-            h.push_back(si);
-          }
-        }
-      }
-      // the levels drawn in the recorded frame: this sample covers them
-      if (g.pending) {
-        for (auto& rec : g.levels) {
-          if (rec.frame_seen == g.frame) {
-            if (rec.sample_frames.size() < g.samples.size()) {
-              rec.sample_frames.resize(g.samples.size(), 0);
-            }
-            rec.sample_frames[si]++;
-          }
-        }
-      }
-      g.recorded++;
-      if (g.recorded - g.written_at >= 900) {
-        write_all(loaded);
-      }
-    } else if (g.recorded > g.written_at) {
-      write_all(loaded);  // recording stopped
-    }
-    g.frame = frame;
-    g.pending = false;
-    g.mesh_of.clear();
-  }
-  // this level: its record and meshes
-  u32 li = 0;
-  while (li < g.levels.size() && g.levels[li].name != lev.name) {
-    li++;
-  }
-  if (li == g.levels.size()) {
-    g.levels.emplace_back().name = lev.name;
-  }
-  auto& rec = g.levels[li];
-  if (rec.lev != &lev || rec.runs != lev.vis_runs.size() || rec.chunks != lev.chunks.size() ||
-      rec.draws != lev.draws.size()) {
-    if (rec.runs != lev.vis_runs.size() || rec.chunks != lev.chunks.size() ||
-        rec.draws != lev.draws.size()) {
-      rec.hits.assign(lev.vis_runs.size(), {});
-      rec.sample_frames.clear();
-    }
-    rec.lev = &lev;
-    rec.runs = (u32)lev.vis_runs.size();
-    rec.chunks = (u32)lev.chunks.size();
-    rec.draws = (u32)lev.draws.size();
-    rec.chunk_runs.clear();
-  }
-  rec.frame_seen = frame;
-  for (size_t ci = 0; ci < lev.meshes.size(); ci++) {
-    if (lev.meshes[ci] >= 0) {
-      g.mesh_of[lev.meshes[ci]] = {li, (u32)ci};
-    }
-  }
-  if (g.mode == 2 && !title_on && !g.pending) {
-    // (AI-assisted, cellvis) the camera inside this level's box: its cell and direction
-    bool in = true;
-    for (int c = 0; c < 3; c++) {
-      in = in && cam.trans[c] >= lev.bbox_min[c] && cam.trans[c] <= lev.bbox_max[c];
-    }
-    float n[4][3], d[3];
-    cam_view_normals(cam, n);
-    if (in && ctr_vis_bake::view_dir(n, d)) {
-      g.pending = true;
-      for (int c = 0; c < 3; c++) {
-        g.key_ijk[c] = (int)std::floor(cam.trans[c] / ctr_vis_bake::kCellSize);
-      }
-      g.key_yaw = ctr_vis_bake::yaw_bin(ctr_vis_bake::yaw_of(d));
-      g.key_pitch = ctr_vis_bake::pitch_bin(ctr_vis_bake::pitch_of(d));
-    }
-  }
-  if (g.mode == 1 && title_on) {
-    const float p[3] = {cam.trans[0], cam.trans[1], cam.trans[2]};
-    if (title_path_d2(p) <= 16.f * 4096.f * 4096.f) {
-      g.pending = true;
-      memcpy(g.pos, p, sizeof(p));
-      cam_view_normals(cam, g.n);
-    }
-  }
-}
-bool on() {
-  return g.mode > 0;
-}
-}  // namespace visbake
-#endif
-
-// (AI-assisted, visbake) title_vis: the two samples of the level's bake nearest the camera (within
-// 2 m, every view plane within 8 degrees of the camera's), m_vb_n of them (0: no culling)
-int pick_vis_samples(const CtrLevelData::VisBake& vb, const CtrBackgroundCamera& cam, u32* out) {
-  float n[4][3];
-  cam_view_normals(cam, n);
-  const float max_d2 = 2.f * 4096.f * 2.f * 4096.f;
-  const float min_cos = 0.990268f;  // cos 8 degrees
-  float best[2] = {max_d2, max_d2};
-  int k = 0;
-  for (u32 i = 0; i < vb.samples.size(); i++) {
-    const auto& sm = vb.samples[i];
-    float d2 = 0;
-    for (int c = 0; c < 3; c++) {
-      const float d = sm.pos[c] - cam.trans[c];
-      d2 += d * d;
-    }
-    // (a sample the bake didn't draw this level in says nothing about its runs: Sample::cell, the
-    // frames it was drawn in, 0)
-    if (!sm.cell || !(d2 <= best[1]) || ctr_vis_bake::view_match(sm.n, n) < min_cos) {
-      continue;
-    }
-    if (d2 <= best[0]) {
-      best[1] = best[0];
-      out[1] = out[0];
-      best[0] = d2;
-      out[0] = i;
-    } else {
-      best[1] = d2;
-      out[1] = i;
-    }
-    k = std::min(k + 1, 2);
-  }
-  return k;
-}
-
 // (AI-assisted, depthreuse) the newest finished depth copy (ctr_gpu_depth_blocks), looked at once
 // per frame: usable while the camera is within 0.25 m and 1 degree of the camera it was drawn with
 struct DepthReuse {
@@ -12296,86 +11718,6 @@ bool depth_reuse_streak(int t, u16* seq, u8* streak) {
     *streak = 1;
   }
   return *streak >= 2;
-}
-
-// (AI-assisted, cellvis) cell_vis: the runs seen from the camera's cell (and the 7 cells next to
-// it on the camera's side) in the direction bins its view reaches into (lev.cell_bits, made again
-// when that set changes). Usable only while the camera's own cell has every one of those bins,
-// each recorded in at least kMinFrames frames.
-bool cell_vis_select(CtrLevelData& lev, const CtrBackgroundCamera& cam) {
-  constexpr float kMinFrames = 4.f;
-  const auto& vb = *lev.cell_bake;
-  const auto& h = vb.hdr;
-  float n[4][3], d[3];
-  cam_view_normals(cam, n);
-  if (!ctr_vis_bake::view_dir(n, d) || !(h.grid[3] > 0)) {
-    return false;
-  }
-  uint32_t ym = 0, pm = 0;
-  ctr_vis_bake::view_bins(ctr_vis_bake::yaw_of(d), ctr_vis_bake::pitch_of(d),
-                          ctr_vis_bake::view_half_angle(n, d), &ym, &pm);
-  int ijk[3], side[3];
-  for (int c = 0; c < 3; c++) {
-    const float f = (cam.trans[c] - h.grid[c]) / h.grid[3];
-    ijk[c] = (int)std::floor(f);
-    side[c] = f - ijk[c] < 0.5f ? -1 : 1;
-    if (ijk[c] < 0 || ijk[c] >= (int)h.grid_n[c]) {
-      lev.cell_key = ~0ull;
-      lev.cell_ok = false;
-      return false;
-    }
-  }
-  const u32 own = (u32)ijk[0] + h.grid_n[0] * ((u32)ijk[1] + h.grid_n[1] * (u32)ijk[2]);
-  const u64 key = ctr_vis_bake::cell_select_key(own, side, ym, pm);
-  if (key == lev.cell_key) {
-    return lev.cell_ok;
-  }
-  lev.cell_key = key;
-  lev.cell_ok = false;
-  std::vector<uint32_t> use;
-  u64 have = 0;  // (yaw bin * 3 + pitch bin) bits the own cell has enough of (36 bits)
-  for (int k = 0; k < 8; k++) {
-    int q[3];
-    for (int c = 0; c < 3; c++) {
-      q[c] = ijk[c] + ((k >> c) & 1 ? side[c] : 0);
-    }
-    if (q[0] < 0 || q[1] < 0 || q[2] < 0 || q[0] >= (int)h.grid_n[0] || q[1] >= (int)h.grid_n[1] ||
-        q[2] >= (int)h.grid_n[2]) {
-      continue;
-    }
-    const u32 cell = (u32)q[0] + h.grid_n[0] * ((u32)q[1] + h.grid_n[1] * (u32)q[2]);
-    auto it = std::lower_bound(vb.samples.begin(), vb.samples.end(), cell,
-                               [](const ctr_vis_bake::Sample& sm, u32 v) { return sm.cell < v; });
-    for (; it != vb.samples.end() && it->cell == cell; ++it) {
-      const int yb = (int)it->n[0][0], pb = (int)it->n[0][1];
-      if (yb < 0 || yb >= ctr_vis_bake::kYawBins || pb < 0 || pb >= ctr_vis_bake::kPitchBins ||
-          !(ym & (1u << yb)) || !(pm & (1u << pb))) {
-        continue;
-      }
-      use.push_back((u32)(it - vb.samples.begin()));
-      if (k == 0 && it->n[0][2] >= kMinFrames) {
-        have |= 1ull << (yb * 3 + pb);
-      }
-    }
-  }
-  for (int yb = 0; yb < ctr_vis_bake::kYawBins; yb++) {
-    for (int pb = 0; pb < ctr_vis_bake::kPitchBins; pb++) {
-      if ((ym & (1u << yb)) && (pm & (1u << pb)) && !(have & (1ull << (yb * 3 + pb)))) {
-        return false;  // a direction the own cell wasn't recorded looking at
-      }
-    }
-  }
-  // each run's intervals once against the samples used (sorted): not every sample per run
-  std::sort(use.begin(), use.end());
-  const u32 nr = h.run_count;
-  lev.cell_bits.assign(nr / 8 + 1, 0);
-  for (u32 r = 0; r < nr; r++) {
-    if (ctr_vis_bake::seen_any(vb.run_first.data(), vb.iv.data(), r, use.data(), use.size())) {
-      lev.cell_bits[r >> 3] |= (u8)(1u << (r & 7));
-    }
-  }
-  lev.cell_ok = true;
-  return true;
 }
 
 void CtrTfragRenderer::draw_level(CtrLevelData& lev,
@@ -13791,24 +13133,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // chunk's sphere against the four planes; with run_culling, a chunk that crosses planes has its
   // runs tested against those planes on their own), the visibility bits or (vista tier) the
   // source chunks, then its matrix. vista: drawn in the vista pass.
-  // (AI-assisted, visbake) a bake on the host draws the level whole: none of the culls below (a
-  // run one of them hid would be baked as never seen)
-#ifndef __3DS__
-  visbake::level_draw(lev, cam, rs.frame_idx, title_on, m_loaded);
-  const bool baking = visbake::on();
-#else
-  const bool baking = false;
-#endif
-  // (AI-assisted, visbake) title_vis: this level draw's samples of the level's bake (m_vb_s)
-  m_vb_n = 0;
   // (AI-assisted, facecull) cone_cull: runs facing away (only where the GPU would cull them)
-  m_cone_on = settings.cone_cull && settings.cull_ties && !baking &&
+  m_cone_on = settings.cone_cull && settings.cull_ties &&
               lev.run_cone.size() == lev.vis_runs.size() && !lev.run_cone.empty();
   m_cone_frames += m_cone_on;
   // (AI-assisted, farcopy) far_copy: from this distance of a cell's center its copies (a bake draws
   // the sources)
   m_fc_d2 = 0.f;
-  if (settings.far_copy && !lev.far_role.empty() && !baking) {
+  if (settings.far_copy && !lev.far_role.empty()) {
     const float d = settings.far_copy_distance * 4096.f;
     m_fc_d2 = d * d;
     m_fc_frames++;
@@ -13816,7 +13148,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // (AI-assisted, sizecull) min_run_px: this frame's focal length (pixels of the 400-wide top screen
   // per unit of size at unit depth, as tie_lod_px's)
   m_sz_focal = 0.f;
-  if (settings.min_run_px > 0 && !baking) {
+  if (settings.min_run_px > 0) {
     const float pzw = std::abs(cam.perspective[2][3]);
     m_sz_focal = pzw > 0 ? 200.f * std::abs(cam.fog.x() * cam.perspective[0][0] / 256.f) / pzw : 0.f;
     // the view's direction: its four planes' (inward) normals summed
@@ -13841,17 +13173,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     m_sz_frames++;
   }
-  // (AI-assisted, cellvis) cell_vis: the runs seen from the camera's cell this way (lev.cell_bits)
-  m_cv_on = false;
-  if (settings.cell_vis && lev.cell_bake && !baking && !title_on) {
-    m_cv_on = cell_vis_select(lev, cam);
-    m_cv_frames++;
-    m_cv_ok += m_cv_on;
-  }
   // (AI-assisted, depthreuse) the recent depth for this level draw
   m_dr_ok = false;
   if (settings.depth_reuse) {
-    m_dr_ok = depth_reuse_frame(R, kYScale, cam, rs.frame_idx) && !baking;
+    m_dr_ok = depth_reuse_frame(R, kYScale, cam, rs.frame_idx);
     if (lev.dr_chunk_seq.size() != lev.chunks.size()) {
       lev.dr_chunk_seq.assign(lev.chunks.size(), 0xffff);
       lev.dr_chunk_streak.assign(lev.chunks.size(), 0);
@@ -13862,12 +13187,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     m_dr_frames++;
     m_dr_on += m_dr_ok;
-  }
-  if (settings.title_vis && title_on && lev.vis_bake && !baking &&
-      lev.vis_bake->hdr.kind == ctr_vis_bake::kKindPath) {
-    m_vb_n = pick_vis_samples(*lev.vis_bake, cam, m_vb_s);
-    m_vb_frames++;
-    m_vb_on += m_vb_n > 0;
   }
   // the run loop's inputs that are the same for every chunk (filled before the chunk loop)
   RunLoopIn run_in;
@@ -14060,7 +13379,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                            ? ch.vis_run_count
                            : (lev.chunk_run_count[ci] ? lev.chunk_run_count[ci] : ch.vis_run_count);
       const bool cone_runs = m_cone_on && run_sph && !vista_tier;  // (AI-assisted, facecull)
-      if ((((dr_runs || sz_runs || cone_runs) && run_sph) || m_vb_n || m_cv_on) &&
+      if ((dr_runs || sz_runs || cone_runs) && run_sph &&
           x_nr) {
         const u32 r0 = lev.chunk_first_run[ci];
         const u32 nr = x_nr;
@@ -14074,23 +13393,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         u32 shown = 0;
         u64* hid_by = nullptr;  // the chunk count of the cull that hid the last run hidden here
         for (u32 r = r0; r < r0 + nr; r++) {
-          if (m_cv_on && m_run_shown[r] && !(lev.cell_bits[r >> 3] & (1u << (r & 7)))) {
-            // (AI-assisted, cellvis) never seen from the camera's cell this way
-            m_run_shown[r] = 0;
-            m_cv_runs++; hid_by = &m_cv_chunks;
-            m_cv_tris += lev.vis_runs[r].index_count / 3;
-          }
-          if (m_vb_n && m_run_shown[r]) {
-            // (AI-assisted, visbake) never seen from the nearest samples of the title's path
-            const auto& vb = *lev.vis_bake;
-            if (!ctr_vis_bake::seen(vb.run_first.data(), vb.iv.data(), r, m_vb_s[0]) &&
-                (m_vb_n < 2 ||
-                 !ctr_vis_bake::seen(vb.run_first.data(), vb.iv.data(), r, m_vb_s[1]))) {
-              m_run_shown[r] = 0;
-              m_vb_runs++; hid_by = &m_vb_chunks;
-              m_vb_tris += lev.vis_runs[r].index_count / 3;
-            }
-          }
           const auto& sp = run_sph ? lev.run_spheres[r] : CtrLevelData::RunSphere{{0, 0, 0}, 0xffff};
           if (m_run_shown[r] && sp.r != 0xffff) {
             const float c[3] = {ch.origin[0] + sp.c[0] * ch.scale, ch.origin[1] + sp.c[1] * ch.scale,

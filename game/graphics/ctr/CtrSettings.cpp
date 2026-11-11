@@ -247,8 +247,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.vis_culling = parse_bool(v);
     } else if (key == "run_culling") {
       s.run_culling = parse_bool(v);  // (AI-assisted)
-    } else if (key == "title_vis") {
-      s.title_vis = parse_bool(v);  // (AI-assisted, visbake)
     } else if (key == "cone_cull") {
       s.cone_cull = parse_bool(v);  // (AI-assisted, facecull)
     } else if (key == "cull_terrain") {
@@ -263,8 +261,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       // (AI-assisted, ps2lodscale) auto | 0.3 .. 1
       s.ps2_lod_scale_auto = v == "auto";
       s.ps2_lod_scale = s.ps2_lod_scale_auto ? 1.f : std::clamp(f, 0.3f, 1.f);
-    } else if (key == "cell_vis") {
-      s.cell_vis = parse_bool(v);  // (AI-assisted, cellvis)
     } else if (key == "depth_reuse") {
       s.depth_reuse = parse_bool(v);  // (AI-assisted, depthreuse)
     } else if (key == "depth_reuse_min") {

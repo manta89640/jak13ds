@@ -43,8 +43,7 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     /* (AI-assisted, fidelity2) the full texture and shine detail */
     {"mip_bias", "0"},   {"envmap_min_px", "0"},
     /* the Nov 11 options, on by default */
-    {"title_vis", "off"},
-    {"cell_vis", "off"},      {"ps2_lod_scale", "1"},   {"min_run_px", "0"},
+    {"ps2_lod_scale", "1"},   {"min_run_px", "0"},
     {"far_copy", "off"},      {"cull_terrain", "off"},  {"cone_cull", "off"},
     {"depth_reuse", "off"},   {"vram_vertices", "off"}, {"index_u8", "off"},
     {"merc_one_bone", "off"}, {"vfp_vector", "off"},    {"anim_lod_far", "off"},

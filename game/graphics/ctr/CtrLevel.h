@@ -33,7 +33,6 @@
 
 #include "game/graphics/ctr/CtrCull.h"
 #include "game/graphics/ctr/CtrRenderer.h"
-#include "game/graphics/ctr/CtrVisBake.h"
 #include "game/graphics/ctr/CtrKeiraRig.h"
 #include "game/graphics/ctr/CtrTodPulse.h"
 #include "game/graphics/ctr/c3l_format.h"
@@ -705,21 +704,6 @@ struct CtrLevelData {
   // per group its near chunks (stream_units holding its near or mid version) and the frame it was
   // first held coarser in view for want of them
   std::vector<u32> tf_unit_first, tf_unit_count, tf_units, tf_hold_since;
-  // (AI-assisted, visbake) baked visibility (CtrVisBake.h: the .c3b next to the .c3l, read while
-  // config.ini title_vis is on): its header and samples, per run its intervals of samples
-  struct VisBake {
-    ctr_vis_bake::Header hdr{};
-    std::vector<ctr_vis_bake::Sample> samples;
-    std::vector<uint32_t> run_first;
-    std::vector<ctr_vis_bake::Interval> iv;
-  };
-  std::unique_ptr<VisBake> vis_bake;
-  // (AI-assisted, cellvis) cells (the .c3c, read while config.ini cell_vis is on): the runs seen
-  // from the camera's cell this way (a bit per run), for the cells and bins of key cell_key
-  std::unique_ptr<VisBake> cell_bake;
-  std::vector<u8> cell_bits;
-  u64 cell_key = ~0ull;
-  bool cell_ok = false;
   // (AI-assisted, depthreuse) per chunk and per run: the depth copy it was last found hidden in and
   // in how many copies in a row (depth_reuse hides it from the second on)
   std::vector<u16> dr_chunk_seq, dr_run_seq;
@@ -1608,16 +1592,9 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_fade_runs = 0;
   u64 m_lod_groups_near = 0, m_lod_frames = 0, m_lod_tris[2] = {0, 0};
   u64 m_cull_runs = 0, m_cull_tris = 0, m_cull_chunks = 0, m_cull_frames = 0;
-  // (AI-assisted, visbake) title_vis: the baked samples this level draw uses (m_vb_n of them) and
-  // statistics: level draws with the title on, of them with samples, chunks and runs hidden
-  u32 m_vb_s[2] = {0, 0};
-  int m_vb_n = 0;
-  u64 m_vb_frames = 0, m_vb_on = 0, m_vb_chunks = 0, m_vb_runs = 0, m_vb_tris = 0;
   // (AI-assisted, depthreuse) this level draw may use the recent depth (the frame's g_dr), and
   // statistics: level draws, of them with it, chunks and runs hidden, the runs' triangles
   bool m_dr_ok = false;
-  // (AI-assisted, cellvis) cell_vis this level draw, and statistics
-  bool m_cv_on = false;
   // (AI-assisted, sizecull) min_run_px this level draw: pixels per game unit at unit depth (0: off),
   // and statistics
   // (AI-assisted, farcopy) far_copy this level draw: the squared switch distance (game units; 0:
@@ -1630,7 +1607,6 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   float m_sz_focal = 0.f;
   float m_sz_fwd[3] = {0, 0, 1};
   u64 m_sz_frames = 0, m_sz_chunks = 0, m_sz_runs = 0, m_sz_tris = 0;
-  u64 m_cv_frames = 0, m_cv_ok = 0, m_cv_chunks = 0, m_cv_runs = 0, m_cv_tris = 0;
   u64 m_dr_frames = 0, m_dr_on = 0, m_dr_chunks = 0, m_dr_runs = 0, m_dr_tris = 0;
   // kDrawCullCond draws of visible chunks, and of them culled (camera inside)
   u64 m_cond_draws = 0, m_cond_culled = 0;

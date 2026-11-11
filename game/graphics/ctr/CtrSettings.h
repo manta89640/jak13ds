@@ -256,14 +256,6 @@ struct CtrSettings {
   // pieces of ~96 triangles made at load) tested against the view on their own: only the ones on
   // screen are drawn (bounding spheres made at load, 8 bytes per piece)
   bool run_culling = true;
-  // (AI-assisted, visbake) the title screen's flight: the level runs a bake (<level>.c3b next to the
-  // .c3l, made on the host with CTR_VIS_BAKE=dir:title) never saw from the nearest cameras of its
-  // path are not drawn (docs/3ds-port/culling.md). Off: not yet seen on a console
-  bool title_vis = false;
-  // (AI-assisted, cellvis) level runs that a bake (<level>.c3c, CTR_VIS_BAKE=dir:cells on the host)
-  // never saw from the camera's cell (8 m) looking the ways the view reaches are not drawn
-  // (docs/3ds-port/culling.md). Off: not yet seen on a console
-  bool cell_vis = false;
   // (AI-assisted, ps2lodscale) the PS2's tie and tfrag level of detail distances (its switches and
   // geomorph bands, not the screen-space error rule) times this: auto = the PS2's lines over the
   // 3DS's (240 / 448 Jak 1, 240 / 416 Jak II), where a shape error covers as many pixels of the

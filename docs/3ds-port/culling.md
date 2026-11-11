@@ -12,59 +12,12 @@ ones with converter data need the levels converted again.
 
 | # | key | removes | needs |
 |---|---|---|---|
-| 3 | `title_vis` | on the title flight, every run the camera there never shows | a host bake (`.c3b`) |
 | 4 | `depth_reuse` | runs and chunks a recent frame's depth hid, while the camera holds still | nothing |
-| 5 | `cell_vis` | runs never seen from the camera's cell looking that way | a host bake (`.c3c`) |
 | 6 | `ps2_lod_scale` | detail the 240-line screen can't show (coarse versions nearer) | nothing |
 | 7 | `min_run_px` | runs and chunks under a pixel or so across | nothing |
 | 8 | `far_copy` | detail of far plain ties (a simplified copy from 150 m) | levels converted with `--far-copies` |
 | 9 | `cull_terrain` | back faces of ground the camera can't get under | levels converted with `--terrain-cull` |
 | 10 | `cone_cull` | the vertex work of runs whose every triangle faces away | levels converted with `--face-runs` |
-
-## 3. The title flight's baked visibility
-
-The title's camera flies one fixed path (the `logo-cam` animation; `kTitlePath` in CtrLevel.cpp,
-already used to leave out chunks the path can never draw). So what it sees can be recorded once
-and looked up: a sidecar `<level>.c3b` (`CtrVisBake.h`) next to the level's .c3l.
-
-**Baking** (host only). The soft renderer tags each level triangle it draws with its level and run
-(`ctr_gpu_soft_set_tagger`; a run from the chunk's draws and their runs' index ranges) and keeps,
-per pixel, the tag of the last opaque level fragment, plus the tags of blended level fragments that
-passed the depth test. At the frame's end those are the runs seen. With `CTR_VIS_BAKE=DIR:title`:
-- a frame is recorded while the title is on and the camera is within 4 m of `kTitlePath`; it adds
-  to the last sample, or starts a new one once the camera has moved 0.5 m or turned 2 degrees
-  (sample: position, the four view planes' normals);
-- every 900 recorded frames and when recording stops, `DIR/<level>.c3b` is written for each level
-  still loaded that recorded frames: per sample the runs seen, grown by every run whose sphere
-  touches theirs (+1 m: the other LOD version, tier or near chunk of the same place, a vista copy
-  over it); per run its samples grown by 2 on each side, as intervals. Runs without a sphere are
-  seen everywhere.
-- while baking, the culling of sections 1-5, 7, 8 and 10 is off whatever config.ini says, so the
-  bake records the whole picture. Sections 6 and 9 follow config.ini: bake with them off, or as
-  they will be played.
-
-Run the host renderer (`gk --ctr-gfx`, as for the other host checks) on the title with
-`CTR_VIS_BAKE=DIR:title` for at least two loops of the flight, from the same .c3l files as the SD
-card, then copy `DIR/village1.c3b` (and any other level it
-wrote) next to the .c3l files. The log has `[visbake] DIR/<level>.c3b: N samples, N of N runs seen,
-N intervals (N KB)`.
-
-**At runtime** (`title_vis = on`, `pick_vis_samples`): while the title is on, the two samples
-nearest the camera within 2 m whose view planes are all within 8 degrees of the camera's; a run
-seen in neither is not drawn (a chunk with none seen is left out whole). No sample there (the
-camera off the path, a cut): nothing is hidden. A .c3b whose run, chunk or draw counts aren't the
-level file's is refused at load. Cost: per level draw a pass over the samples (hundreds), per run
-of the chunks in view a look at its intervals (usually one or two).
-
-**Why it holds.** The camera of the bake and the game's camera are the same animation; a run drawn
-at the game's camera that the bake never saw nearby would have to appear between two samples less
-than 0.5 m and 2 degrees apart, beyond the 2-sample and sphere margins. What the bake can't see:
-moving level parts (none on the title's path but the ocean, which isn't a level run) and
-geometry the bake's settings didn't draw (bake with the defaults).
-
-**To check on a console:** bake, copy the .c3b, `title_vis = on`, watch the flight for missing
-pieces (most likely at the start of a loop or after a cut), compare the title's `render ms/frame`
-and triangles with it off.
 
 ## 4. The depth of a recent frame
 
@@ -114,49 +67,6 @@ per chunk in view a projection of 9 points, per run of chunks partly behind the 
 **To check on a console:** `depth_reuse = on`, stand in village1 and the jungle and turn slowly;
 look for things missing or blinking behind hills and walls when you start moving, and when Jak or
 an enemy walks in front of the scenery.
-
-## 5. Visibility by camera cell and direction
-
-The removed `fine_vis` kept one set per cell for every direction, and cut 0-4% in caves where the
-PS2's own visibility already works. This one keeps a set per cell and view direction, from what a
-bake actually drew.
-
-**Baking** (host, `CTR_VIS_BAKE=DIR:cells`, the same tagging as section 3). Every frame outside the
-title with the camera inside a drawn level's box files the runs seen under the camera's cell (8 m
-cubes of the world) and its view direction's bin: 12 yaw bins of 30 degrees x 3 pitch bins (below
--20, level, above +20 degrees). Written to `DIR/<level>.c3c` every 900 recorded frames and when
-recording stops: the samples (cell, yaw bin, pitch bin, frames recorded) sorted by cell, the grid
-around the recorded cells, per run its samples as intervals, grown by the runs whose spheres touch
-(section 3). Play (or run pad scripts) through the places to be covered, looking around in each:
-a cell counts only for the directions it was recorded looking at.
-
-**At runtime** (`cell_vis = on`, `cell_vis_select`): the view's direction (its four planes'
-normals' sum), a half angle that holds its corners (`atan(sqrt(2) tan(the largest plane angle))`),
-and the bins that reaches into (`view_bins`: pitch bins it overlaps; the yaw bins within its half
-angle widened for its pitch, + 5 degrees, all twelve once it reaches 60 degrees up or down). The
-camera's cell must have every one of those bins recorded in 4 frames or more, else nothing is
-hidden. Then the runs seen from that cell and the 7 cells next to it on the camera's side, in those
-bins, are the ones drawn: a bit per run (`lev.cell_bits`), made again only when the cell, the side
-or the bins change (`cell_select_key`, fields that don't overlap). Runs seen in none are not drawn.
-The bake's cell keys keep 19 bits per axis and the bins apart from them.
-
-**Why it can still miss something:** the bake saw the cell from the places and angles it was in;
-something visible only from another corner of the cell, or at a moment the bake didn't see (a door
-opened later, a platform elsewhere), is missing. The 8 cells, the bins' margins and the grown runs
-are the safety; the bake's coverage is the rest.
-
-The test (`cull_test.cpp`): for 2000 random views (yaw, pitch, half angle), every direction within
-the half angle falls in a bin the view takes; the view's direction and a half angle reaching its
-corners from four planes; every cell, side and bins give a different key; `seen_any` (a binary
-search per interval) against looking up each sample.
-
-**Cost:** on a change of cell, side or bins, a pass over the level's runs (each run's intervals for
-the samples taken: up to ~50); per run of the chunks in view a bit. Memory: the .c3c (samples 64
-bytes, 4 bytes per run, 4 per interval) and a bit per run.
-
-**To check on a console:** bake by playing a level on the host, copy the .c3c, `cell_vis = on`,
-play the same places and look for missing things, most of all in directions the bake looked at
-only briefly; compare the triangle counts.
 
 ## 6. The PS2's detail distances for a 240-line screen
 
