@@ -14,6 +14,7 @@ ones with converter data need the levels converted again.
 |---|---|---|---|
 | 1 | `occluders` | runs and chunks behind big solid objects | reconverted levels |
 | 2 | `horizon` | runs and chunks behind hills | reconverted levels |
+| 3 | `title_vis` | on the title flight, every run the camera there never shows | a host bake (`.c3b`) |
 
 ## 1. Occluders: boxes inside closed tie surfaces
 
@@ -124,3 +125,44 @@ an atan2 and two asin; the runs of chunks partly below it the same.
 **To check on a console:** convert the levels, `horizon = on`, walk over village1's hills, the
 beach and the jungle's paths, look for far things missing that should show over a crest, compare
 the triangle count with it off.
+
+## 3. The title flight's baked visibility
+
+The title's camera flies one fixed path (the `logo-cam` animation; `kTitlePath` in CtrLevel.cpp,
+already used to leave out chunks the path can never draw). So what it sees can be recorded once
+and looked up: a sidecar `<level>.c3b` (`CtrVisBake.h`) next to the level's .c3l.
+
+**Baking** (host only). The soft renderer tags each level triangle it draws with its level and run
+(`ctr_gpu_soft_set_tagger`; a run from the chunk's draws and their runs' index ranges) and keeps,
+per pixel, the tag of the last opaque level fragment, plus the tags of blended level fragments that
+passed the depth test. At the frame's end those are the runs seen. With `CTR_VIS_BAKE=DIR:title`:
+- a frame is recorded while the title is on and the camera is within 4 m of `kTitlePath`; it adds
+  to the last sample, or starts a new one once the camera has moved 0.5 m or turned 2 degrees
+  (sample: position, the four view planes' normals);
+- every 900 recorded frames and when recording stops, `DIR/<level>.c3b` is written: per sample the
+  runs seen, grown by every run whose sphere touches theirs (+1 m: the other LOD version, tier or
+  near chunk of the same place, a vista copy over it); per run its samples grown by 2 on each
+  side, as intervals. Runs without a sphere are seen everywhere.
+
+Run the host renderer (`gk --ctr-gfx`, as for the other host checks) on the title with
+`CTR_VIS_BAKE=DIR:title` for at least two loops of the flight, with the defaults (no new culling key
+on), from the same .c3l files as the SD card, then copy `DIR/village1.c3b` (and any other level it
+wrote) next to the .c3l files. The log has `[visbake] DIR/<level>.c3b: N samples, N of N runs seen,
+N intervals (N KB)`.
+
+**At runtime** (`title_vis = on`, `pick_vis_samples`): while the title is on, the two samples
+nearest the camera within 2 m whose view planes are all within 8 degrees of the camera's; a run
+seen in neither is not drawn (a chunk with none seen is left out whole). No sample there (the
+camera off the path, a cut): nothing is hidden. A .c3b whose run, chunk or draw counts aren't the
+level file's is refused at load. Cost: per level draw a pass over the samples (hundreds), per run
+of the chunks in view a look at its intervals (usually one or two).
+
+**Why it holds.** The camera of the bake and the game's camera are the same animation; a run drawn
+at the game's camera that the bake never saw nearby would have to appear between two samples less
+than 0.5 m and 2 degrees apart, beyond the 2-sample and sphere margins. What the bake can't see:
+moving level parts (none on the title's path but the ocean, which isn't a level run) and
+geometry the bake's settings didn't draw (bake with the defaults).
+
+**To check on a console:** bake, copy the .c3b, `title_vis = on`, watch the flight for missing
+pieces (most likely at the start of a loop or after a cut), compare the title's `render ms/frame`
+and triangles with it off.

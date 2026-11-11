@@ -18,6 +18,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -5867,6 +5868,58 @@ void load_horizon(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
            ex.cell / 4096.f, covered);
 }
 
+// (AI-assisted, visbake) the baked visibility sidecar (<level>.c3b next to the .c3l, CtrVisBake.h),
+// read while config.ini title_vis is on; one made for another version of the level file (other run,
+// chunk or draw counts) is not used
+void load_vis_bake(CtrLevelData* lev) {
+  lev->vis_bake.reset();
+  if (!ctr_settings().title_vis) {
+    return;
+  }
+  std::string p = lev->path;
+  const size_t dot = p.find_last_of('.');
+  const size_t slash = p.find_last_of("/\\");
+  p = (dot != std::string::npos && (slash == std::string::npos || dot > slash) ? p.substr(0, dot) : p) +
+      ".c3b";
+  FILE* fp = fopen(p.c_str(), "rb");
+  if (!fp) {
+    return;
+  }
+  auto vb = std::make_unique<CtrLevelData::VisBake>();
+  auto& h = vb->hdr;
+  bool ok = fread(&h, sizeof(h), 1, fp) == 1 && !memcmp(h.magic, ctr_vis_bake::kMagic, 4) &&
+            h.version == ctr_vis_bake::kVersion && h.sample_count && h.sample_count <= 65535 &&
+            h.interval_count <= (1u << 24);
+  const bool match = ok && h.run_count == lev->vis_runs.size() &&
+                     h.chunk_count == lev->chunks.size() && h.draw_count == lev->draws.size();
+  if (ok && match) {
+    vb->samples.resize(h.sample_count);
+    vb->run_first.resize(h.run_count + 1);
+    vb->iv.resize(h.interval_count);
+    ok = fread(vb->samples.data(), sizeof(ctr_vis_bake::Sample), h.sample_count, fp) ==
+             h.sample_count &&
+         fread(vb->run_first.data(), 4, h.run_count + 1, fp) == h.run_count + 1 &&
+         (!h.interval_count ||
+          fread(vb->iv.data(), sizeof(ctr_vis_bake::Interval), h.interval_count, fp) ==
+              h.interval_count) &&
+         vb->run_first.back() == h.interval_count;
+    for (u32 r = 0; ok && r < h.run_count; r++) {
+      ok = vb->run_first[r] <= vb->run_first[r + 1];
+    }
+  }
+  fclose(fp);
+  if (!ok || !match) {
+    lg::warn("[ctr] {}: {} {}, not used", lev->name, p,
+             !ok ? "is damaged" : "was baked for another version of the level file");
+    return;
+  }
+  lg::info("[ctr] {}: baked visibility: {} samples, {} intervals ({} KB)", lev->name,
+           h.sample_count, h.interval_count,
+           (h.sample_count * sizeof(ctr_vis_bake::Sample) + (h.run_count + 1) * 4 +
+            h.interval_count * sizeof(ctr_vis_bake::Interval)) / 1024);
+  lev->vis_bake = std::move(vb);
+}
+
 // a cond box in world game units
 void cond_box(const CtrLevelData& lev, u32 i, float* lo, float* hi) {
   const auto& b = lev.cond_boxes[i];
@@ -7757,6 +7810,7 @@ bool CtrLevels::load_file(const fs::path& path,
   load_cull_cond(f, hdr, out);
   load_occluders(f, hdr, out);  // (AI-assisted, occluders)
   load_horizon(f, hdr, out);    // (AI-assisted, horizon)
+  load_vis_bake(out);           // (AI-assisted, visbake)
   // merc models: one skinned mesh per model
   if (hdr.num_merc_models) {
     std::vector<c3l::MercModel> models;
@@ -11546,6 +11600,14 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              m_name, 100.0 * m_hz_on / n, m_hz_chunks / n, m_hz_runs / n, m_hz_tris / n, m_hz_frames);
     m_hz_frames = m_hz_on = m_hz_chunks = m_hz_runs = m_hz_tris = 0;
   }
+  if (rs.log_now && m_vb_frames) {
+    // (AI-assisted, visbake)
+    const double n = (double)m_vb_frames;
+    lg::info("[ctr] {}: title_vis: samples in {:.0f}% of title level draws, hid {:.1f} chunks and "
+             "{:.1f} runs ({:.0f} tris) per level draw ({} level draws)",
+             m_name, 100.0 * m_vb_on / n, m_vb_chunks / n, m_vb_runs / n, m_vb_tris / n, m_vb_frames);
+    m_vb_frames = m_vb_on = m_vb_chunks = m_vb_runs = m_vb_tris = 0;
+  }
   if (rs.log_now && m_vista_frames) {
     lg::info("[ctr] {}: vista {:.1f} chunks {:.0f} tris, low resolution chunks in near mode {:.1f} "
              "per level draw ({} level draws)",
@@ -11648,6 +11710,357 @@ void CtrTfragRenderer::flush_calls(int /*pass*/) {
 }
 
 CtrTfragRenderer::~CtrTfragRenderer() = default;
+
+#ifndef __3DS__
+// ---- (AI-assisted, visbake) host: baking the runs each camera sees (env CTR_VIS_BAKE=DIR:title) ----
+// The soft renderer tags every level triangle with its level and run (tagger) and reports the
+// tags whose fragments ended in the frame (ctr_gpu_soft_seen_tags). A frame the bake records
+// (title: the title is on and the camera within 4 m of kTitlePath) gives each run seen a hit of
+// the frame's sample: a new sample once the camera has moved 0.5 m or turned 2 degrees since the
+// last one. Written to DIR/<level>.c3b every 900 recorded frames and when recording stops: each
+// sample's runs grown by the runs whose spheres touch theirs (+1 m: the other LOD versions, tiers,
+// near chunks and vista copies of the same place), each run's samples grown by kGrow on each side,
+// as intervals. Runs without a sphere count as seen everywhere.
+namespace visbake {
+constexpr int kGrow = 2;
+struct LevelRec {
+  std::string name;
+  const CtrLevelData* lev = nullptr;
+  u32 runs = 0, chunks = 0, draws = 0;
+  std::vector<std::vector<u16>> hits;  // per run: the samples it was seen in (ascending)
+  std::unordered_map<u32, std::vector<std::pair<u32, u32>>> chunk_runs;  // (first index, run)
+  u64 frame_seen = ~0ull;  // the frame it was last drawn in (lev is valid in it)
+};
+struct State {
+  int mode = -1;  // -1: not read yet, 0 off, 1 title
+  std::string dir;
+  std::vector<LevelRec> levels;
+  std::unordered_map<int, std::pair<u32, u32>> mesh_of;  // this frame's meshes: (level, chunk)
+  u64 frame = ~0ull;
+  bool pending = false;  // the frame before is to be recorded
+  float pos[3] = {0, 0, 0};
+  float n[4][3] = {};
+  std::vector<ctr_vis_bake::Sample> samples;
+  u64 recorded = 0, written_at = 0;
+} g;
+
+u32 tagger(int mesh, int first_index) {
+  auto it = g.mesh_of.find(mesh);
+  if (it == g.mesh_of.end()) {
+    return 0;
+  }
+  auto& rec = g.levels[it->second.first];
+  const CtrLevelData& lev = *rec.lev;
+  const u32 ci = it->second.second;
+  auto& tab = rec.chunk_runs[ci];
+  if (tab.empty()) {
+    const auto& ch = lev.chunks[ci];
+    for (u32 k = 0; k < ch.draw_count; k++) {
+      const u32 d = ch.first_draw + k;
+      u32 pos = lev.draws[d].first_index;
+      for (u32 r = lev.draw_first_run[d]; r < lev.draw_first_run[d] + lev.draw_run_count[d]; r++) {
+        tab.push_back({pos, r});
+        pos += lev.vis_runs[r].index_count;
+      }
+    }
+    std::sort(tab.begin(), tab.end());
+    if (tab.empty()) {
+      tab.push_back({0, UINT32_MAX});
+    }
+  }
+  auto at = std::upper_bound(tab.begin(), tab.end(), std::make_pair((u32)first_index, UINT32_MAX));
+  if (at == tab.begin() || std::prev(at)->second == UINT32_MAX) {
+    return 0;
+  }
+  return ((it->second.first + 1) << 24) | (std::prev(at)->second + 1);
+}
+
+void write(LevelRec& rec) {
+  const CtrLevelData& lev = *rec.lev;
+  const u32 ns = (u32)g.samples.size();
+  if (!ns || rec.hits.size() != lev.vis_runs.size()) {
+    return;
+  }
+  // the runs' world spheres and a grid of them (16 m cells)
+  const u32 nr = (u32)lev.vis_runs.size();
+  std::vector<std::array<float, 4>> sph(nr, {0, 0, 0, -1});
+  for (size_t ci = 0; ci < lev.chunks.size(); ci++) {
+    const auto& ch = lev.chunks[ci];
+    const u32 r0 = lev.chunk_first_run[ci];
+    const u32 n = lev.chunk_run_count[ci] ? lev.chunk_run_count[ci] : ch.vis_run_count;
+    for (u32 r = r0; r < r0 + n && r < nr && r < lev.run_spheres.size(); r++) {
+      const auto& sp = lev.run_spheres[r];
+      if (sp.r != 0xffff) {
+        sph[r] = {ch.origin[0] + sp.c[0] * ch.scale, ch.origin[1] + sp.c[1] * ch.scale,
+                  ch.origin[2] + sp.c[2] * ch.scale, (float)sp.r * ch.scale};
+      }
+    }
+  }
+  constexpr float kCell = 16.f * 4096.f, kMargin = 1.f * 4096.f;
+  auto key = [](int x, int y, int z) {
+    return ((u64)(u32)(x & 0x1fffff) << 42) | ((u64)(u32)(y & 0x1fffff) << 21) | (u32)(z & 0x1fffff);
+  };
+  std::unordered_map<u64, std::vector<u32>> grid;
+  for (u32 r = 0; r < nr; r++) {
+    if (sph[r][3] < 0) {
+      continue;
+    }
+    int lo[3], hi[3];
+    for (int c = 0; c < 3; c++) {
+      lo[c] = (int)std::floor((sph[r][c] - sph[r][3] - kMargin) / kCell);
+      hi[c] = (int)std::floor((sph[r][c] + sph[r][3] + kMargin) / kCell);
+    }
+    for (int x = lo[0]; x <= hi[0]; x++) {
+      for (int y = lo[1]; y <= hi[1]; y++) {
+        for (int z = lo[2]; z <= hi[2]; z++) {
+          grid[key(x, y, z)].push_back(r);
+        }
+      }
+    }
+  }
+  // per sample the runs seen, grown by their neighbours
+  std::vector<std::vector<u32>> by_sample(ns);
+  for (u32 r = 0; r < nr; r++) {
+    for (u16 s : rec.hits[r]) {
+      by_sample[s].push_back(r);
+    }
+  }
+  std::vector<std::vector<u16>> grown(nr);
+  std::vector<u32> mark(nr, UINT32_MAX);
+  for (u32 s = 0; s < ns; s++) {
+    for (u32 r : by_sample[s]) {
+      auto add = [&](u32 q) {
+        if (mark[q] != s) {
+          mark[q] = s;
+          grown[q].push_back((u16)s);
+        }
+      };
+      add(r);
+      if (sph[r][3] < 0) {
+        continue;
+      }
+      const auto& a = sph[r];
+      const int cx = (int)std::floor(a[0] / kCell), cy = (int)std::floor(a[1] / kCell),
+                cz = (int)std::floor(a[2] / kCell);
+      auto it = grid.find(key(cx, cy, cz));
+      // (each run is in every cell its sphere + margin touches: the center's cell has all the
+      // neighbours whose sphere reaches it)
+      if (it == grid.end()) {
+        continue;
+      }
+      for (u32 q : it->second) {
+        const auto& b = sph[q];
+        const float dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+        const float rr = a[3] + b[3] + kMargin;
+        if (dx * dx + dy * dy + dz * dz <= rr * rr) {
+          add(q);
+        }
+      }
+    }
+  }
+  std::vector<u32> run_first(nr + 1, 0);
+  std::vector<ctr_vis_bake::Interval> iv, tmp;
+  for (u32 r = 0; r < nr; r++) {
+    run_first[r] = (u32)iv.size();
+    if (sph[r][3] < 0) {
+      iv.push_back({0, (u16)(ns - 1)});
+      continue;
+    }
+    std::sort(grown[r].begin(), grown[r].end());
+    ctr_vis_bake::to_intervals(grown[r], kGrow, ns - 1, &tmp);
+    iv.insert(iv.end(), tmp.begin(), tmp.end());
+  }
+  run_first[nr] = (u32)iv.size();
+  ctr_vis_bake::Header h{};
+  memcpy(h.magic, ctr_vis_bake::kMagic, 4);
+  h.version = ctr_vis_bake::kVersion;
+  h.kind = ctr_vis_bake::kKindPath;
+  h.run_count = nr;
+  h.chunk_count = (u32)lev.chunks.size();
+  h.draw_count = (u32)lev.draws.size();
+  h.sample_count = ns;
+  h.interval_count = (u32)iv.size();
+  const std::string path = g.dir + "/" + rec.name + ".c3b";
+  FILE* fp = fopen(path.c_str(), "wb");
+  if (!fp) {
+    lg::error("[visbake] can't write {}", path);
+    return;
+  }
+  fwrite(&h, sizeof(h), 1, fp);
+  fwrite(g.samples.data(), sizeof(ctr_vis_bake::Sample), ns, fp);
+  fwrite(run_first.data(), 4, run_first.size(), fp);
+  fwrite(iv.data(), sizeof(ctr_vis_bake::Interval), iv.size(), fp);
+  fclose(fp);
+  u64 seen = 0;
+  for (u32 r = 0; r < nr; r++) {
+    seen += !grown[r].empty();
+  }
+  lg::info("[visbake] {}: {} samples, {} of {} runs seen, {} intervals ({} KB)", path, ns, seen, nr,
+           iv.size(),
+           (sizeof(h) + ns * sizeof(ctr_vis_bake::Sample) + (nr + 1) * 4 + iv.size() * 4) / 1024);
+}
+
+void write_all() {
+  // (the levels drawn in the frame that just ended: still loaded)
+  for (auto& rec : g.levels) {
+    if (rec.lev && rec.frame_seen == g.frame) {
+      write(rec);
+    }
+  }
+  g.written_at = g.recorded;
+}
+
+//! a level draw (render thread, host): the frame before's seen runs, this level's meshes, whether
+//! this frame is recorded
+void level_draw(const CtrLevelData& lev, const CtrBackgroundCamera& cam, u64 frame, bool title_on) {
+  if (g.mode < 0) {
+    g.mode = 0;
+    if (const char* e = getenv("CTR_VIS_BAKE")) {
+      std::string v = e;
+      const size_t c = v.rfind(':');
+      const std::string what = c == std::string::npos ? "" : v.substr(c + 1);
+      g.dir = c == std::string::npos ? v : v.substr(0, c);
+      g.mode = what == "title" ? 1 : 0;
+      if (!g.mode) {
+        lg::error("[visbake] CTR_VIS_BAKE={}: expected DIR:title", v);
+      } else {
+        ctr_gpu_soft_set_tagger(tagger);
+        lg::info("[visbake] baking {} into {}", what, g.dir);
+      }
+    }
+  }
+  if (!g.mode) {
+    return;
+  }
+  if (frame != g.frame) {
+    // the frame before ended: its tags
+    if (g.pending) {
+      static std::vector<u32> tags;
+      tags.resize(1 << 20);
+      const int n = std::min(ctr_gpu_soft_seen_tags(tags.data(), (int)tags.size()), (int)tags.size());
+      bool fresh = g.samples.empty();
+      if (!fresh) {
+        const auto& last = g.samples.back();
+        float d2 = 0;
+        for (int c = 0; c < 3; c++) {
+          d2 += (last.pos[c] - g.pos[c]) * (last.pos[c] - g.pos[c]);
+        }
+        fresh = d2 > 0.5f * 4096.f * 0.5f * 4096.f ||
+                ctr_vis_bake::view_match(last.n, g.n) < std::cos(2.f * 3.14159265f / 180.f);
+      }
+      if (fresh && g.samples.size() < 65535) {
+        ctr_vis_bake::Sample sm{};
+        memcpy(sm.pos, g.pos, sizeof(sm.pos));
+        memcpy(sm.n, g.n, sizeof(sm.n));
+        g.samples.push_back(sm);
+      }
+      const u16 si = (u16)(g.samples.size() - 1);
+      for (int i = 0; i < n; i++) {
+        const u32 li = (tags[i] >> 24) - 1, r = (tags[i] & 0xffffff) - 1;
+        if (li < g.levels.size() && r < g.levels[li].hits.size()) {
+          auto& h = g.levels[li].hits[r];
+          if (h.empty() || h.back() != si) {
+            h.push_back(si);
+          }
+        }
+      }
+      g.recorded++;
+      if (g.recorded - g.written_at >= 900) {
+        write_all();
+      }
+    } else if (g.recorded > g.written_at) {
+      write_all();  // recording stopped
+    }
+    g.frame = frame;
+    g.pending = false;
+    g.mesh_of.clear();
+  }
+  // this level: its record and meshes
+  u32 li = 0;
+  while (li < g.levels.size() && g.levels[li].name != lev.name) {
+    li++;
+  }
+  if (li == g.levels.size()) {
+    g.levels.emplace_back().name = lev.name;
+  }
+  auto& rec = g.levels[li];
+  if (rec.lev != &lev || rec.runs != lev.vis_runs.size() || rec.chunks != lev.chunks.size() ||
+      rec.draws != lev.draws.size()) {
+    if (rec.runs != lev.vis_runs.size() || rec.chunks != lev.chunks.size() ||
+        rec.draws != lev.draws.size()) {
+      rec.hits.assign(lev.vis_runs.size(), {});
+    }
+    rec.lev = &lev;
+    rec.runs = (u32)lev.vis_runs.size();
+    rec.chunks = (u32)lev.chunks.size();
+    rec.draws = (u32)lev.draws.size();
+    rec.chunk_runs.clear();
+  }
+  rec.frame_seen = frame;
+  for (size_t ci = 0; ci < lev.meshes.size(); ci++) {
+    if (lev.meshes[ci] >= 0) {
+      g.mesh_of[lev.meshes[ci]] = {li, (u32)ci};
+    }
+  }
+  if (g.mode == 1 && title_on) {
+    const float p[3] = {cam.trans[0], cam.trans[1], cam.trans[2]};
+    if (title_path_d2(p) <= 16.f * 4096.f * 4096.f) {
+      g.pending = true;
+      memcpy(g.pos, p, sizeof(p));
+      float pl[4][4];
+      for (int c = 0; c < 4; c++) {
+        for (int i = 0; i < 4; i++) {
+          pl[c][i] = cam.planes[c][i];
+        }
+      }
+      ctr_vis_bake::view_normals(pl, g.n);
+    }
+  }
+}
+bool on() {
+  return g.mode > 0;
+}
+}  // namespace visbake
+#endif
+
+// (AI-assisted, visbake) title_vis: the two samples of the level's bake nearest the camera (within
+// 2 m, every view plane within 8 degrees of the camera's), m_vb_n of them (0: no culling)
+int pick_vis_samples(const CtrLevelData::VisBake& vb, const CtrBackgroundCamera& cam, u32* out) {
+  float pl[4][4];
+  for (int c = 0; c < 4; c++) {
+    for (int i = 0; i < 4; i++) {
+      pl[c][i] = cam.planes[c][i];
+    }
+  }
+  float n[4][3];
+  ctr_vis_bake::view_normals(pl, n);
+  const float max_d2 = 2.f * 4096.f * 2.f * 4096.f;
+  const float min_cos = 0.990268f;  // cos 8 degrees
+  float best[2] = {max_d2, max_d2};
+  int k = 0;
+  for (u32 i = 0; i < vb.samples.size(); i++) {
+    const auto& sm = vb.samples[i];
+    float d2 = 0;
+    for (int c = 0; c < 3; c++) {
+      const float d = sm.pos[c] - cam.trans[c];
+      d2 += d * d;
+    }
+    if (!(d2 <= best[1]) || ctr_vis_bake::view_match(sm.n, n) < min_cos) {
+      continue;
+    }
+    if (d2 <= best[0]) {
+      best[1] = best[0];
+      out[1] = out[0];
+      best[0] = d2;
+      out[0] = i;
+    } else {
+      best[1] = d2;
+      out[1] = i;
+    }
+    k = std::min(k + 1, 2);
+  }
+  return k;
+}
 
 // (AI-assisted, horizon) the frame's horizon: from the terrain grid of the first loaded level that
 // was drawn in near mode the frame before and has the camera over a covered cell, once per frame
@@ -13199,6 +13612,20 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_hz_frames++;
     m_hz_on += m_hz_ok;
   }
+  // (AI-assisted, visbake) title_vis: this level draw's samples of the level's bake (m_vb_s)
+  m_vb_n = 0;
+#ifndef __3DS__
+  visbake::level_draw(lev, cam, rs.frame_idx, title_on);
+  const bool baking = visbake::on();
+#else
+  const bool baking = false;
+#endif
+  if (settings.title_vis && title_on && lev.vis_bake && !baking &&
+      lev.vis_bake->hdr.kind == ctr_vis_bake::kKindPath) {
+    m_vb_n = pick_vis_samples(*lev.vis_bake, cam, m_vb_s);
+    m_vb_frames++;
+    m_vb_on += m_vb_n > 0;
+  }
   // the run loop's inputs that are the same for every chunk (filled before the chunk loop)
   RunLoopIn run_in;
   float run_po[4], run_pk[4][3];
@@ -13370,11 +13797,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       // (AI-assisted, occluders) the runs inside an occluder's shadow (the occluders the chunk
       // reaches into); hidden runs may still be drawn along with their neighbours (the small-gap
       // merge), as the view test's
-      if ((occ_mask || hz_runs) && lev.run_spheres.size() >= lev.vis_runs.size()) {
-        const u32 r0 = lev.chunk_first_run[ci];
-        const u32 nr = vis_test || vista_tier
+      const bool run_sph = lev.run_spheres.size() >= lev.vis_runs.size();
+      const u32 x_nr = vis_test || vista_tier
                            ? ch.vis_run_count
                            : (lev.chunk_run_count[ci] ? lev.chunk_run_count[ci] : ch.vis_run_count);
+      if ((((occ_mask || hz_runs) && run_sph) || m_vb_n) && x_nr) {
+        const u32 r0 = lev.chunk_first_run[ci];
+        const u32 nr = x_nr;
         if (!runs_valid) {
           for (u32 r = r0; r < r0 + nr; r++) {
             m_run_shown[r] = 1;
@@ -13384,7 +13813,18 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         }
         u32 shown = 0;
         for (u32 r = r0; r < r0 + nr; r++) {
-          const auto& sp = lev.run_spheres[r];
+          if (m_vb_n && m_run_shown[r]) {
+            // (AI-assisted, visbake) never seen from the nearest samples of the title's path
+            const auto& vb = *lev.vis_bake;
+            if (!ctr_vis_bake::seen(vb.run_first.data(), vb.iv.data(), r, m_vb_s[0]) &&
+                (m_vb_n < 2 ||
+                 !ctr_vis_bake::seen(vb.run_first.data(), vb.iv.data(), r, m_vb_s[1]))) {
+              m_run_shown[r] = 0;
+              m_vb_runs++;
+              m_vb_tris += lev.vis_runs[r].index_count / 3;
+            }
+          }
+          const auto& sp = run_sph ? lev.run_spheres[r] : CtrLevelData::RunSphere{{0, 0, 0}, 0xffff};
           if (m_run_shown[r] && sp.r != 0xffff) {
             const float c[3] = {ch.origin[0] + sp.c[0] * ch.scale, ch.origin[1] + sp.c[1] * ch.scale,
                                 ch.origin[2] + sp.c[2] * ch.scale};
@@ -13406,7 +13846,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           shown += m_run_shown[r];
         }
         if (!shown) {
-          (occ_mask ? m_occ_chunks : m_hz_chunks)++;
+          (occ_mask ? m_occ_chunks : (hz_runs ? m_hz_chunks : m_vb_chunks))++;
           return;
         }
         partly = partly || shown < nr;

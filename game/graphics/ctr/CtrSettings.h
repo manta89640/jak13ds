@@ -250,6 +250,10 @@ struct CtrSettings {
   // (docs/3ds-port/culling.md). Off: not yet seen on a console
   bool horizon = false;
   float horizon_radius = 64.f;
+  // (AI-assisted, visbake) the title screen's flight: the level runs a bake (<level>.c3b next to the
+  // .c3l, made on the host with CTR_VIS_BAKE=dir:title) never saw from the nearest cameras of its
+  // path are not drawn (docs/3ds-port/culling.md). Off: not yet seen on a console
+  bool title_vis = false;
   // (AI-assisted) c3l v17 tie levels of detail: the instance groups that have a near version
   // (geometry 0) are drawn with it within their PS2 distance, else with the far one (geometry 3).
   // off: the far versions only (as before v17)

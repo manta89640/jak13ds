@@ -318,6 +318,15 @@ void early_probe_draw() {
   s_early.any_dirty = false;
 }
 
+// ---- (AI-assisted, visbake) tags of level triangles for visibility bakes (ctr_gpu_soft_set_tagger)
+namespace vistag {
+ctr_soft_tagger tagger = nullptr;
+uint32_t cur = 0;                // the tag of the triangle being drawn (0: none)
+std::vector<uint32_t> owner;     // per pixel: the tag of its last opaque level fragment
+std::vector<uint32_t> blended;   // tags of blended fragments that passed the depth test
+std::vector<uint32_t> seen;      // the last frame's (sorted, unique)
+}  // namespace vistag
+
 // ---- (AI-assisted) snow-gpu-audit: per-bucket draw/fill statistics (env CTR_SOFT_STATS=N) ----
 namespace softstats {
 // what became of a triangle (TF_VIS: in the final picture, or blended with a fragment written)
@@ -1107,6 +1116,14 @@ void shade_pixel(const ctr_draw_state& st,
     softstats::owner[px + py * kW] = softstats::tri_id;
     softstats::tb_owner[px + py * kW] = softstats::tb_cur;
   }
+  if (vistag::cur && !s_target.rt) {
+    // (AI-assisted, visbake)
+    if (st.blend == CTR_BLEND_OFF) {
+      vistag::owner[px + py * kW] = vistag::cur;
+    } else if (vistag::blended.empty() || vistag::blended.back() != vistag::cur) {
+      vistag::blended.push_back(vistag::cur);
+    }
+  }
   uint8_t* d = &s_target.color[4 * idx];
   float as = std::min(a / 128.f, 2.f);
   float src[3] = {std::min(r, 255.f), std::min(g, 255.f), std::min(b, 255.f)};
@@ -1487,6 +1504,20 @@ void ctr_gpu_frame_end(void) {
   }
   ctr_gpu_rt_end();  // (AI-assisted) impostors: a render to texture left open
   ctr_gpu_run_sky_hook();
+  if (vistag::tagger) {
+    // (AI-assisted, visbake) the frame's seen tags
+    auto& v = vistag::seen;
+    v = std::move(vistag::blended);
+    vistag::blended.clear();
+    for (uint32_t& t : vistag::owner) {
+      if (t) {
+        v.push_back(t);
+        t = 0;
+      }
+    }
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+  }
   cull_probe_frame();
   if (early_probe_mode() && ++s_early.frames >= 60) {
     const double n = s_early.frames;
@@ -2958,6 +2989,7 @@ static void near_clip_probe(const float clip[16],
 // (AI-assisted) the triangles of ctr_gpu_draw_mesh / ctr_gpu_draw_mesh_stream
 static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], const SoftVerts& verts,
                            const uint16_t* indices, int first_index, int index_count) {
+  const int tag_mesh = g_soft_cur_mesh;  // (AI-assisted, visbake)
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
   if (softstats::enabled()) softstats::cur->sub += index_count / 3;  // (AI-assisted)
@@ -3076,7 +3108,9 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
       softstats::tri_frags = softstats::tri_zpass = 0;
     }
     softstats::tb_w = cw;
+    vistag::cur = vistag::tagger && tag_mesh >= 0 ? vistag::tagger(tag_mesh, i) : 0;  // (visbake)
     raster_triangle(*state, tri, true, fog, nullptr, tex_q, true);
+    vistag::cur = 0;
     if (softstats::tri_id) {
       if (!softstats::tri_frags) {
         softstats::tri_class[softstats::TC_NOPIX]++;
@@ -4014,3 +4048,18 @@ void set_soft_frame_dump(const std::string& dir, int every_nth) {
 }  // namespace ctr_gfx
 
 #endif  // __3DS__
+
+// (AI-assisted, visbake)
+void ctr_gpu_soft_set_tagger(ctr_soft_tagger tagger) {
+  vistag::tagger = tagger;
+  vistag::owner.assign(tagger ? 400 * 240 : 0, 0);
+  vistag::blended.clear();
+  vistag::seen.clear();
+}
+int ctr_gpu_soft_seen_tags(uint32_t* out, int max) {
+  const int n = (int)vistag::seen.size();
+  for (int i = 0; i < n && i < max; i++) {
+    out[i] = vistag::seen[i];
+  }
+  return n;
+}

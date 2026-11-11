@@ -9,6 +9,7 @@
 #include "check.h"
 
 #include "game/graphics/ctr/CtrCull.h"
+#include "game/graphics/ctr/CtrVisBake.h"
 #include "tools/ctr_level_converter/horizon.h"
 #include "tools/ctr_level_converter/occluders.h"
 
@@ -17,6 +18,7 @@
 namespace {
 
 constexpr float kM = 4096.f;
+constexpr float kPi10 = 3.14159265f / 180.f;  // a degree
 
 using Tri = occluders::Tri;
 
@@ -380,6 +382,53 @@ void test_horizon() {
              hidden, tested, hidden2);
 }
 
+// (AI-assisted, visbake) a run's samples as intervals, grown; the lookup against brute force
+void test_vis_bake_intervals() {
+  std::mt19937 rng(9);
+  for (int iter = 0; iter < 200; iter++) {
+    const uint32_t ns = 50 + rng() % 400;
+    std::vector<uint16_t> hits;
+    for (uint32_t sidx = 0; sidx < ns; sidx++) {
+      if (rng() % 7 == 0) {
+        hits.push_back((uint16_t)sidx);
+      }
+    }
+    const int grow = (int)(rng() % 4);
+    std::vector<ctr_vis_bake::Interval> iv;
+    ctr_vis_bake::to_intervals(hits, grow, ns - 1, &iv);
+    for (size_t i = 1; i < iv.size(); i++) {
+      check(iv[i].lo > iv[i - 1].hi + 1, "intervals are apart and in order");
+    }
+    const uint32_t first[2] = {0, (uint32_t)iv.size()};
+    for (uint32_t sidx = 0; sidx < ns; sidx++) {
+      bool want = false;
+      for (uint16_t h : hits) {
+        want = want || (int)sidx >= (int)h - grow && (int)sidx <= (int)h + grow;
+      }
+      check(ctr_vis_bake::seen(first, iv.data(), 0, sidx) == want,
+            "a sample is in the intervals exactly when it is within grow of a hit");
+    }
+  }
+  // the view match: the same view 1, turned 10 degrees about cos 10
+  float planes[4][4] = {{0.7f, -0.7f, 0.f, 0.f}, {0.f, 0.f, 0.7f, -0.7f}, {0.7f, 0.7f, 0.7f, 0.7f},
+                        {0.f, 0.f, 0.f, 0.f}};
+  float a[4][3], b[4][3];
+  ctr_vis_bake::view_normals(planes, a);
+  check(ctr_vis_bake::view_match(a, a) > 0.9999f, "a view matches itself");
+  const float t = 10.f * kPi10;
+  float turned[4][4];
+  for (int i = 0; i < 4; i++) {
+    turned[0][i] = std::cos(t) * planes[0][i] - std::sin(t) * planes[2][i];
+    turned[1][i] = planes[1][i];
+    turned[2][i] = std::sin(t) * planes[0][i] + std::cos(t) * planes[2][i];
+    turned[3][i] = 0.f;
+  }
+  ctr_vis_bake::view_normals(turned, b);
+  check(std::fabs(ctr_vis_bake::view_match(a, b) - std::cos(t)) < 0.01f,
+        "a view turned by an angle matches by about its cosine");
+  fmt::print("  baked visibility: intervals and view matching\n");
+}
+
 }  // namespace
 
 void run_cull_tests() {
@@ -390,4 +439,5 @@ void run_cull_tests() {
   test_inscribed_l_shape();
   test_no_box_in_thin_plate();
   test_horizon();
+  test_vis_bake_intervals();
 }

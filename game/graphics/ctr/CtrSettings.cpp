@@ -247,6 +247,8 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.horizon = parse_bool(v);  // (AI-assisted, horizon)
     } else if (key == "horizon_radius") {
       s.horizon_radius = std::clamp(f, 16.f, 400.f);
+    } else if (key == "title_vis") {
+      s.title_vis = parse_bool(v);  // (AI-assisted, visbake)
     } else if (key == "tie_lod") {
       s.tie_lod = parse_bool(v);  // (AI-assisted) c3l v17
     } else if (key == "color_stream") {

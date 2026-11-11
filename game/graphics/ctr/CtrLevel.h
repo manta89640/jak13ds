@@ -33,6 +33,7 @@
 
 #include "game/graphics/ctr/CtrCull.h"
 #include "game/graphics/ctr/CtrRenderer.h"
+#include "game/graphics/ctr/CtrVisBake.h"
 #include "game/graphics/ctr/CtrKeiraRig.h"
 #include "game/graphics/ctr/CtrTodPulse.h"
 #include "game/graphics/ctr/c3l_format.h"
@@ -720,6 +721,15 @@ struct CtrLevelData {
   std::vector<u16> hz_minh;
   std::vector<u8> hz_span;
   u32 hz_drawn_frame = 0;
+  // (AI-assisted, visbake) baked visibility (CtrVisBake.h: the .c3b next to the .c3l, read while
+  // config.ini title_vis is on): its header and samples, per run its intervals of samples
+  struct VisBake {
+    ctr_vis_bake::Header hdr{};
+    std::vector<ctr_vis_bake::Sample> samples;
+    std::vector<u32> run_first;
+    std::vector<ctr_vis_bake::Interval> iv;
+  };
+  std::unique_ptr<VisBake> vis_bake;
   bool tf_morph(size_t ci) const {
     return ci < chunk_tf.size() && chunk_tf[ci] >= 0 && tf_chunks[chunk_tf[ci]].records_offset;
   }
@@ -1608,6 +1618,11 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   ctr_cull::Horizon m_hz;
   bool m_hz_ok = false;
   u64 m_hz_frames = 0, m_hz_on = 0, m_hz_chunks = 0, m_hz_runs = 0, m_hz_tris = 0;
+  // (AI-assisted, visbake) title_vis: the baked samples this level draw uses (m_vb_n of them) and
+  // statistics: level draws with the title on, of them with samples, chunks and runs hidden
+  u32 m_vb_s[2] = {0, 0};
+  int m_vb_n = 0;
+  u64 m_vb_frames = 0, m_vb_on = 0, m_vb_chunks = 0, m_vb_runs = 0, m_vb_tris = 0;
   void choose_occluders(CtrLevelData& lev, const CtrBackgroundCamera& cam, u64 frame,
                         float draw_dist);
   // kDrawCullCond draws of visible chunks, and of them culled (camera inside)
