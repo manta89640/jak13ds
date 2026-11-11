@@ -726,7 +726,7 @@ struct CtrLevelData {
   struct VisBake {
     ctr_vis_bake::Header hdr{};
     std::vector<ctr_vis_bake::Sample> samples;
-    std::vector<u32> run_first;
+    std::vector<uint32_t> run_first;
     std::vector<ctr_vis_bake::Interval> iv;
   };
   std::unique_ptr<VisBake> vis_bake;

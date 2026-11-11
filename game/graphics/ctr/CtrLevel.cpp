@@ -5822,7 +5822,7 @@ void load_occluders(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
       !eo.offset) {
     return;
   }
-  const u32 n = std::min(eo.count, kMaxLevelOccluders);
+  const u32 n = std::min<u32>(eo.count, kMaxLevelOccluders);
   if (!f.read_array(eo.offset, n, &lev->occluders)) {
     lev->occluders.clear();
     lg::warn("[ctr] {}: bad occluder table, no occluders", lev->name);
@@ -12474,7 +12474,7 @@ bool cell_vis_select(CtrLevelData& lev, const CtrBackgroundCamera& cam) {
   if (!ctr_vis_bake::view_dir(n, d) || !(h.grid[3] > 0)) {
     return false;
   }
-  u32 ym = 0, pm = 0;
+  uint32_t ym = 0, pm = 0;
   ctr_vis_bake::view_bins(ctr_vis_bake::yaw_of(d), ctr_vis_bake::pitch_of(d),
                           ctr_vis_bake::view_half_angle(n, d), &ym, &pm);
   int ijk[3], side[3];
@@ -12495,7 +12495,7 @@ bool cell_vis_select(CtrLevelData& lev, const CtrBackgroundCamera& cam) {
   }
   lev.cell_key = key;
   lev.cell_ok = false;
-  std::vector<u32> use;
+  std::vector<uint32_t> use;
   u64 have = 0;  // (yaw bin * 3 + pitch bin) bits the own cell has enough of (36 bits)
   for (int k = 0; k < 8; k++) {
     int q[3];
