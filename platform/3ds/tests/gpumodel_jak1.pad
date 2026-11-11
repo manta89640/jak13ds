@@ -1,0 +1,55 @@
+# gpu_model route, Jak 1: Sandover hut, beach, jungle at noon; at each checkpoint
+# a hold, then four camera turns with a hold after each (docs/3ds-port/gpu_model.md).
+0 wait *target* target-title-wait
+10 continue village1-hut
+11 wait *target* target-continue
+12 wait *target* target-stance
+13 tod 12
+14 log gpumodel view village1-hut d0
+164 rx=40
+209 -
+210 log gpumodel view village1-hut d1
+329 rx=40
+374 -
+375 log gpumodel view village1-hut d2
+494 rx=40
+539 -
+540 log gpumodel view village1-hut d3
+659 rx=40
+704 -
+705 log gpumodel view village1-hut d4
+854 continue beach-start
+855 wait *target* target-continue
+856 wait *target* target-stance
+857 tod 12
+858 log gpumodel view beach-start d0
+1008 rx=40
+1053 -
+1054 log gpumodel view beach-start d1
+1173 rx=40
+1218 -
+1219 log gpumodel view beach-start d2
+1338 rx=40
+1383 -
+1384 log gpumodel view beach-start d3
+1503 rx=40
+1548 -
+1549 log gpumodel view beach-start d4
+1698 continue jungle-start
+1699 wait *target* target-continue
+1700 wait *target* target-stance
+1701 tod 12
+1702 log gpumodel view jungle-start d0
+1852 rx=40
+1897 -
+1898 log gpumodel view jungle-start d1
+2017 rx=40
+2062 -
+2063 log gpumodel view jungle-start d2
+2182 rx=40
+2227 -
+2228 log gpumodel view jungle-start d3
+2347 rx=40
+2392 -
+2393 log gpumodel view jungle-start d4
+2542 log gpumodel route end

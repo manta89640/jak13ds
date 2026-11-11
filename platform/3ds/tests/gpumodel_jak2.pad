@@ -1,0 +1,51 @@
+# gpu_model route, Jak II: slums a, slums b, the port; at each checkpoint a hold,
+# then four camera turns with a hold after each (docs/3ds-port/gpu_model.md).
+1000 continue ctysluma-start
+1001 -
+1002 wait *target* target-stance
+1004 log gpumodel view ctysluma-start d0
+1154 rx=40
+1199 -
+1200 log gpumodel view ctysluma-start d1
+1319 rx=40
+1364 -
+1365 log gpumodel view ctysluma-start d2
+1484 rx=40
+1529 -
+1530 log gpumodel view ctysluma-start d3
+1649 rx=40
+1694 -
+1695 log gpumodel view ctysluma-start d4
+1844 continue ctyslumb-start
+1845 -
+1846 wait *target* target-stance
+1848 log gpumodel view ctyslumb-start d0
+1998 rx=40
+2043 -
+2044 log gpumodel view ctyslumb-start d1
+2163 rx=40
+2208 -
+2209 log gpumodel view ctyslumb-start d2
+2328 rx=40
+2373 -
+2374 log gpumodel view ctyslumb-start d3
+2493 rx=40
+2538 -
+2539 log gpumodel view ctyslumb-start d4
+2688 continue ctyport-start
+2689 -
+2690 wait *target* target-stance
+2692 log gpumodel view ctyport-start d0
+2842 rx=40
+2887 -
+2888 log gpumodel view ctyport-start d1
+3007 rx=40
+3052 -
+3053 log gpumodel view ctyport-start d2
+3172 rx=40
+3217 -
+3218 log gpumodel view ctyport-start d3
+3337 rx=40
+3382 -
+3383 log gpumodel view ctyport-start d4
+3532 log gpumodel route end
