@@ -10,6 +10,7 @@
 
 #include "game/kernel/jak1/kscheme.h"
 #include "game/mips2c/jak1_functions/native_functions.h"
+#include "game/graphics/ctr/CtrHot.h"  // (AI-assisted, hottext)
 
 #if defined(__GNUC__) || defined(__clang__)
 #define NATIVE_ALIGNED4(p) __builtin_assume_aligned((p), 4)
@@ -65,7 +66,7 @@ struct ParticleMem {
  * callback, relaunching, velocity (with acceleration and friction), position, rotation and color,
  * the orbiter, and frees the ones that are done.
  */
-u64 sp_process_block_2d_impl(const NativeArgs& args) {
+CTR_HOT u64 sp_process_block_2d_impl(const NativeArgs& args) {
   static const u32 frame_time_sym = sym_addr("*sp-frame-time*");
   static const u32 free_particle_sym = sym_addr("sp-free-particle");
   static const u32 orbiter_sym = sym_addr("sp-orbiter");
@@ -235,7 +236,7 @@ u64 sp_process_block_2d_impl(const NativeArgs& args) {
  * times the particle's rotvel3d, twice at 30 frames per second and below, stored with w >= 0.
  * No orbiter. Frees the ones that are done.
  */
-u64 sp_process_block_3d_impl(const NativeArgs& args) {
+CTR_HOT u64 sp_process_block_3d_impl(const NativeArgs& args) {
   static const u32 frame_time_sym = sym_addr("*sp-frame-time*");
   static const u32 quaternion_mul_sym = sym_addr("quaternion*!");
   static const u32 free_particle_sym = sym_addr("sp-free-particle");

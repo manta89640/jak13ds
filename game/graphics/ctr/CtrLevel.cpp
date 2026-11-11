@@ -10,6 +10,7 @@
 #include "game/graphics/ctr/CtrAutoDetail.h"
 #include "game/graphics/ctr/CtrHaze.h"
 #include "game/graphics/ctr/CtrKeiraRig.h"
+#include "game/graphics/ctr/CtrHot.h"  // (AI-assisted, hottext)
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/CtrSimd.h"
 #include "game/graphics/ctr/CtrStream.h"
@@ -10651,7 +10652,7 @@ float ctr_ps2_lod_scale() {
 }
 
 // (AI-assisted, title-popin) a sphere against the view's four planes (the chunk test of emit_chunk)
-bool sphere_in_view(const CtrBackgroundCamera& cam, const float* s) {
+CTR_HOT bool sphere_in_view(const CtrBackgroundCamera& cam, const float* s) {
   // (AI-assisted, signbits) all four planes, one branch on their sign bits (CtrSimd.h)
   uint32_t all = ~0u;
   for (int i = 0; i < 4; i++) {

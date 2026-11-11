@@ -1,6 +1,7 @@
 #include "Compiler.h"
 
 #include <chrono>
+#include <sstream>
 #include <thread>
 
 #include "CompilerException.h"
@@ -370,12 +371,38 @@ void Compiler::color_object_file(FileEnv* env) {
   m_debug_stats.num_spills += num_spills_in_file;
 }
 
+/*!
+ * (AI-assisted, hottext) The C backend's hot list: one GOAL function name per line (the name in the
+ * generated C's comment above the function), '#' comments. Missing file: none.
+ */
+const std::unordered_set<std::string>& Compiler::c_hot_functions() {
+  if (!m_c_hot_functions) {
+    m_c_hot_functions.emplace();
+    const auto path = file_util::get_jak_project_dir() / "goal_src" /
+                      game_version_names[m_version] / "c-hot-functions.txt";
+    if (fs::exists(path)) {
+      std::istringstream in(file_util::read_text_file(path));
+      std::string line;
+      while (std::getline(in, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+          line.pop_back();
+        }
+        if (!line.empty() && line[0] != '#') {
+          m_c_hot_functions->insert(line);
+        }
+      }
+    }
+  }
+  return *m_c_hot_functions;
+}
+
 std::vector<u8> Compiler::codegen_object_file(FileEnv* env) {
   try {
     auto debug_info = &m_debugger.get_debug_info_for_object(env->name());
     debug_info->clear();
     CodeGenerator gen(env, debug_info, m_version, m_instr_set, m_c_backend);
     gen.set_c_no_guard_symbols(&m_c_runtime_functions);
+    gen.set_c_hot_functions(&c_hot_functions());
     bool ok = true;
     auto result = gen.run(&m_ts);
     if (m_c_backend) {
@@ -406,6 +433,7 @@ bool Compiler::codegen_and_disassemble_object_file(FileEnv* env,
   debug_info->clear();
   CodeGenerator gen(env, debug_info, m_version, m_instr_set, m_c_backend);
   gen.set_c_no_guard_symbols(&m_c_runtime_functions);
+  gen.set_c_hot_functions(&c_hot_functions());
   *data_out = gen.run(&m_ts);
   if (m_c_backend) {
     build_c_module(env->name(), gen.c_source(), gen.c_hash());

@@ -27,6 +27,7 @@
 #include "game/mips2c/mips2c_native.h"
 #include "game/mips2c/mips2c_private.h"
 #include "game/mips2c/native_bones_vfp.h"
+#include "game/graphics/ctr/CtrHot.h"  // (AI-assisted, hottext)
 
 #ifdef __3DS__
 extern "C" int ctr_config_get(const char* key, char* out, int size);  // platform/3ds/port
@@ -531,7 +532,7 @@ void tmtx_verify_end(u32 output, s64 n) {
  * (bones stride 80, transform first) with joint i's bind pose (joints stride 80, at +12) into
  * output i + 1 (pris-mtx, 128 bytes: t-mtx then n-mtx's three rows), for i < count - 1.
  */
-u64 pc_new_bones_mtx_calc_impl(const NativeArgs& args) {
+CTR_HOT u64 pc_new_bones_mtx_calc_impl(const NativeArgs& args) {
   if (!bones_native_on()) {
     return args.st;  // #f: the GOAL code runs
   }

@@ -600,7 +600,10 @@ void CFunctionEmitter::emit() {
     }
   }
   std::string text = fmt::format("// {}\n", escape_comment(m_env->name()));
-  text += fmt::format("static {} gc_f{}(", ret_type_name(), m_f_idx);
+  // (AI-assisted, hottext) a function of the hot list: GC_HOT (goal_c_ops.h) gathers it with the
+  // other hot code of the program on the 3DS
+  const bool hot = m_module->hot_functions && m_module->hot_functions->count(m_env->name());
+  text += fmt::format("{}static {} gc_f{}(", hot ? "GC_HOT " : "", ret_type_name(), m_f_idx);
   for (int i = 0; i < n_args; i++) {
     if (i) {
       text += ", ";

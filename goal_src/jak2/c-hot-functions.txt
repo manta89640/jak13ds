@@ -1,0 +1,41 @@
+# (AI-assisted, hottext) GOAL functions the C backend emits with GC_HOT (goal_c_ops.h): on the 3DS
+# (OG3DS_HOT_TEXT) they are placed together in .text, ahead of the rest of the code. One name per
+# line, as the generated C's comment above the function has it ('*' as written here). The game
+# thread's per-frame path in Haven City (docs/3ds-port/jak2_perf.md "Top 30 functions") and what
+# every animated or drawn process runs each frame.
+# the process tree and joint math
+reset-and-call
+(method thread-suspend cpu-thread)
+(method thread-resume cpu-thread)
+execute-math-engine
+anim-lod-math!
+anim-lod-skip?
+anim-lod-allowed?
+anim-lod-beyond?
+anim-lod-follow?
+anim-lod-can-follow?
+anim-lod-follow!
+anim-lod-joint-math!
+(method do-joint-math draw-control)
+decomp-frame
+decomp-fixed
+# drawing
+dma-add-process-drawable
+light-hash-add-lights!
+sphere-in-view-frustum?
+pc-3ds-merc-lod-scale-of
+foreground-draw
+foreground-shadow
+pc-3ds-shadow-budget?
+# lookups and math the above call
+(method lookup-tag-idx res-lump)
+vector-matrix*!
+matrix*!
+quaternion->matrix
+matrix<-transformq!
+matrix<-transformq+trans!
+vector-length
+vector-normalize!
+vector-vector-distance
+vector-vector-distance-squared
+vector<-cspace!

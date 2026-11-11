@@ -28,6 +28,7 @@
 
 #include "game/kernel/jak2/kscheme.h"
 #include "game/mips2c/jak2_functions/native_functions.h"
+#include "game/graphics/ctr/CtrHot.h"  // (AI-assisted, hottext)
 
 namespace Mips2C::jak2::native {
 
@@ -928,7 +929,7 @@ u64 add_single_tris(Mem m, u32 hdr, u32 data, u64 out) {
  * relative to the center's y), flag 8: clip to the top plane, flag 64: only the vertices and the
  * single triangles.
  */
-u64 shadow_execute_impl(const NativeArgs& args) {
+CTR_HOT u64 shadow_execute_impl(const NativeArgs& args) {
   static const u32 spad_sym = sym_val_addr("*fake-scratchpad-data*");
   static const u32 gsf_sym = sym_val_addr("*gsf-buffer*");
   static const u32 cam_sym = sym_val_addr("*math-camera*");

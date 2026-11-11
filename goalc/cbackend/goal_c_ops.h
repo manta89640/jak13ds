@@ -1056,6 +1056,15 @@ GC_INLINE void* gc_fn_(u8* gc_mb, u64 f) {
 #if defined(GOALC_STATIC) && defined(__GNUC__) && !defined(__clang__)
 #define GC_WEAK_TARGETS 1
 #endif
+//! (AI-assisted, hottext) functions of goal_src/<game>/c-hot-functions.txt. 3DS static builds with
+//! OG3DS_HOT_TEXT: in the plain .text section, which devkitARM's 3dsx.ld places before every
+//! .text.* section (-ffunction-sections): the hot functions of every module, the natives and the
+//! renderer (CtrHot.h) end up next to each other instead of spread over ~18 MB of code.
+#if defined(GC_WEAK_TARGETS) && defined(GOALC_HOT_TEXT)
+#define GC_HOT __attribute__((hot, section(".text")))
+#else
+#define GC_HOT
+#endif
 //! the target of guards that can't match: no stub points to it
 static void gc_nofn(void) __attribute__((unused));
 static void gc_nofn(void) {}

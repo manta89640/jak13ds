@@ -180,6 +180,8 @@ class CModuleEmitter {
   // (AI-assisted) guarded direct calls (GC_GCALL in goal_c_ops.h)
   //! symbols whose calls are never guarded (functions provided by the runtime), or nullptr
   const std::unordered_set<std::string>* no_guard_symbols = nullptr;
+  //! (AI-assisted, hottext) functions emitted with GC_HOT (goal_src/<game>/c-hot-functions.txt)
+  const std::unordered_set<std::string>* hot_functions = nullptr;
   //! index of the call target macro (GC_T<index>) for calls of the function in symbol `name`, or
   //! -1 when such calls aren't guarded
   int guard_target(const std::string& name);

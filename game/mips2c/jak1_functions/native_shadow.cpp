@@ -27,6 +27,7 @@
 
 #include "game/kernel/jak1/kscheme.h"
 #include "game/mips2c/jak1_functions/native_functions.h"
+#include "game/graphics/ctr/CtrHot.h"  // (AI-assisted, hottext)
 
 namespace Mips2C::jak1::native {
 
@@ -899,7 +900,7 @@ u64 add_double_tris(Mem m, u32 hdr, u32 dc, u32 data, u64 out) {
  * camera (camera-pos) is under the bottom plane. Flag 4: the planes as they are (else their d
  * relative to the center's y), flag 8: clip to the top plane.
  */
-u64 shadow_execute_impl(const NativeArgs& args) {
+CTR_HOT u64 shadow_execute_impl(const NativeArgs& args) {
   static const u32 spad_sym = sym_addr("*fake-scratchpad-data*");
   static const u32 gsf_sym = sym_addr("*gsf-buffer*");
   static const u32 cam_sym = sym_addr("*math-camera*");

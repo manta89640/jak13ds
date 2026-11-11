@@ -1861,3 +1861,24 @@ G and B one at a time. Now R | B << 16 is one (unaligned) `ldr` and `uxtb16`, an
 saturated by one `usat16` (`CtrSimd.h` `ctr_rb_of_rgb`, `ctr_sat_rb6`; the color table has 4
 bytes more for the word read at its last triple). The same values; ARMv6K code of the bench's
 copy (4 palettes): 48 -> 41 instructions. cpu_bench pair `tod.blend4_bytes` / `tod.blend4_simd`.
+
+### 8. Hot code together (hottext)
+
+Jak II's gk.elf has ~18 MB of code against a 16 KB instruction cache per core (and on the New 3DS
+a 2 MB L2): the functions a frame runs are spread over all of it, one or two per object file.
+Azahar doesn't model the misses this causes. devkitARM's `3dsx.ld` places `*(.text)` before
+`*(.text.*)`, and with `-ffunction-sections` every function has its own `.text.<name>`: a
+function put in plain `.text` lands in one block at the start of the program with those of every
+other object. (It has no `.text.hot` rule, so GCC's `hot` attribute alone wouldn't gather them.)
+
+- CMake option `OG3DS_HOT_TEXT` (default ON): `CtrHot.h`'s `CTR_HOT` (`hot` + `section(".text")`)
+  on the per-frame natives (bone matrices, shadow-execute, the particle blocks; both games) and
+  the renderer's `sphere_in_view`; not on inline functions or templates (COMDAT).
+- goalc emits `GC_HOT` (goal_c_ops.h, the same attributes on the 3DS's static GCC build) before
+  the functions named in `goal_src/<game>/c-hot-functions.txt`: Jak II's list has the process
+  tree, the joint math (with anim_lod), the draw and shadow paths and the math helpers they call
+  (34 names, 66 functions over its modules, every name checked against the generated C).
+- Checked: process-drawable, drawable and vector compiled for ARM put exactly their hot functions
+  in `.text`; linked with `3dsx.ld`'s text rule, those three blocks come first and contiguous
+  (~10 KB), then every `.text.*`. Host builds: no change (the macros are empty). Libraries built
+  without `-ffunction-sections` keep their whole `.text` in the same first group, in link order.

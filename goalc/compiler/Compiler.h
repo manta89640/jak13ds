@@ -136,6 +136,9 @@ class Compiler {
   //! in kernel-defs.gc (functions of the C++ runtime) or defined to something other than a
   //! lambda, and not defined by a lambda since. Their calls are not guarded direct calls.
   std::unordered_set<std::string> m_c_runtime_functions;
+  //! (AI-assisted, hottext) goal_src/<game>/c-hot-functions.txt, read at the first use
+  const std::unordered_set<std::string>& c_hot_functions();
+  std::optional<std::unordered_set<std::string>> m_c_hot_functions;
   //! write the C module for an object and build it as a shared library for the runtime to load
   void build_c_module(const std::string& obj_name, const std::string& source, u64 hash);
   TypeSystem m_ts;

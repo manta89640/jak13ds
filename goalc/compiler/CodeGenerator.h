@@ -33,6 +33,8 @@ class CodeGenerator {
   emitter::ObjectGeneratorStats get_obj_stats() const { return m_gen.get_stats(); }
   //! C backend: calls of these symbols are never guarded direct calls (runtime functions)
   void set_c_no_guard_symbols(const std::unordered_set<std::string>* s) { m_c_no_guard = s; }
+  //! (AI-assisted, hottext) C backend: the functions (by name) to emit with GC_HOT
+  void set_c_hot_functions(const std::unordered_set<std::string>* s) { m_c_hot = s; }
 
  private:
   void do_function(FunctionEnv* env, int f_idx);
@@ -47,4 +49,5 @@ class CodeGenerator {
   std::string m_c_source;
   u64 m_c_hash = 0;
   const std::unordered_set<std::string>* m_c_no_guard = nullptr;
+  const std::unordered_set<std::string>* m_c_hot = nullptr;
 };

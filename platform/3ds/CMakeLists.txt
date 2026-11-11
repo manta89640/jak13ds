@@ -62,6 +62,12 @@ add_compile_definitions(
 # also set by the toolchain (CMAKE_<LANG>_FLAGS_INIT); repeated here so that a user-provided
 # CMAKE_CXX_FLAGS cannot drop them
 add_compile_definitions(__3DS__)
+# (AI-assisted, hottext) the per-frame functions (CtrHot.h CTR_HOT, the GOAL modules' GC_HOT from
+# goal_src/<game>/c-hot-functions.txt) together at the start of .text
+option(OG3DS_HOT_TEXT "gather the hot functions at the start of .text" ON)
+if(OG3DS_HOT_TEXT)
+  add_compile_definitions(OG3DS_HOT_TEXT=1 GOALC_HOT_TEXT=1)
+endif()
 add_compile_options(
   -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
   -ffunction-sections -fdata-sections -mword-relocations

@@ -24,6 +24,7 @@
 #include "game/kernel/common/kperf.h"
 #include "game/mips2c/jak2_functions/native_functions.h"
 #include "game/mips2c/native_goalc_ops.h"
+#include "game/graphics/ctr/CtrHot.h"  // (AI-assisted, hottext)
 
 #if defined(__GNUC__) || defined(__clang__)
 #define NATIVE_ALIGNED4(p) __builtin_assume_aligned((p), 4)
@@ -100,7 +101,7 @@ inline bool particle_done(u32 flags, u32 r, u32 g, u32 b, u32 a, float sx, float
  * callback (or add-to-sprite-aux-list), relaunching, velocity (with acceleration and friction),
  * position, rotation and color, the orbiter, and frees the ones that are done.
  */
-u64 sp_process_block_2d_impl(const NativeArgs& args) {
+CTR_HOT u64 sp_process_block_2d_impl(const NativeArgs& args) {
   static const u32 spad_sym = sym_val_addr("*fake-scratchpad-data*");
   static const u32 aux_list_sym = sym_val_addr("add-to-sprite-aux-list");
   static const u32 free_particle_sym = sym_val_addr("sp-free-particle");
@@ -268,7 +269,7 @@ u64 sp_process_block_2d_impl(const NativeArgs& args) {
  * times the particle's rotvel3d once per 10 frames, normalized, stored with w >= 0. No orbiter,
  * no aux list. Frees the ones that are done.
  */
-u64 sp_process_block_3d_impl(const NativeArgs& args) {
+CTR_HOT u64 sp_process_block_3d_impl(const NativeArgs& args) {
   static const u32 spad_sym = sym_val_addr("*fake-scratchpad-data*");
   static const u32 quaternion_mul_sym = sym_val_addr("quaternion*!");
   static const u32 quaternion_normalize_sym = sym_val_addr("quaternion-normalize!");
@@ -1013,7 +1014,7 @@ bool block_verify_on() {
  * functions through their symbols (so they are compared with mips2c as before) and check that the
  * copy back of every free particle would write the bytes that are there.
  */
-u64 pc_sp_process_block_impl(const NativeArgs& args) {
+CTR_HOT u64 pc_sp_process_block_impl(const NativeArgs& args) {
   static const u32 spad_sym = sym_val_addr("*fake-scratchpad-data*");
   static const bool off = native_turned_off("sp-process-block-2d") ||
                           native_turned_off("sp-process-block-3d") ||
