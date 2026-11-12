@@ -2874,7 +2874,7 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
     return;
   }
   const auto& m = g_soft.meshes[mesh];
-  softstats::tb_prog(s_shader_opt ? 10 : 11, m.col_off ? 2 : 1);  // shader_opt: ctr_mesh_opt
+  softstats::tb_prog(10, m.col_off ? 2 : 1);  // ctr_mesh_opt
   soft_mesh_tris(state, clip, soft_verts(m.verts.data(), m.col_off), m.indices.data(), first_index,
                  index_count);
 }
@@ -3482,7 +3482,7 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
   const auto& m = g_soft.meshes[mesh];
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
-  softstats::tb_prog(s_shader_opt ? 33 : 39, 1);  // shader_opt: ctr_skin_opt
+  softstats::tb_prog(33, 1);  // ctr_skin_opt
   softstats::tb_verts(m.indices.data() + first_index, index_count);
   // (AI-assisted, far-fog) merc_fog
   const bool fogged = fog_on() && state && (state->tcc & CTR_TCC_FOG);
