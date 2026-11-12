@@ -17,6 +17,8 @@
  */
 
 #include <cstdio>
+#include <exception>
+#include <typeinfo>
 #include <sstream>
 #include <cstdlib>
 #include <cstring>
@@ -88,7 +90,27 @@ std::vector<std::string> read_game_args() {
 
 extern "C" int ctr_mem_asm, ctr_fast_clock;  // (AI-assisted) port/ctr_mem_c.c, ctr_clock.cpp
 
+// std::terminate: name the uncaught exception in stdout.log before the crash screen
+static void ctr_terminate() {
+  const char* what = "no exception (std::terminate called)";
+  char buf[200];
+  if (std::exception_ptr e = std::current_exception()) {
+    try {
+      std::rethrow_exception(e);
+    } catch (const std::exception& x) {
+      snprintf(buf, sizeof(buf), "%s: %s", typeid(x).name(), x.what());
+      what = buf;
+    } catch (...) {
+      what = "an exception that is no std::exception";
+    }
+  }
+  printf("\n*** terminate on thread %u: %s\n", ctr_thread_current_id(), what);
+  fflush(stdout);
+  abort();
+}
+
 int main(int /*argc*/, char** /*argv*/) {
+  std::set_terminate(ctr_terminate);
   ctr_platform_init(1);
   const fs::path data_dir = fs::path(OPENGOAL_3DS_SD_ROOT) / "data";
   {
