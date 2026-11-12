@@ -3716,6 +3716,7 @@ void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n) {
 int ctr_gpu_micro_line(char*, int) {
   return 0;
 }
+void ctr_gpu_probe_add(int, uint64_t) {}
 // (AI-assisted, gpu-rt) gpu_breakdown: no GPU to time here
 void ctr_gpu_set_gpu_breakdown(int) {}
 void ctr_gpu_phase(int) {}
