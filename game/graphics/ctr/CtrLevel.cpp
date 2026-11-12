@@ -3100,67 +3100,56 @@ int tod_update_w(CtrLevelData::Tod& t, const std::string& level, const u8 (*w)[3
   return 1;
 }
 
-// Bounded relighting: the weights the table blends with ("applied") follow the game's in steps.
-// A step moves a day palette's weight (and alpha) by 1/64 (at most ~4/255 of a color), a light
-// palette's to the game's when it moved 4/64 or more; a difference of less that holds for
-// kTodSettleFrames frames is taken too (the game's weights jitter by one). The next step waits
-// until the last one is written to every group drawn (day_done, light_done: the per-frame budgets
-// of the day and light passes), so the groups drawn are at most one step apart; the applied time
-// of day lags the game's while the budgets can't keep up (the title's fast day). A jump of the game's
-// weights (a cut, a time set) is taken at once: every group drawn written in that frame.
-constexpr int kTodLightStep = 4, kTodJumpLag = 16;
+// Bounded relighting: the weights the table blends with ("applied") are the game's of an earlier
+// frame, taken whole per kind, so every blend is one the game asked for (the day alpha weights
+// add up as the game's do: an alpha kind at 0x80 by day stays there):
+//  - the day palettes' (rgb and alpha) when one moved: by 1/64 once the last set is written to
+//    every group drawn (day_done, light_done: the per-frame budgets of the day and light passes),
+//    by more at once (tod_update_w: a jump, every group drawn written that frame);
+//  - the light palettes' when one moved kTodLightStep/64 or more, or less for kTodSettleFrames
+//    frames, once the last set is written.
+// So the groups drawn are at most one set apart. The title's fast day takes the game's weights
+// every frame.
+constexpr int kTodLightStep = 4;
 constexpr u8 kTodSettleFrames = 20;
-inline int tod_step_to(int a, int g, u8& hold, bool light) {
-  const int d = g - a;
-  if (!d) {
-    hold = 0;
-    return a;
-  }
-  const int big = light ? kTodLightStep : 2;
-  if (std::abs(d) < big && ++hold < kTodSettleFrames) {
-    return a;
-  }
-  hold = 0;
-  return light ? g : a + (d > 0 ? 1 : -1);
-}
 int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgroundCamera& cam,
                u64 frame, bool no_hold) {
   u8 w[8][3];
   tod_weights(cam, w);
   u8 wa[8];
   tod_alpha_weights(cam, wa);
-  if (!t.app_valid || !t.blended_valid) {
+  if (!t.app_valid || !t.blended_valid || no_hold) {
     memcpy(t.app_w, w, sizeof(t.app_w));
     memcpy(t.app_wa, wa, sizeof(t.app_wa));
-    memset(t.hold_w, 0, sizeof(t.hold_w));
-    memset(t.hold_wa, 0, sizeof(t.hold_wa));
+    t.hold_light = 0;
     t.app_valid = true;
+    t.app_lag = 0;
   } else {
-    t.app_lag = 0;
+    int dday = 0, dlight = 0;
     for (int p = 0; p < 8; p++) {
+      int d = std::abs((int)wa[p] - (int)t.app_wa[p]);
       for (int c = 0; c < 3; c++) {
-        t.app_lag = std::max<u32>(t.app_lag, (u32)std::abs((int)w[p][c] - (int)t.app_w[p][c]));
+        d = std::max(d, std::abs((int)w[p][c] - (int)t.app_w[p][c]));
       }
+      int& dk = t.light_mask >> p & 1 ? dlight : dday;
+      dk = std::max(dk, d);
     }
-    if (t.app_lag >= kTodJumpLag && !no_hold) {
-      memcpy(t.app_w, w, sizeof(t.app_w));
-      memcpy(t.app_wa, wa, sizeof(t.app_wa));
+    const bool take_day = dday >= 2 || (dday == 1 && t.day_done && t.light_done);
+    bool take_light = false;
+    if (!dlight) {
+      t.hold_light = 0;
+    } else if (t.light_done &&
+               (dlight >= kTodLightStep || ++t.hold_light >= kTodSettleFrames)) {
+      take_light = true;
+      t.hold_light = 0;
     }
-    t.app_lag = 0;
-    const bool day_ok = t.day_done && t.light_done;
     for (int p = 0; p < 8; p++) {
-      const bool light = t.light_mask >> p & 1;
-      const bool may = light ? t.light_done : day_ok;
-      for (int c = 0; c < 3; c++) {
-        if (may) {
-          t.app_w[p][c] = (u8)tod_step_to(t.app_w[p][c], w[p][c], t.hold_w[p][c], light);
-        }
-        t.app_lag = std::max<u32>(t.app_lag, (u32)std::abs((int)w[p][c] - (int)t.app_w[p][c]));
-      }
-      if (may) {
-        t.app_wa[p] = (u8)tod_step_to(t.app_wa[p], wa[p], t.hold_wa[p], light);
+      if (t.light_mask >> p & 1 ? take_light : take_day) {
+        memcpy(t.app_w[p], w[p], 3);
+        t.app_wa[p] = wa[p];
       }
     }
+    t.app_lag = (u32)std::max(take_day ? 0 : dday, take_light ? 0 : dlight);
   }
   u8 before[8][3];
   memcpy(before, t.target_w, sizeof(before));
@@ -3733,10 +3722,11 @@ constexpr u64 kTodFreshRatio = 3;
 // a step behind for a few frames differs by at most ~4 color units. Two moves behind (the title's
 // fast day): rewritten at once.
 // (the title's fast day and Jak II: kTodSpreadFast)
-constexpr u64 kTodSpreadFrames = 24;
+constexpr u64 kTodSpreadFrames = 24, kTodSpreadFast = 6;
+constexpr s64 kTodSpreadMin = 4000;
 // bounded relighting (tod_update): the vertices a level draw rewrites for a step at most (the
 // groups further behind, a chunk coming into view, are written at once)
-constexpr s64 kTodDayBudget = 5000, kTodDayBudgetFast = 12000, kTodLightBudget = 1500;
+constexpr s64 kTodDayBudget = 5000, kTodLightBudget = 1500;
 // the vertices of the groups rewritten in a level draw while the screen is black
 constexpr s64 kTodBlackVerts = 8000;
 // (AI-assisted, todlag) the time of day's clock: ctr_gpu_time_ms; on the host times env
@@ -4721,6 +4711,7 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
   struct St {
     u64 frames = 0, verts = 0, stale = 0, stale_frames = 0, steps = 0, astale = 0;
     u64 black_frames = 0, black_stale = 0;  // (black screen: rewrites left to later, by design)
+    u64 alow = 0;
     int max_err = 0, max_step = 0;
     std::array<u8, 24> prev{};
     bool have_prev = false;
@@ -4745,6 +4736,8 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
   std::vector<u8> akind_alpha(t.akinds.size());
   for (size_t k = 0; k < t.akinds.size(); k++) {
     akind_alpha[k] = (u8)(tod_blend_alpha(t.akinds[k], wa) >> 24);
+    // (a kind at 0x80 by day whose applied blend is under the game's)
+    st.alow += k < t.akind_full.size() && t.akind_full[k] && (t.aword[k] >> 24) < akind_alpha[k];
   }
   auto alpha_now = [&](u32 idx) -> int {
     const u32 nc = t.color_count;
@@ -4967,10 +4960,11 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
              "{} frames (max error {}), {} frames with a color step (max step {}); {} vertices "
              "with another alpha than the blend; stale = neither the applied weights' color nor "
              "the step before's; applied weights {} 64ths behind the game's now; {} black "
-             "frames ({} stale vertices there, not counted)",
+             "frames ({} stale vertices there, not counted); {} times a day alpha kind was "
+             "under the game's",
              lev.name, st.frames, (double)st.verts / std::max<u64>(1, st.frames), st.stale,
              st.stale_frames, st.max_err, st.steps, st.max_step, st.astale, t.app_lag,
-             st.black_frames, st.black_stale);
+             st.black_frames, st.black_stale, st.alow);
     lg::info("[ctr] tod check {}: color age of the vertices drawn {} frames at most ({} = none of "
              "the last {}), {:.3f} on average, {} frames with a color more than 1 frame old; "
              "{} of {} group draws 3+ frames old ({} with the file's colors)",
@@ -11843,7 +11837,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // (AI-assisted, fable1) Jak 1's title: a heavy frame (the frame before drew 3x the table's
     // entries in vertices or more: its 20x day moves every palette) takes the game's new weights
     // every fourth frame only. Gameplay in both games takes every frame's weights.
-    const bool tod_skip = false;  // (bounded relighting: the steps follow the budgets)
+    const bool tod_skip = m_tod_heavy && title_on && (rs.frame_idx % 4) != 0;
     m_tod_skipped += tod_skip;
     if (!tod_skip) {
       m_tod_blends += tod_update(*lev.tod, lev.name, cam, rs.frame_idx, title_on) == 2;
@@ -13858,8 +13852,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
       ps.fresh_ok = drawn >= kTodFreshRatio * t.table.size();
       // (bounded relighting: the groups one step behind, at most this many vertices a level draw)
-      ps.spread = t.day_move_frame != 0;  // (0: a jump, written at once)
-      ps.spread_left = t.fast_day ? kTodDayBudgetFast : kTodDayBudget;
+      if (t.fast_day) {
+        // (the title: a move spread over kTodSpreadFast frames)
+        ps.spread = t.day_move_frame && rs.frame_idx - t.day_move_frame < kTodSpreadFast;
+        ps.spread_left = std::max<s64>(kTodSpreadMin, (s64)(drawn / kTodSpreadFast));
+      } else {
+        ps.spread = t.day_move_frame != 0;  // (0: a jump, written at once)
+        ps.spread_left = kTodDayBudget;
+      }
       ps.black = g_screen_black && !t.fast_day && m_jak2_slot < 0;
       ps.black_left = kTodBlackVerts;
       for (const auto& vc : m_visible) {

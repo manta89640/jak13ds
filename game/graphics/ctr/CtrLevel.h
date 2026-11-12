@@ -430,11 +430,12 @@ struct CtrLevelData {
     // weights (64 = 1.0): the game's at the level's last draw, the table's
     u8 weights[8][3] = {};
     u8 target_w[8][3] = {};
-    // bounded relighting (CtrLevel.cpp tod_update): the weights applied (the game's in steps),
-    // the applied ones before the last step, the frames a small difference held, whether the
-    // last step was written to every group drawn, the largest lag behind the game's (1/64)
+    // bounded relighting (CtrLevel.cpp tod_update): the weights applied (the game's of an
+    // earlier frame, per kind), the applied ones before, the frames a small light difference
+    // held, whether the last set was written to every group drawn, the lag behind the game's
+    // (1/64)
     u8 app_w[8][3] = {}, app_wa[8] = {}, prev_w[8][3] = {}, prev_lw[8][3] = {};
-    u8 hold_w[8][3] = {}, hold_wa[8] = {};
+    u8 hold_light = 0;
     bool app_valid = false, day_done = true, light_done = true;
     u32 app_lag = 0;
     bool blended_valid = false;  // weights taken at least once
