@@ -12667,10 +12667,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         const float band_k = shrub_k * det * (1.f / 16.f) * 4096.f;
         float near_lim = banded ? std::min(lev.chunk_band_x[ci] * shrub_k * det, lim)
                                 : lim * kShrubNearK;
-        // (Jak 1's shrub lever: bands that start beyond ring 0 drawn nearer)
-        const float shrub_lever = dfl.shrub_far;
-        float lim_c = lim;
-        ctr_detail::shrub_band(&near_lim, &lim_c, shrub_lever, ring0);
+        const float lim_c = lim;
         const float dcx = ch.bsphere[0] - cam.trans[0], dcy = ch.bsphere[1] - cam.trans[1],
                     dcz = ch.bsphere[2] - cam.trans[2];
         const float dc = std::sqrt(dcx * dcx + dcy * dcy + dcz * dcz);
@@ -12719,13 +12716,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
               if (b) {
                 rl = std::min((float)(b & 0xffff) * band_k, lim);
                 rn = std::min((float)(b >> 16) * band_k, rl);
-                ctr_detail::shrub_band(&rn, &rl, shrub_lever, ring0);
                 rb = 128.f / std::max(rl - rn, 1.f);
               }
               if (d > rn) {
-                // 16 steps (of 8 in 0x80): neighbouring runs share a draw
-                const int q = (int)std::lround((rl - d) * rb * (1.f / 8.f)) * 8;
-                fade = (u8)std::clamp(q, 0, (int)kRunOpaque);
+                // continuous (neighbouring runs within 1/16 of it share a draw: fade_submit)
+                fade = (u8)std::clamp((int)std::lround((rl - d) * rb), 0, (int)kRunOpaque);
               }
             }
             fade_jumps += std::abs((int)fade - (int)rin[r]) >= 32;
@@ -14077,7 +14072,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         m_fade_runs++;
         return;
       }
-      if (!m_fade_calls.empty() && fade_di == di && fade_fd == fade) {
+      if (!m_fade_calls.empty() && fade_di == di && std::abs((int)fade_fd - (int)fade) < 8) {
         ctr_mesh_call& last = m_fade_calls.back();
         if (last.matrix == &vc.gpu && last.first_index + last.index_count == (int)first) {
           last.index_count += (int)count;
