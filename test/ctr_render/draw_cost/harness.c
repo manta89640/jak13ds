@@ -35,13 +35,12 @@ static void setup(void) {
   gpuCmdBufOffset = 0;
   g.ready = 1;
   g.in_frame = 1;
-  g.ps = &s_ps[1];
-  s_ps[1].ok = 1;
-  s_ps[1].opt = 1;
-  s_ps[1].fa_ok = 1;
-  s_ps[1].uloc_clip = 0;
-  s_ps[1].uloc_scales = 6;
-  s_ps[1].uloc_fog1 = 7;
+  g.ps = &s_ps;
+  s_ps.ok = 1;
+  s_ps.fa_ok = 1;
+  s_ps.uloc_clip = 0;
+  s_ps.uloc_scales = 6;
+  s_ps.uloc_fog1 = 7;
   g.cur_prog = PROG_MESH_FA;
   g.fog_tex_valid = 1;
   g.fog_abgr = 0xff406080u;
@@ -102,12 +101,12 @@ static float s_rows[16][4 * 17];
 /* wind draws: [4] 1 = a chunk's draws together (sorted), 0 = the chunks in turn */
 static void wind_seq(int n, int sorted) {
   DVLB_s* d = DVLB_ParseFile((u32*)ctr_mesh_wind_shbin, (u32)ctr_mesh_wind_shbin_size);
-  shaderProgramInit(&s_ps[1].mesh_wind);
-  shaderProgramSetVsh(&s_ps[1].mesh_wind, &d->DVLE[0]);
-  s_ps[1].uloc_wind = shaderInstanceGetUniformLocation(s_ps[1].mesh_wind.vertexShader, "wind");
-  s_ps[1].uloc_clip = shaderInstanceGetUniformLocation(s_ps[1].mesh_wind.vertexShader, "clip");
-  s_ps[1].uloc_scales = shaderInstanceGetUniformLocation(s_ps[1].mesh_wind.vertexShader, "scales");
-  s_ps[1].wind_ok = 1;
+  shaderProgramInit(&s_ps.mesh_wind);
+  shaderProgramSetVsh(&s_ps.mesh_wind, &d->DVLE[0]);
+  s_ps.uloc_wind = shaderInstanceGetUniformLocation(s_ps.mesh_wind.vertexShader, "wind");
+  s_ps.uloc_clip = shaderInstanceGetUniformLocation(s_ps.mesh_wind.vertexShader, "clip");
+  s_ps.uloc_scales = shaderInstanceGetUniformLocation(s_ps.mesh_wind.vertexShader, "scales");
+  s_ps.wind_ok = 1;
   g.cur_prog = PROG_NONE;
   for (int m = 0; m < 16; m++) {
     for (int k = 0; k < 4 * 17; k++) {
