@@ -209,6 +209,61 @@ bool far_chunk(const CtrLevelData& lev, const c3l::Chunk& ch) {
          ch.kind == c3l::CHUNK_KIND_VISTA;  // (AI-assisted) v13 vista tier: far scenery
 }
 
+// a merc model's vertices by bone (each vertex under every bone it has weight on): the bounds
+// CtrMercRenderer::model_off_screen tests; none if a vertex has no weight
+void merc_bone_spheres(CtrMercModelData& md,
+                       const std::vector<c3l::MercVertex>& verts,
+                       const std::vector<u16>& indices) {
+  md.bone_spheres.clear();
+  float lo[256][3], hi[256][3];
+  bool any[256] = {};
+  std::vector<std::pair<u8, u16>> uses;  // (bone, vertex)
+  for (const auto* ds : {&md.draws, &md.gen_draws}) {
+    for (const auto& d : *ds) {
+      for (u32 k = d.first_index; k < d.first_index + d.index_count && k < indices.size(); k++) {
+        const u16 v = indices[k];
+        if (v >= verts.size()) {
+          continue;
+        }
+        bool weighted = false;
+        for (int j = 0; j < 3; j++) {
+          if (verts[v].weights[j]) {
+            weighted = true;
+            const u8 b = d.palette[verts[v].bones[j] % c3l::kMercPaletteSize];
+            uses.push_back({b, v});
+            for (int c = 0; c < 3; c++) {
+              const float p = verts[v].pos[c];
+              lo[b][c] = any[b] ? std::min(lo[b][c], p) : p;
+              hi[b][c] = any[b] ? std::max(hi[b][c], p) : p;
+            }
+            any[b] = true;
+          }
+        }
+        if (!weighted) {
+          return;
+        }
+      }
+    }
+  }
+  float r2[256] = {};
+  for (const auto& [b, v] : uses) {
+    float d2 = 0;
+    for (int c = 0; c < 3; c++) {
+      const float d = verts[v].pos[c] - 0.5f * (lo[b][c] + hi[b][c]);
+      d2 += d * d;
+    }
+    r2[b] = std::max(r2[b], d2);
+  }
+  for (int b = 0; b < 256; b++) {
+    if (any[b]) {
+      md.bone_spheres.push_back({(u8)b,
+                                 {0.5f * (lo[b][0] + hi[b][0]), 0.5f * (lo[b][1] + hi[b][1]),
+                                  0.5f * (lo[b][2] + hi[b][2])},
+                                 std::sqrt(r2[b]) + 1.f});
+    }
+  }
+}
+
 // what a chunk is, for the lines about parts not made
 std::string chunk_section(const c3l::Chunk& ch) {
   switch (ch.kind) {
@@ -7686,6 +7741,7 @@ bool CtrLevels::load_file(const fs::path& path,
             const float extent = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], 1.f});
             md.gen_err = c3l::kMercGenLodErrorMax * extent * m.scale;
           }
+          merc_bone_spheres(md, mverts, mindices);
           md.mesh = ctr_gpu_skinned_mesh_create(mverts.data(), m.vertex_count, mindices.data(),
                                                 end - first);
           while (md.mesh < 0 &&

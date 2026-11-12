@@ -112,6 +112,15 @@ struct CtrMercModelData {
   // models whose vertices are rewritten (blend shapes, mod): the mesh's indices, for the copies of
   // the instances drawn after the first in a frame (CtrMercRenderer)
   std::vector<u16> indices;
+  // per bone its vertices' sphere (quantized model units; empty: not known), and how far blend
+  // shapes moved a vertex from the file's position at most (CtrMercRenderer::model_off_screen)
+  struct BoneSphere {
+    u8 bone;
+    float c[3];
+    float r;
+  };
+  std::vector<BoneSphere> bone_spheres;
+  mutable float blerc_reach = 0.f;
 };
 
 // The PS2's shine distance of Jak 1's envmapped ties (draw-inline-array-instance-tie): an instance

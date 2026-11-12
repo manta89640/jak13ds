@@ -81,6 +81,7 @@ class CtrMercRenderer : public CtrBucketRenderer {
     int unsent_bones = 0;  // (AI-assisted) draws using a bone the game didn't send
     int fogged = 0;        // (AI-assisted, far-fog) merc_fog: draws with the game's fog
     int vtx_shared = 0;    // instances with rewritten vertices over the copies' limits
+    int off_screen = 0;    // models wholly outside one side of the view
   };
 
  private:
@@ -90,6 +91,10 @@ class CtrMercRenderer : public CtrBucketRenderer {
   // (AI-assisted) a bone the model's slots name has a rotation / scale entry of 64 or more, a
   // translation of 1e8 or more, or NaN (garbage: the model isn't drawn)
   static bool bad_bones(const CtrMercMat* const* bones, const u8* slots, int n);
+  /*! every vertex of the model is outside one side of the view (left, right, top, bottom or behind
+   * the camera): each bone its draws use, grown by the vertices' range, is beyond that plane */
+  bool model_off_screen(const struct CtrMercModelData& model,
+                        const CtrMercMat* const* bones) const;
   /*! (AI-assisted, far-fog) merc_fog: the game's fog is more than ~0 somewhere on the model (its
    * sent bones' origins, grown by its size) */
   bool model_fog_visible(const struct CtrMercModelData& model,
