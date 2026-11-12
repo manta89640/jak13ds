@@ -435,9 +435,6 @@ void ctr_gpu_set_compact_textures(int on);
  * renderer bucket, when enough draws piled up), so the GPU draws them while the CPU builds the
  * rest of the frame. Off: the GPU starts at the end of the frame (config.ini overlap). */
 void ctr_gpu_set_overlap(int on);
-/* (AI-assisted) config.ini raw_cmds: the draws write their GPU commands themselves instead of
- * through citro3d (much less CPU per draw, fewer command words). Can change at any time. */
-void ctr_gpu_set_raw_cmds(int on);
 /* (AI-assisted, gpu-rt) config.ini gpu_breakdown (profiling, off): every 4th frame (pipeline on) each
  * part of the frame goes to the GPU alone and is waited for, timed from its submission to its GSP
  * event (P3D, PSC, PPF): the phases below. ctr_gpu_phase: the commands built from now on belong to

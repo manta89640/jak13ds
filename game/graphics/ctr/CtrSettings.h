@@ -188,9 +188,6 @@ struct CtrSettings {
   // other levels: med-res-level, e.g. Sandover from Misty), per vertex like merc2.vert. Needs
   // shader_opt (ctr_skin_opt); the Oct 2 skin program has no fog. Read per model (gpu_profile = ab)
   bool merc_fog = true;
-  // (AI-assisted) draws write their GPU commands themselves instead of through citro3d (less CPU
-  // per draw on the render thread, fewer command words)
-  bool raw_cmds = true;
   // (AI-assisted, gpu-rt) gpu_breakdown: every 4th frame the GPU runs each part of the frame alone
   // (clear, sky, level, merc, translucent, shadows, ocean, sprites, distort copy, HUD, transfer)
   // and its time is logged per stats window ([ctr] gpu breakdown). Serialises the GPU: slower

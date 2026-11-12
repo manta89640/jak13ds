@@ -181,6 +181,8 @@ static const char* const ctr_cfg_removed[] = {
     "vram_vertices", "shader_basic", "shader_opt", "color_stream", "color16", "depth16",
     "top_block32", "early_depth_clear", "early_depth_func", "early_depth", "vram_probe",
     "gpu_micro_ident", "cmd_dump", "cpu_bench",
+    /* GPU backend phase B */
+    "raw_cmds",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

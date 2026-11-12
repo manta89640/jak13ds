@@ -181,8 +181,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.cull_merc = parse_bool(v);  // (AI-assisted)
     } else if (key == "merc_fog") {
       s.merc_fog = parse_bool(v);  // (AI-assisted, far-fog)
-    } else if (key == "raw_cmds") {
-      s.raw_cmds = parse_bool(v);
     } else if (key == "gpu_breakdown") {
       s.gpu_breakdown = parse_bool(v);  // (AI-assisted, gpu-rt)
     } else if (key == "ocean_tex_half") {
@@ -405,7 +403,7 @@ std::string CtrSettings::summary() const {
       "merc {} sprites {} "
       "pipeline {} ocean {} sky {} clouds {} distort {} envmap {} merc_gen_lod {} (x{:.2f}) shadows {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "compact_textures {} sprite_alpha_discard {} "
-      "vis_culling {} run_culling {} tie_lod {} streaming {} neighbour_vis {} lowres_vista {} vista {:.0f}m cull_ties {} cull_merc {} merc_fog {} raw_cmds {} asm_tex {} asm_mem {} "
+      "vis_culling {} run_culling {} tie_lod {} streaming {} neighbour_vis {} lowres_vista {} vista {:.0f}m cull_ties {} cull_merc {} merc_fog {} asm_tex {} asm_mem {} "
       "ocean_tex_half {} fast_clock {} "
       // (AI-assisted) Oct 16: the rest of the keys, so the line holds every setting
       "fog_start {:.2f} overlap {} frame_pacing {} fps_cap {} ocean_texture_rate {} "
@@ -430,7 +428,6 @@ std::string CtrSettings::summary() const {
                 : std::string("off"),
       neighbour_vis ? "on" : "off", lowres_vista ? "on" : "off", vista_distance, cull_ties ? (cull_flip ? "flip" : "on") : "off", cull_merc ? "on" : "off",
       merc_fog ? "on" : "off",
-      raw_cmds ? "on" : "off",
       asm_tex ? "on" : "off",
       asm_mem ? "on" : "off",
       ocean_tex_half ? "on" : "off",
