@@ -643,6 +643,8 @@ typedef struct {
   uint32_t id;      /* (AI-assisted) new for every prepare: draws compare it, not m (so a
                      * prepared matrix must not be changed, only prepared again) */
   uint32_t fog_gen; /* (AI-assisted) the fog f24[12..17] were made with (0: not made) */
+  uint32_t lut24[3]; /* the fog table row (float24), made with the table of lut_gen */
+  uint32_t lut_gen;
 } ctr_mesh_matrix;
 void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out);
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,

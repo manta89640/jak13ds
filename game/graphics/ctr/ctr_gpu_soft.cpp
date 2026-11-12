@@ -2897,7 +2897,7 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
     return;
   }
   const auto& m = g_soft.meshes[mesh];
-  softstats::tb_prog(10, m.col_off ? 2 : 1);  // ctr_mesh_opt
+  softstats::tb_prog(7, m.col_off ? 2 : 1);  // ctr_mesh_opt (the fog table)
   soft_mesh_tris(state, clip, soft_verts(m.verts.data(), m.col_off), m.indices.data(), first_index,
                  index_count);
 }
@@ -3292,7 +3292,7 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
     memcpy(at, pos, sizeof(pos));
   }
   g_soft_cur_mesh = mesh;
-  softstats::tb_prog(16, m.col_off ? 3 : 2);
+  softstats::tb_prog(13, m.col_off ? 3 : 2);
   soft_mesh_tris(state, matrix->m, sv, m.indices.data(), first_index, index_count);
 }
 int ctr_gpu_wind_ready(void) {
@@ -3340,7 +3340,7 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
     }
   }
   g_soft_cur_mesh = mesh;
-  softstats::tb_prog(18, 3);  // (the color targets: a third buffer)
+  softstats::tb_prog(15, 3);  // (the color targets: a third buffer)
   const std::string keep = softstats::cur_name;
   if (softstats::enabled()) {
     ctr_gpu_soft_bucket((keep + "+morph").c_str());
@@ -3392,7 +3392,7 @@ void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix
     }
   }
   g_soft_cur_mesh = mesh;
-  softstats::tb_prog(27, m.col_off ? 3 : 2);
+  softstats::tb_prog(24, m.col_off ? 3 : 2);
   const std::string keep = softstats::cur_name;
   if (softstats::enabled()) {
     ctr_gpu_soft_bucket((keep + "+tmorph").c_str());
