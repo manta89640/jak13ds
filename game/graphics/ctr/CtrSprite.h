@@ -183,6 +183,7 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   u64 m_last_tex0 = 0;
   int m_last_tex = -1;
   bool m_last_tex_valid = false;
+  bool m_last_tex_mips = false;  // m_last_tex has mip levels (world sprites)
   // the last texture's CtrTexture::max_alpha
   int m_last_tex_max_alpha = 255;
   // the adgif states resolved since the last flush, direct mapped by the adgif's words: a sprite

@@ -1369,7 +1369,7 @@ void CtrVram::clear_override(u32 tbp) {
   m_overrides.erase(it);
 }
 
-const CtrTexture* CtrVram::get_texture(u64 tex0) {
+const CtrTexture* CtrVram::get_texture(u64 tex0, bool mips) {
   // (AI-assisted) Jak II's animated textures (set_override; none in Jak 1)
   if (!m_overrides.empty()) {
     auto ov = m_overrides.find((u32)(tex0 & 0x3fff));
@@ -1389,6 +1389,10 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
       key &= ~(0x3ffffull << 37);
     }
   }
+  // (the key's CLD bits are free: kKeyMask)
+  if (mips) {
+    key |= kMipKeyBit;
+  }
   Entry* cached = find_cached(key);
   // (AI-assisted) valid while nothing pending is over it and its chunks hold what it was decoded
   // from (entry_sig: a few chunk ids, not the texture's bytes)
@@ -1400,7 +1404,7 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
     return &cached->tex;
   }
   // (AI-assisted) Jak II: where the texture's data is (see m_remap); key stays the cache key
-  const u64 data_key = data_tex0(key);
+  const u64 data_key = data_tex0(key & ~kMipKeyBit);
   GsTex0 t(data_tex0(tex0));
   if (!m_pending.empty()) {
     // the ids of the pending uploads this texture (or its cached version) may read
@@ -1507,8 +1511,11 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   e.tex.w = gw;
   e.tex.h = gh;
   e.tex.max_alpha = max_alpha;
-  // (AI-assisted) the smallest 3DS format that holds it (sprites, HUD, font)
-  e.tex.handle = ctr_gpu_tex_create_compact(gw, gh, (const uint8_t*)data.data());
+  // (AI-assisted) the smallest 3DS format that holds it (sprites, HUD, font); world sprites'
+  // textures of 32 x 32 and more with mip levels
+  e.tex.handle = mips && gw >= 32 && gh >= 32
+                     ? ctr_gpu_tex_create_mipmapped(gw, gh, (const uint8_t*)data.data())
+                     : ctr_gpu_tex_create_compact(gw, gh, (const uint8_t*)data.data());
   // Allocation pressure is temporary: no failed handle is kept, the lookups try again, as often
   // as keeps the decodes that end here near 1% of the render thread (1 ms per 32 texels)
   if (e.tex.handle < 0) {

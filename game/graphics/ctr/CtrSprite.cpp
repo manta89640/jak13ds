@@ -852,9 +852,11 @@ void CtrSpriteRenderer::resolve_state(const AdGif& ad, Mode mode) {
     ctr_draw_state& st = m_last_state;
     memset(&st, 0, sizeof(st));
     GsTex0 tex0(ad.tex0_data);
-    if (ad.tex0_data != m_last_tex0 || !m_last_tex_valid) {
-      const CtrTexture* tex = m_vram->get_texture(ad.tex0_data);
+    const bool mips = mode != MODE_HUD;
+    if (ad.tex0_data != m_last_tex0 || !m_last_tex_valid || mips != m_last_tex_mips) {
+      const CtrTexture* tex = m_vram->get_texture(ad.tex0_data, mips);
       m_last_tex0 = ad.tex0_data;
+      m_last_tex_mips = mips;
       m_last_tex = tex ? tex->handle : -1;
       m_last_tex_valid = true;  // also for unsupported formats: don't retry every sprite
       m_last_tex_max_alpha = tex ? tex->max_alpha : 255;
