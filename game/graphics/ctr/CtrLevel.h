@@ -1567,6 +1567,19 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   std::vector<u8> m_raw_shown, m_raw_nomerge, m_chk_shown, m_chk_nomerge;
   std::vector<u16> m_raw_margin, m_chk_margin;  // per run (CtrLevel.cpp run_margin_q)
   u64 m_rc_partial = 0, m_rc_retested = 0;
+  // per chunk the version of its runs' flags (moves when they may differ from its last draw), per
+  // draw the index ranges it submitted at a version (in m_dr_pool: start, count pairs)
+  std::vector<u32> m_chunk_rver;
+  u32 m_rver_next = 0;
+  struct DrawRanges {
+    u32 ver = 0, epoch = 0, at = 0, n = 0, drawn = 0;
+    u8 vista = 0;
+  };
+  static constexpr size_t kDrPool = 32768;
+  std::vector<DrawRanges> m_dr_cache;
+  std::vector<u32> m_dr_pool, m_dr_tmp;
+  u32 m_dr_epoch = 1;
+  u64 m_dr_hits = 0, m_dr_checked = 0, m_dr_bad = 0;
   std::vector<u8> m_vis_prev, m_lod_prev, m_tf_prev;
   std::vector<u32> m_g2c_first, m_g2c, m_t2c_first, m_t2c;
   const void* m_rc_lev = nullptr;
@@ -1629,6 +1642,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
     bool nofog;   // (AI-assisted) in front of where both fogs start (fog_stage_skip)
     bool tmorph;  // the tfrag geomorph: near or mid versions shown (the morph program)
     float floor;  // CtrLevelData::chunk_floor
+    u32 rver;     // its runs' flags version (m_chunk_rver; 0: its draw ranges not kept)
     float clip[16];
     ctr_mesh_matrix gpu;  // clip, converted for the GPU once per frame
   };

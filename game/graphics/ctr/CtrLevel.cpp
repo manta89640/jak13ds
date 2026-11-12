@@ -11382,6 +11382,9 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              m_rc_bad);
     m_rc_runs = m_rc_tested = m_rc_hits = m_rc_checked = m_rc_bad = 0;
     m_rc_partial = m_rc_retested = 0;
+    lg::info("[ctr] {}: draw ranges kept for {} draws; checked {}, {} differed", m_name,
+             m_dr_hits, m_dr_checked, m_dr_bad);
+    m_dr_hits = m_dr_checked = m_dr_bad = 0;
   }
   if (rs.log_now && m_vista_frames) {
     lg::info("[ctr] {}: vista {:.1f} chunks {:.0f} tris, low resolution chunks in near mode {:.1f} "
@@ -12600,6 +12603,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       m_rc_lev = &lev;
       m_rc_gen = lev.generation;
       m_run_cache.assign(lev.chunks.size(), RunCache());
+      m_chunk_rver.assign(lev.chunks.size(), 0);
+      m_dr_cache.assign(lev.draws.size(), DrawRanges());
+      m_dr_pool.clear();
+      m_dr_epoch++;
       m_raw_shown.assign(lev.vis_runs.size(), 0);
       m_raw_nomerge.assign(lev.vis_runs.size(), 0);
       m_g2c_first.clear();
@@ -12690,6 +12697,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       bool partly = false;
       bool tmorph = false;  // the tfrag geomorph: near or mid versions shown
       bool runs_valid = false;  // (AI-assisted) m_run_shown holds this chunk's runs
+      // the run cache: used for this chunk, its flags as at the chunk's last draw, changed after
+      // the run loop (prototypes, shrub fades)
+      bool runs_cached = false, runs_kept = false, runs_mod = false;
       // (AI-assisted) ties always; tfrag with the level's own string (not its low resolution
       // version), or every tier with a neighbour's (neighbour_vis)
       const bool vis_test = !vista_tier && m_vis && ch.vis_run_count &&
@@ -12773,13 +12783,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         };
         // the runs within moved of a plane tested again (the others keep their flags, their
         // margins less moved), rc's counts follow
-        auto runs_again = [&](RunCache& rc, float moved) {
+        auto runs_again = [&](RunCache& rc, float moved) -> u32 {
           u8* const sh = m_raw_shown.data();
           u16* const mg = m_raw_margin.data();
           const c3l::VisRun* const runs = lev.vis_runs.data();
           const auto* const spheres = lev.run_spheres.data();
           const float scale = ch.scale;
           float least = 3.0e38f;
+          u32 flips = 0;
           for (u32 r = r0; r < r0 + nr; r++) {
             const u16 q = mg[r];
             if (q == kRunUntested) {
@@ -12808,6 +12819,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             least = std::min(least, (float)nq * kRunMarginUnit);
             const u8 sn = (all >> 31) != 0;
             if (sn != sh[r]) {
+              flips++;
               sh[r] = sn;
               const u32 tris = runs[r].index_count / 3;
               const int dir = sn ? 1 : -1;
@@ -12824,6 +12836,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           }
           rc.seq = m_rc_seq;
           rc.margin = least;
+          return flips;
         };
         if (cacheable) {
           RunCache& rc = m_run_cache[ci];
@@ -12832,9 +12845,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           m_rc_tested += nr;
           const float moved =
               rc.key == m_run_key && rc.mode == mode && rc.nr == nr ? planes_moved(rc) : -1.f;
+          runs_cached = true;
           if (moved >= 0.f) {
+            runs_kept = true;
             if (!(moved < rc.margin)) {
-              runs_again(rc, moved);
+              runs_kept = runs_again(rc, moved) == 0;
               m_rc_partial++;
             } else {
               m_rc_hits++;
@@ -12899,6 +12914,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             m_proto_tris += m_run_shown[*it] ? lev.vis_runs[*it].index_count / 3 : 0;
             m_run_shown[*it] = 0;
             m_run_nomerge[*it] = 1;
+            runs_mod = true;
           }
         }
         shown = o.shown;
@@ -12968,6 +12984,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           }
         } else {
           cst = (u8)(all_near ? (cst & ~8) : (cst | 8));
+          runs_mod = true;
           if (!runs_valid) {
             for (u32 r = r0; r < r0 + nr; r++) {
               m_run_shown[r] = 1;
@@ -13120,6 +13137,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       vc.vista = vista_chunk;
       vc.tmorph = tmorph;
       vc.floor = cfloor;
+      // its runs' flags version (draw ranges kept per draw while it holds; 0: not kept this frame)
+      vc.rver = 0;
+      if (runs_cached && ci < m_chunk_rver.size()) {
+        if (!runs_kept || runs_mod) {
+          m_rver_next = m_rver_next + 1 ? m_rver_next + 1 : 1;
+          m_chunk_rver[ci] = m_rver_next;
+        }
+        vc.rver = runs_mod ? 0 : m_chunk_rver[ci];
+      }
       vc.band = 0;
       vc.nofog = false;
       // (AI-assisted) only read with early_depth (band) or fog_stage_skip (nofog)
@@ -14272,6 +14298,27 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // (<= 0.14 us each), so fewer, longer draws are cheaper (Haven City slums: -81 of ~890 draws
     // per frame for +4.1k of ~80k triangles; reports/gpuopt/run_gap.md). Was 48.
     const u32 kMaxGap = lev.chunks[vc.chunk].kind == c3l::CHUNK_KIND_VISTA ? 0 : 300;
+    // (the ranges of the chunk's last draws while its runs' flags hold: vc.rver)
+    const bool rcache = vc.rver && part == kPartAll && !tsplit && !srun && !vc.faded &&
+                        di < m_dr_cache.size();
+    bool rcheck = false;
+    if (rcache) {
+      const DrawRanges& rec = m_dr_cache[di];
+      if (rec.ver == vc.rver && rec.epoch == m_dr_epoch && rec.vista == (u8)vista_pass) {
+        if (!run_check_enabled()) {
+          const u32* const pool = m_dr_pool.data() + rec.at;
+          for (u32 k = 0; k < rec.n; k++) {
+            submit(pool[2 * k], pool[2 * k + 1]);
+          }
+          vista_indices += vista_pass ? rec.drawn : 0;
+          m_vis_tris += (dr.index_count - rec.drawn) / 3;
+          m_dr_hits++;
+          return;
+        }
+        rcheck = true;
+      }
+      m_dr_tmp.clear();
+    }
     u32 idx = dr.first_index, start = 0, len = 0, gap = 0, drawn = 0;
     bool open = false;
     const bool all_shown = !vc.partly;
@@ -14314,6 +14361,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         emit_split();
       } else if (part == kPartAll || !tmorph || part == kPartMoving) {
         submit(start, len);
+        if (rcache) {
+          m_dr_tmp.push_back(start);
+          m_dr_tmp.push_back(len);
+        }
       }
       drawn += len;
       vista_indices += vista_pass ? len : 0;
@@ -14381,6 +14432,25 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     if (part != kPartMoving) {
       m_vis_tris += (dr.index_count - drawn) / 3;
+    }
+    if (rcheck) {
+      const DrawRanges& rec = m_dr_cache[di];
+      m_dr_checked++;
+      m_dr_bad += rec.drawn != drawn || rec.n * 2 != m_dr_tmp.size() ||
+                  memcmp(m_dr_pool.data() + rec.at, m_dr_tmp.data(), m_dr_tmp.size() * 4) != 0;
+    } else if (rcache) {
+      if (m_dr_pool.size() + m_dr_tmp.size() > kDrPool) {
+        m_dr_pool.clear();
+        m_dr_epoch++;
+      }
+      DrawRanges& rec = m_dr_cache[di];
+      rec.ver = vc.rver;
+      rec.epoch = m_dr_epoch;
+      rec.at = (u32)m_dr_pool.size();
+      rec.n = (u32)m_dr_tmp.size() / 2;
+      rec.drawn = drawn;
+      rec.vista = (u8)vista_pass;
+      m_dr_pool.insert(m_dr_pool.end(), m_dr_tmp.begin(), m_dr_tmp.end());
     }
   };
   // (AI-assisted) The opaque draws that may use the early depth test first, nearest chunks first
