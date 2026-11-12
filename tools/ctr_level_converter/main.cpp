@@ -395,6 +395,15 @@ struct DrawKey {
            std::tie(o.mode, o.texture, o.kind, o.env, o.cond_bin);
   }
 };
+// A tie draw mode with blending Cs * As + Cs * (1 - As) (Jak II's ties): the source color, no
+// blending (the runtime draws it so): its opaque form, so that the back face marks and the vertex
+// cache order take it
+inline u32 opaque_tie_mode(DrawMode mode) {
+  if (mode.get_ab_enable() && mode.get_alpha_blend() == DrawMode::AlphaBlend::SRC_SRC_SRC_SRC) {
+    mode.disable_ab();
+  }
+  return mode.as_int();
+}
 // (AI-assisted, j2water2) a key made from dk: its env kept
 inline DrawKey key_like(const DrawKey& dk, u32 mode, u16 texture, u16 kind) {
   DrawKey k = dk;
@@ -2992,8 +3001,8 @@ struct Converter {
     for (u32 di = 0; di < tree.static_draws.size() && di < last_draw; di++) {
       const auto& d = tree.static_draws[di];
       const u16 tex = texture_id(d.tree_tex_id);
-      note_use(tex, d.mode.as_int(), false);
-      u32 key = key_id(DrawKey{d.mode.as_int(), tex, 1});
+      note_use(tex, opaque_tie_mode(d.mode), false);
+      u32 key = key_id(DrawKey{opaque_tie_mode(d.mode), tex, 1});
       const u32 plain_key = key;
       size_t idx = d.unpacked.idx_of_first_idx_in_full_buffer;
       for (auto& g : d.vis_groups) {
@@ -3076,8 +3085,8 @@ struct Converter {
         wind_tree_first.count(cur_tree) ? wind_tree_first[cur_tree] : (u32)UINT32_MAX;
     for (const auto& d : tree.instanced_wind_draws) {
       const u16 tex = texture_id(d.tree_tex_id);
-      note_use(tex, d.mode.as_int(), false);
-      u32 key = key_id(DrawKey{d.mode.as_int(), tex, 1});
+      note_use(tex, opaque_tie_mode(d.mode), false);
+      u32 key = key_id(DrawKey{opaque_tie_mode(d.mode), tex, 1});
       size_t idx = 0;
       for (const auto& g : d.instance_groups) {
         // (AI-assisted) v17: the instance's levels of detail
