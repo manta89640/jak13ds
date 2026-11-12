@@ -727,6 +727,28 @@ VtxModel& vtx_model(const CtrMercModelData& model, u32 gen) {
   m.model = &model;
   return m;
 }
+// the blend shape weights each vertex buffer of a model's own mesh holds (by buffer; models without
+// rewritten vertices of the game's: their positions are the weights' alone)
+struct BlercHeld {
+  const CtrMercModelData* model = nullptr;
+  std::array<float, c3l::kMercBlercWeights> w{};
+};
+std::unordered_map<const void*, BlercHeld> g_blerc_held;
+u32 g_blerc_gen = ~0u;
+bool blerc_held(const CtrMercModelData& model, int mesh, const float* w, u32 gen) {
+  if (g_blerc_gen != gen) {
+    g_blerc_held.clear();
+    g_blerc_gen = gen;
+  }
+  const auto it = g_blerc_held.find(ctr_gpu_mesh_vertices_drawn(mesh));
+  return it != g_blerc_held.end() && it->second.model == &model &&
+         !memcmp(it->second.w.data(), w, sizeof(float) * c3l::kMercBlercWeights);
+}
+void blerc_note(const CtrMercModelData& model, int mesh, const float* w) {
+  BlercHeld& h = g_blerc_held[ctr_gpu_mesh_vertices_drawn(mesh)];
+  h.model = &model;
+  memcpy(h.w.data(), w, sizeof(float) * c3l::kMercBlercWeights);
+}
 // The model's vertices for a rewrite of the mesh: the model's own mesh marked as rewritten this frame
 u8* vtx_vertices(const CtrMercModelData& model, int mesh, u32 gen) {
   if (mesh == model.mesh) {
@@ -761,7 +783,7 @@ VtxInstance vtx_instance(const CtrMercModelData& model, u64 frame, u32 gen) {
   const u32 need = model.vertex_count * (u32)sizeof(c3l::MercVertex) * 2 + (u32)model.indices.size() * 2;
   if (k - 1 < kVtxMaxCopies && m.base_frame == frame && model.vertex_count &&
       !model.indices.empty() && g_vtx.copy_bytes + need <= kVtxCopyBudget) {
-    const void* src = ctr_gpu_mesh_vertices(model.mesh);
+    const void* src = ctr_gpu_mesh_vertices_drawn(model.mesh);
     const int c = src ? ctr_gpu_skinned_mesh_create(src, (int)model.vertex_count,
                                                     model.indices.data(),
                                                     (int)model.indices.size())
@@ -1367,7 +1389,17 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       if (uses_blerc) {
         memcpy(weights, input + 32, sizeof(weights));
       }
-      apply_blerc(*lev, *model, mesh, weights);
+      // (the buffer drawn holds these weights already: a face that didn't move)
+      const bool held = !vi.always && mesh == model->mesh && model->mod.empty() &&
+                        blerc_held(*model, mesh, weights, m_levels->set_generation());
+      if (held) {
+        vtx_model(*model, m_levels->set_generation()).base_frame = rs.frame_idx;
+      } else {
+        apply_blerc(*lev, *model, mesh, weights);
+        if (mesh == model->mesh && model->mod.empty()) {
+          blerc_note(*model, mesh, weights);
+        }
+      }
       if (mesh == model->mesh) {
         model->blerc_moved = uses_blerc;
       }
