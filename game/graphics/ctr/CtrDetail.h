@@ -17,8 +17,6 @@ constexpr float kOldLodDistance = 200.f;  // meters (Jak II)
 constexpr float kOldTieScale = 1.5f;      // (Jak II)
 constexpr float kShrubBandK = 0.5f;
 constexpr float kTieFarMeters = 150.f;
-// Jak II: Haven City's far ties are most of its heaviest views (the title flight: -20k triangles)
-constexpr float kTieFarMetersJak2 = 120.f;
 
 // a distance limit of the floor (0: none): never under the config's one within ring 0
 inline float ring_limit(float floor_lim, float config_lim, float near_ring) {
@@ -78,8 +76,7 @@ inline Floor floor_of(float px, float lod, float tie, float draw_distance, bool 
     f.tie_distance_scale = (tie > 0 ? tie : draw / 100.f) > kOldTieScale ? kOldTieScale : tie;
   }
   f.shrub_far = kShrubBandK;
-  const float tie_far = jak2 ? kTieFarMetersJak2 : kTieFarMeters;
-  f.tie_far = draw > tie_far ? tie_far : 0.f;
+  f.tie_far = draw > kTieFarMeters ? kTieFarMeters : 0.f;
   return f;
 }
 
