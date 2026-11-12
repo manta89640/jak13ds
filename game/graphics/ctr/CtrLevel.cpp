@@ -5611,7 +5611,7 @@ void load_shrub_fade(c3l::Reader& f,
     for (u32 r = r0; r < r0 + ch.vis_run_count; r++) {
       if (bands[r]) {
         w = std::max(w, (float)(bands[r] & 0xffff));
-        x = std::min(x, (float)(bands[r] >> 16));
+        x = std::min({x, (float)(bands[r] >> 16), (bands[r] & 0xffff) / ctr_detail::kFadeBand});
       }
     }
     if (w > 0) {
@@ -12369,7 +12369,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         // per run bands (the PS2's x and w of its prototype), else the chunk's class band
         const bool banded = !lev.run_band.empty() && lev.chunk_band_x[ci] > 0;
         const float band_k = shrub_k * det * (1.f / 16.f) * 4096.f;
-        float near_lim = banded ? std::min(lev.chunk_band_x[ci] * shrub_k * det, lim)
+        float near_lim = banded ? std::min(lev.chunk_band_x[ci] * shrub_k * det,
+                                           lim / ctr_detail::kFadeBand)
                                 : lim * kShrubNearK;
         const float lim_c = lim;
         const float dcx = ch.bsphere[0] - cam.trans[0], dcy = ch.bsphere[1] - cam.trans[1],
@@ -12419,7 +12420,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
               float rl = lim_c, rn = near_lim, rb = chunk_band;
               if (b) {
                 rl = std::min((float)(b & 0xffff) * band_k, lim);
-                rn = std::min((float)(b >> 16) * band_k, rl);
+                // (a fade band of at least the limits' standard one: a PS2 x of w was a step)
+                rn = std::min((float)(b >> 16) * band_k, rl / ctr_detail::kFadeBand);
                 rb = 128.f / std::max(rl - rn, 1.f);
               }
               if (d > rn) {
