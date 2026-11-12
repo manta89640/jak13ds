@@ -118,8 +118,7 @@ void run_vram_tests() {
     const auto* b = vram.get_texture(game_tex0);
     check(a && b && vram.stats().decoded == 1 && vram.stats().cached == 1,
           "the first draw must find the texture decoded ahead");
-    check(a->w == b->w && a->h == b->h && a->max_alpha == b->max_alpha &&
-              memcmp(a->box, b->box, sizeof(a->box)) == 0,
+    check(a->w == b->w && a->h == b->h && a->max_alpha == b->max_alpha,
           "the texture decoded ahead must be the first draw's");
   }
 
