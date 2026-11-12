@@ -1137,8 +1137,9 @@ static void b4(int experiments) {
     bench_emitf("[bench] B4.cachenum read=%d value=0x%08lx", have, (unsigned long)orig);
   }
   static const int ks[] = {0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20};
-  const int settings[3] = {-1, 0x04, 0x84};
-  for (int si = 0; si < 3 && !B.dead; si++) {
+  /* the documented values first, then sizes nobody documents (a hang there is the bench's last) */
+  const int settings[] = {-1, 0x04, 0x84, 0x08, 0x10, 0x20};
+  for (unsigned si = 0; si < sizeof(settings) / sizeof(settings[0]) && !B.dead; si++) {
     const int s = settings[si];
     if ((s >= 0) != (experiments != 0)) {
       continue;
@@ -1161,7 +1162,11 @@ static void b4(int experiments) {
       }
       GSPGPU_FlushDataCache(idx, B4_INDICES * sizeof(u16));
       char id[40];
-      snprintf(id, sizeof(id), "B4.%s.k%d", s < 0 ? "cdef" : (s == 0x04 ? "c04" : "c84"), k);
+      if (s < 0) {
+        snprintf(id, sizeof(id), "B4.cdef.k%d", k);
+      } else {
+        snprintf(id, sizeof(id), "B4.c%02x.k%d", s, k);
+      }
       bench_start(id);
       fb_begin(B.t0);
       plain_state();
@@ -1178,6 +1183,30 @@ static void b4(int experiments) {
       run_list(3, &m);
       put_meas(id, B4_INDICES, 3, &m, "");
     }
+  }
+  /* the same vertices as strips: one new vertex per triangle whatever the cache holds */
+  for (int arr = 0; arr < 2 && !experiments && !B.dead; arr++) {
+    for (int i = 0; i < B4_INDICES; i++) {
+      idx[i] = (u16)(i % B4_VERTS);
+    }
+    GSPGPU_FlushDataCache(idx, B4_INDICES * sizeof(u16));
+    const char* id = arr ? "B4.strip.arrays" : "B4.strip.indexed";
+    bench_start(id);
+    fb_begin(B.t0);
+    plain_state();
+    use_basic(&B.m_geo, L_SHORT);
+    vbuf(verts, L_SHORT);
+    C3Di_UpdateContext();
+    for (int d = 0; d < B4_INDICES / 30000; d++) {
+      if (arr) {
+        C3D_DrawArrays(GPU_TRIANGLE_STRIP, 0, B4_VERTS);
+      } else {
+        C3D_DrawElements(GPU_TRIANGLE_STRIP, 30000, C3D_UNSIGNED_SHORT, idx + d * 30000);
+      }
+    }
+    Meas m;
+    run_list(3, &m);
+    put_meas(id, arr ? (B4_INDICES / 30000) * B4_VERTS : B4_INDICES, 3, &m, "");
   }
   if (experiments && have && !B.dead) {
     fb_begin(B.t0);

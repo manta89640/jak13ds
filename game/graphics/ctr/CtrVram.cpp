@@ -473,6 +473,47 @@ void CtrVram::write_ct32(const u8* data, u32 dest_block, u32 width, u32 height) 
 }
 
 void CtrVram::note_tex_info(const u8* tpage, s32 count, const u8* ee_mem, u32 s7_ptr) {
+  // the page's notes, as made at its last upload while nothing was linked since
+  NoteCache* nc = nullptr;
+#ifndef __3DS__
+  // host env CTR_NOTE_CHECK: a page with notes kept reads its records again, and they must match
+  static const bool check = getenv("CTR_NOTE_CHECK") != nullptr;
+  static u64 checked = 0, differed = 0;
+  std::vector<NoteEntry> kept;
+#else
+  constexpr bool check = false;
+#endif
+  if (m_epoch) {
+    nc = &m_note_cache[tpage];
+    if (nc->keep && nc->epoch == *m_epoch && nc->count == count && check) {
+#ifndef __3DS__
+      kept = nc->e;
+      checked++;
+#endif
+    } else if (nc->keep && nc->epoch == *m_epoch && nc->count == count) {
+      for (const auto& x : nc->e) {
+        m_tex_info[x.dest0] = x.info;
+        if (m_jak2_remap) {
+          m_remap[x.dest0] = x.remap;
+          m_tex_ptr[x.dest0] = x.ptr;
+          m_ee_mem = ee_mem;
+        }
+      }
+      m_stats.notes_cached++;
+      return;
+    }
+    nc->epoch = *m_epoch;
+    nc->count = count;
+    nc->e.clear();
+    // (font pages: setup-font-texture changes their records without a link)
+    u32 name_ptr;
+    memcpy(&name_ptr, tpage + offsetof(GoalTexturePageHeader, name_ptr), 4);
+    nc->keep = name_ptr && (u64)name_ptr + 68 < (u64)EE_MAIN_MEM_SIZE &&
+               !strstr(std::string((const char*)(ee_mem + name_ptr + 4),
+                                   strnlen((const char*)(ee_mem + name_ptr + 4), 63))
+                           .c_str(),
+                       "font");
+  }
   const u8* offsets = nullptr;
   if (m_jak2_remap) {
     // the page's dest offsets by texture index: a table search per texture, made once per page
@@ -507,20 +548,45 @@ void CtrVram::note_tex_info(const u8* tpage, s32 count, const u8* ee_mem, u32 s7
       memcpy(&h, t + offsetof(GoalTexture, h), 2);
       memcpy(&clutpsm, t + offsetof(GoalTexture, clutpsm), 2);
       memcpy(&clut_dest, t + offsetof(GoalTexture, clut_dest), 2);
-      m_tex_info[dest0] = TexInfo{(u16)w, (u16)h, t[offsetof(GoalTexture, psm)],
-                                  t[offsetof(GoalTexture, width)], clutpsm, clut_dest};
+      const TexInfo info{(u16)w, (u16)h, t[offsetof(GoalTexture, psm)],
+                         t[offsetof(GoalTexture, width)], clutpsm, clut_dest};
+      m_tex_info[dest0] = info;
+      u8 remap = 0;
       if (m_jak2_remap) {
         // (AI-assisted) Jak II: the PC port moved this texture's dest by a few blocks
         // (__pc-get-tex-remap, so no two textures share an address); its data is where the
         // page put it, offset blocks lower
-        m_remap[dest0] = offsets[i];
+        remap = offsets[i];
+        m_remap[dest0] = remap;
         // (AI-assisted) where the texture record is: setup-font-texture changes the font
         // textures' height before relocating them (see relocate)
         m_tex_ptr[dest0] = ptr;
         m_ee_mem = ee_mem;
       }
+      if (nc && nc->keep) {
+        nc->e.push_back(NoteEntry{dest0, remap, info, ptr});
+      }
     }
   }
+  // (kept only if nothing was linked while the records were read)
+  if (nc && *m_epoch != nc->epoch) {
+    nc->keep = false;
+  }
+#ifndef __3DS__
+  if (check && !kept.empty()) {
+    bool same = kept.size() == nc->e.size();
+    for (size_t k = 0; same && k < kept.size(); k++) {
+      const auto &a = kept[k], &b = nc->e[k];
+      same = a.dest0 == b.dest0 && a.remap == b.remap && a.ptr == b.ptr && a.info.w == b.info.w &&
+             a.info.h == b.info.h && a.info.psm == b.info.psm && a.info.width == b.info.width &&
+             a.info.clutpsm == b.info.clutpsm && a.info.clutdest == b.info.clutdest;
+    }
+    differed += !same;
+    if (checked % 2000 == 0) {
+      lg::info("[ctr vram] note check: {} pages checked, {} differed", checked, differed);
+    }
+  }
+#endif
 }
 
 void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u32 s7_ptr) {

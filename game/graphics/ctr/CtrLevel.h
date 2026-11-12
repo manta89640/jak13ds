@@ -404,12 +404,23 @@ struct CtrLevelData {
     u8 wa[8] = {};
     u32 keep_alpha = 0xff000000u;
     // "light" palettes: used by few colors (the lamps, the lava glow: the game moves their weights
-    // every frame); per chunk its vertices with a light color (by the light palettes they use),
-    // rewritten alone when only those move
+    // every frame). Their entries in a compact table blended once per move (tod_light_refresh:
+    // per color its day palettes' sums, made again when a day palette moves, plus its light
+    // palettes' rgb), and per chunk its light vertices by that table, written whole or only the
+    // changed ones when a light palette moves (tod_light_write)
     u32 light_mask = 0;  // palette bits
     u32 light_color_count = 0;
-    using LightList = CtrLightLists;
-    std::unordered_map<u32, LightList> chunk_lights;
+    u32 lslots = 0;              // light palettes among the colors' slots
+    u8 lslot[8] = {};            // their slots
+    u32 lcolors = 0;             // the compact table: lcolors colors, then their TodMuls
+    std::vector<u32> lent;       // per compact entry its table entry (ascending)
+    std::vector<u16> lmul_color; // per TodMul of it: its color's compact entry
+    std::vector<u8> lrows;       // per color lslots x rgb
+    std::vector<u32> lday;       // per color its day palettes' r, g, b sums
+    std::vector<u32> lrgb;       // per compact entry its rgba at version lrgb_ver
+    std::vector<u8> lchg;        // per compact entry: changed at that refresh
+    u32 lday_ver = 0, lrgb_ver = 0, lprev_ver = 0;
+    std::vector<u32> light_items;  // light vertices: vertex | compact entry << 16, per chunk
     // weights (64 = 1.0): the game's at the level's last draw, the table's
     u8 weights[8][3] = {};
     u8 target_w[8][3] = {};
@@ -443,19 +454,21 @@ struct CtrLevelData {
     std::vector<u32> chunk_group_first;
     std::vector<u16> chunk_group_count;
     std::vector<u16> run_group;  // per run (CtrLevelData::vis_runs): its group in the chunk
-    std::vector<u32> chunk_min_ver, chunk_min_dver, chunk_light_ver;
-    std::vector<u8> chunk_mask, chunk_scanned;
-    std::vector<int> chunk_mesh;
+    // per chunk in one record (a level draw reads it once per chunk drawn)
+    struct ChunkTod {
+      int mesh = -1;
+      u32 min_ver = 0, light_ver = 0;
+      u32 light_first = 0, light_n = 0;  // its light vertices in light_items
+      u8 mask = 0, scanned = 0;
+    };
+    std::vector<ChunkTod> ch;
     // the title's fast day: per chunk its vertices' table entries (CtrLevel.cpp tod_entries), so a
     // whole rewrite reads 2 bytes a vertex, not its 12-byte record; gone with the title or the mesh
     std::vector<std::unique_ptr<u16[]>> chunk_entries;
     u32 entries_bytes = 0;
     u32 bytes() const {
-      u32 lights = 0;
-      for (const auto& [ci, l] : chunk_lights) {
-        lights += (u32)(l.verts.size() * 2 + l.masks.size() * 8 + l.runs.size() * 4 +
-                        l.ranges.size() * 4) + 96;
-      }
+      const u32 lights = (u32)(light_items.size() * 4 + lent.size() * 13 +
+                               lmul_color.size() * 2 + lrows.size() + lday.size() * 4);
       return (u32)(colors.size() + muls.size() * sizeof(c3l::TodMul) + color_mask.size() +
                    table.size() * 8 + cver.size() * 4 + group_list.size() * 4 + akind.size() +
                    akinds.size() * 13 +
@@ -1449,6 +1462,8 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_proto_tris = 0, m_proto_frames = 0;  // statistics: triangles hidden, level draws
   void draw_level(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRenderState& rs);
   void flush_calls(int pass);
+  void run_cache_states(const CtrLevelData& lev, const std::vector<u8>& cur, std::vector<u8>& prev,
+                        std::vector<u32>& first, std::vector<u32>& list, u8 kind);
   void log_stats(const CtrRenderState& rs, CtrLevelData* lev);  // (AI-assisted) the log lines
   int m_jak2_slot = -1;  // (AI-assisted) Jak II: the level slot being drawn (-1: Jak 1)
   // (AI-assisted, j2cull) draw_level's phases (ticks summed since the last log line): setup, the
@@ -1534,6 +1549,47 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // of its group (hidden, and never drawn along with neighbouring runs); statistics: groups at
   // their near version, triangles drawn of near / far versions (over m_lod_frames level draws)
   std::vector<u8> m_run_nomerge;
+  // Incremental run state: per chunk the run loop's last result for the chunk within the planes
+  // (its runs' flags in m_raw_*), kept while its inputs hold: the visibility string's bytes
+  // (m_run_key moves when they change) and its LOD groups' states (a changed group clears its
+  // chunks' keys through m_g2c / m_t2c, groups to chunks)
+  // A chunk crossing planes keeps it while the planes moved less (over its sphere) than its runs'
+  // smallest distance to them at the evaluation (m_plane_ring: the planes of the last frames).
+  struct RunCache {
+    u32 key = 0;
+    u32 nr = 0;
+    u32 shown = 0, lod_hid = 0, lt0 = 0, lt1 = 0, view_hidden = 0, view_tris = 0;
+    u32 seq = 0;
+    float margin = 0;
+    u8 mode = 0, cross = 0;
+  };
+  static constexpr u32 kPlaneRing = 32;
+  float m_plane_ring[kPlaneRing][4][4] = {};
+  u32 m_rc_seq = 0;
+  std::vector<RunCache> m_run_cache;
+  std::vector<u8> m_raw_shown, m_raw_nomerge, m_chk_shown, m_chk_nomerge;
+  std::vector<u16> m_raw_margin, m_chk_margin;  // per run (CtrLevel.cpp run_margin_q)
+  u64 m_rc_partial = 0, m_rc_retested = 0;
+  // per chunk the version of its runs' flags (moves when they may differ from its last draw), per
+  // draw the index ranges it submitted at a version (in m_dr_pool: start, count pairs)
+  std::vector<u32> m_chunk_rver;
+  std::vector<u8> m_run_synced;  // per chunk: m_run_shown / m_run_nomerge hold its raw flags
+  u32 m_rver_next = 0;
+  struct DrawRanges {
+    u32 ver = 0, epoch = 0, at = 0, n = 0, drawn = 0;
+    u8 vista = 0;
+  };
+  static constexpr size_t kDrPool = 32768;
+  std::vector<DrawRanges> m_dr_cache;
+  std::vector<u32> m_dr_pool, m_dr_tmp;
+  u32 m_dr_epoch = 1;
+  u64 m_dr_hits = 0, m_dr_checked = 0, m_dr_bad = 0;
+  std::vector<u8> m_vis_prev, m_lod_prev, m_tf_prev;
+  std::vector<u32> m_g2c_first, m_g2c, m_t2c_first, m_t2c;
+  const void* m_rc_lev = nullptr;
+  u32 m_rc_gen = ~0u, m_run_key = 1;
+  bool m_rc_vis = false;
+  u64 m_rc_hits = 0, m_rc_runs = 0, m_rc_tested = 0, m_rc_bad = 0, m_rc_checked = 0;
   // per run of the level being drawn: a shrub run's fade (0x80: opaque), read for faded chunks
   std::vector<u8> m_run_fade;
   // the faded shrub runs' draws (blend FIX with their fade), after the opaque level draws
@@ -1590,6 +1646,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
     bool nofog;   // (AI-assisted) in front of where both fogs start (fog_stage_skip)
     bool tmorph;  // the tfrag geomorph: near or mid versions shown (the morph program)
     float floor;  // CtrLevelData::chunk_floor
+    u32 rver;     // its runs' flags version (m_chunk_rver; 0: its draw ranges not kept)
     float clip[16];
     ctr_mesh_matrix gpu;  // clip, converted for the GPU once per frame
   };

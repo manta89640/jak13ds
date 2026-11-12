@@ -102,6 +102,8 @@ struct CtrSettings {
   // in gk.log and data/log/bench.txt, platform/3ds/tools/bench_report.py). Its last tests use
   // shaders never run on hardware: a hang there names the test in bench.txt. Hardware only.
   bool pica_bench = false;
+  // pica_bench = once: only at the first boot (data/log/bench_once.txt marks it, written first)
+  bool pica_bench_once = false;
   // (AI-assisted) 3DS hardware features (docs/3ds-port/config_ini.md):
   // sprite and HUD textures in the smallest 3DS format that holds them (8 / 16 bits per texel)
   bool compact_textures = true;

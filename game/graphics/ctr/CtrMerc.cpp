@@ -384,7 +384,13 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     }
     auto init = dma.read_and_advance();
     while (init.vifcode1().kind == VifCode::Kind::PC_PORT) {
+#ifdef CTR_PROBES
+      const u64 pr0 = ctr_gpu_ticks();
       handle_model(init, rs);
+      ctr_gpu_probe_add(13, ctr_gpu_ticks() - pr0);
+#else
+      handle_model(init, rs);
+#endif
       // (AI-assisted) the links after a model: 2 in Jak 1, 1 in Jak II (Merc2 skip_count)
       for (int i = 0; i < m_links && dma.current_tag_offset() != rs.next_bucket; i++) {
         dma.read_and_advance();
@@ -1847,6 +1853,12 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
 }
 
 void CtrMercRenderer::flush_draws(size_t n_sorted) {
+#ifdef CTR_PROBES
+  struct Probe {
+    u64 t0 = ctr_gpu_ticks();
+    ~Probe() { ctr_gpu_probe_add(14, ctr_gpu_ticks() - t0); }
+  } probe;
+#endif
   if (m_q.empty()) {
     return;
   }

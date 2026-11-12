@@ -265,12 +265,12 @@ void CtrSpriteRenderer::log_slow_frame(CtrRenderState& rs,
           "[ctr] sprite build {:.1f} ms (distort {:.1f} ms; {} frames over 3 ms since the last "
           "line): {} 2d, {} hud, {} 3d, {} distort sprites, {} draws; "
           "textures {} decoded, {} revived, {} cached lookups; VRAM chunks {} written, {} already "
-          "there; {} page uploads this frame",
+          "there; {} page uploads this frame ({} of {} so far with cached texture notes)",
           ms, m_distort_ms, m_slow_frames, s.sprites_2d - s0.sprites_2d,
           s.sprites_hud - s0.sprites_hud, s.sprites_3d - s0.sprites_3d, s.distort - s0.distort,
           s.draws - s0.draws, v.decoded - v0.decoded, v.revived - v0.revived,
           v.cached - v0.cached, v.chunks_written - v0.chunks_written,
-          v.chunks_skipped - v0.chunks_skipped, frame_uploads);
+          v.chunks_skipped - v0.chunks_skipped, frame_uploads, v.notes_cached, v.uploads);
       m_slow_frames = 0;
     }
   }

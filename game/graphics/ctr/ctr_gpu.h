@@ -709,6 +709,8 @@ void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix
 /* (AI-assisted) the cache flush statistics line since the last call ([ctr] gpu flushes ...);
  * 0: nothing to say */
 int ctr_gpu_micro_line(char* out, int size);
+/* (AI-assisted) CTR_PROBES builds: ticks of part k of the draws (ctr_gpu_citro3d.c PR_*) */
+void ctr_gpu_probe_add(int k, uint64_t ticks);
 
 void ctr_gpu_ocean_end(void);
 
@@ -775,6 +777,8 @@ typedef struct {
    * frames it finished since the last frame end (gpu_busy_frames of them; 0 without frame_pacing =
    * steady, whose fence marks a frame done): done(N) - max(first work handed over(N), done(N-1)) */
   float gpu_wait_ms;
+  /* a full running GX queue drained (in gpu_wait_ms) */
+  int queue_drains;
   float gpu_busy_ms;
   int gpu_busy_frames;
   /* (AI-assisted) the same frames from the moment their command list was handed to the GPU

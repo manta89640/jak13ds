@@ -827,6 +827,10 @@ vf31: cam 0 (premultiplied by hmge)
   (none)
   )
 
+(#when TARGET_3DS
+  (define *sky-light-frame* 0)
+  )
+
 (defmethod draw ((this sky-work))
   ;; og:preserve-this
   (update-pc-sky-scaling)
@@ -857,8 +861,21 @@ vf31: cam 0 (premultiplied by hmge)
            (update-matrix this a1-7)
            )
          (update-template-colors this)
-         (adjust-haze-lighting this)
-         (adjust-cloud-lighting this)
+         ;; og:preserve-this 3DS: the haze and cloud vertices' lighting (time of day and sun only,
+         ;; kept in sky-work) on every other frame
+         (#if TARGET_3DS
+           (begin
+             (set! *sky-light-frame* (+ *sky-light-frame* 1))
+             (when (logtest? *sky-light-frame* 1)
+               (adjust-haze-lighting this)
+               (adjust-cloud-lighting this)
+               )
+             )
+           (begin
+             (adjust-haze-lighting this)
+             (adjust-cloud-lighting this)
+             )
+           )
          (let ((s4-0 (the-as object *fake-scratchpad-data*))
                ;; og:preserve-this 3DS: the renderer makes the stars (pc-sky-3ds-stars)
                (packets? (#if TARGET_3DS (pc-sky-3ds?) #f))

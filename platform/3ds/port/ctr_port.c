@@ -96,6 +96,8 @@ void ctr_port_set_gpu_active(int active) {
 }
 static int s_irrst = 0;
 static int s_cpu_limit = 0; /* the app got a share of core 1 (APT_SetAppCpuTimeLimit) */
+static int s_cpu_first = 0;      /* the share asked for first */
+static Result s_cpu_first_rc = 0; /* and its result */
 static int s_sound = 0;
 static int s_sound_core = 1; /* see ctr_platform_init */
 static u32* s_soc_buffer = NULL;
@@ -1589,6 +1591,29 @@ int ctr_core1_share(void) {
   return s_cpu_limit;
 }
 
+static void core_probe_thread(void* arg) {
+  *(volatile int*)arg = 1;
+}
+
+/* what the console grants: the first core 1 share's result and whether core 3 takes a thread */
+void ctr_core_probe(char* out, unsigned int size) {
+  u32 got = 0;
+  APT_GetAppCpuTimeLimit(&got);
+  volatile int ran = 0;
+  int core3 = -1;
+  if (ctr_is_new3ds()) {
+    Thread t = threadCreate(core_probe_thread, (void*)&ran, 4096, 0x30, 3, false);
+    core3 = t ? 1 : 0;
+    if (t && R_SUCCEEDED(threadJoin(t, 1000000000ULL)) && ran) {
+      threadFree(t); /* (one that never ran keeps its stack) */
+    }
+  }
+  snprintf(out, size, "core 1 share: asked %d%% first -> %08lx, now %lu%%; core 3 thread: %s%s",
+           s_cpu_first, (unsigned long)s_cpu_first_rc, (unsigned long)got,
+           core3 < 0 ? "not tried" : core3 ? "created" : "refused",
+           core3 == 1 ? (ran ? ", ran" : ", never ran") : "");
+}
+
 int ctr_core1_enable(void) {
   /* 30% if 80% is refused; without any share, ctr_thread_create_pinned refuses core 1.
    * (AI-assisted, j2-sound) On New 3DS 40% first: only the sound mixer runs there (11-17% of
@@ -1597,7 +1622,9 @@ int ctr_core1_enable(void) {
    * 80% first. */
   if (!s_cpu_limit) {
     const int first = ctr_is_new3ds() ? 40 : 80;
-    s_cpu_limit = R_SUCCEEDED(APT_SetAppCpuTimeLimit(first))  ? first
+    s_cpu_first = first;
+    s_cpu_first_rc = APT_SetAppCpuTimeLimit(first);
+    s_cpu_limit = R_SUCCEEDED(s_cpu_first_rc)               ? first
                   : R_SUCCEEDED(APT_SetAppCpuTimeLimit(30)) ? 30
                                                              : 0;
   }
