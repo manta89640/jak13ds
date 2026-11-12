@@ -873,7 +873,8 @@ static void use_program(int prog) {
     }
     if (prog == PROG_MESH_MORPH || prog == PROG_MESH_MORPH_FA) {
       AttrInfo_AddLoader(attr, 3, GPU_BYTE, 4); /* c3l::MorphVertex delta, row */
-      AttrInfo_AddLoader(attr, 4, GPU_BYTE, 4); /* delta2, pad */
+      AttrInfo_AddLoader(attr, 4, GPU_BYTE, 4); /* delta2, color */
+      AttrInfo_AddLoader(attr, 5, GPU_UNSIGNED_BYTE, 4); /* the color target word */
       memset(g.morph_slot_id, 0, sizeof(g.morph_slot_id));
     }
     if (prog == PROG_TFRAG_MORPH || prog == PROG_TFRAG_MORPH_FA) {
@@ -6250,8 +6251,8 @@ void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n) {
     const ctr_mesh_call* c = &calls[i];
     if (c->morph_rows) {
       ctr_gpu_draw_mesh_morph(c->state, c->matrix, c->morph_rows, c->morph_list, c->morph_list_n,
-                              c->morph_id, c->mesh, c->morph_offset, c->first_index,
-                              c->index_count);
+                              c->morph_id, c->mesh, c->morph_offset, c->morph_color_offset,
+                              c->first_index, c->index_count);
     } else if (c->tmorph) {
       ctr_gpu_draw_mesh_tmorph(c->state, c->matrix, c->tmorph, c->morph_id, c->mesh,
                                c->tmorph_offset, c->first_index, c->index_count);
@@ -6321,10 +6322,11 @@ int ctr_gpu_wind_ready(void) {
  * they change. Without the program: at rest. */
 void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                              const float* rows, const uint8_t* list, int list_n, uint32_t rows_id,
-                             int mesh, int morph_offset, int first_index, int index_count) {
+                             int mesh, int morph_offset, int color_offset, int first_index,
+                             int index_count) {
   if (!g.ready || !g.in_frame || !g.ps->morph_ok || !rows || list_n < 0 || !rows_id ||
-      morph_offset < 0 || (morph_offset & 15) || mesh < 0 || mesh >= MAX_MESHES ||
-      g.meshes[mesh].used != 1) {
+      morph_offset < 0 || (morph_offset & 15) || color_offset < 0 || (color_offset & 3) ||
+      mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 || g.meshes[mesh].col_off) {
     ctr_gpu_draw_mesh_prepared(state, matrix, mesh, first_index, index_count);
     return;
   }
@@ -6349,14 +6351,12 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
      * after raw_sync: a program switch makes citro3d send its own copies first) */
     apply_state(state, mesh_mode);
     const u32 rec_pa = ms->verts_pa + (u32)morph_offset;
-    if (!ms->col_off) {
-      const u32 w[2][3] = {{ms->verts_pa, 0x210, RAW_BUF_FLAGS1(16, 3, 0)},
-                           {rec_pa, 0x43, RAW_BUF_FLAGS1(8, 2, 0)}};
-      raw_vertex_buffers_n(2, w);
-    } else {
-      const u32 w[3][3] = {{ms->verts_pa, 0x10, RAW_BUF_FLAGS1(12, 2, 0)},
-                           {ms->verts_pa + ms->col_off, 0x2, RAW_BUF_FLAGS1(4, 1, 0)},
-                           {rec_pa, 0x43, RAW_BUF_FLAGS1(8, 2, 0)}};
+    {
+      /* the color targets (attribute 5); none: the vertices' own colors (no change) */
+      const u32 w[3][3] = {{ms->verts_pa, 0x210, RAW_BUF_FLAGS1(16, 3, 0)},
+                           {rec_pa, 0x43, RAW_BUF_FLAGS1(8, 2, 0)},
+                           {color_offset ? ms->verts_pa + (u32)color_offset : ms->verts_pa + 12u,
+                            0x5, RAW_BUF_FLAGS1(color_offset ? 4 : 16, 1, 0)}};
       raw_vertex_buffers_n(3, w);
     }
     raw_sync();
@@ -6364,14 +6364,18 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
     u32* p = raw_ptr();
     if (!g.morph_slot_id[0]) {
       g.morph_slot_id[0] = 1;
-      const u32 z[4] = {0, 0, 0, 0};
+      const float w = 1.0f / 255.0f; /* (the color's factors: c / 255) */
+      u32 z[4] = {0, 0, 0, 0};       /* w z y x */
+      memcpy(&z[0], &w, 4);
       p = raw_unif(p, g.ps->uloc_morph, z, 4, 1);
     }
     for (int i = 0; i < list_n; i++) {
       const int r = list[i];
       if (r > 0 && r < CTR_MORPH_ROWS && g.morph_slot_id[r] != rows_id) {
         g.morph_slot_id[r] = rows_id;
-        u32 v[4] = {0, 0, 0, 0}; /* w z y x */
+        u32 v[4]; /* w z y x */
+        memcpy(&v[0], &rows[4 * r + 3], 4);
+        memcpy(&v[1], &rows[4 * r + 2], 4);
         memcpy(&v[2], &rows[4 * r + 1], 4);
         memcpy(&v[3], &rows[4 * r], 4);
         p = raw_unif(p, g.ps->uloc_morph + r, v, 4, 1);

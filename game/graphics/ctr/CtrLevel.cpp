@@ -4419,6 +4419,59 @@ u32 tf_morph_colors(CtrLevelData& lev, size_t ci, const u8* shown) {
   return written;
 }
 
+// The tie geomorph's color targets (c3l::MorphChunk::colors): each vertex's target rgb (the mean
+// of two of the chunk's palette colors) in chunk ci's tail, when a palette its colors use moved
+// since they were written. Returns the vertices written.
+u32 tie_morph_colors(CtrLevelData& lev, size_t ci) {
+  auto& t = *lev.tod;
+  const int mesh = ci < lev.meshes.size() ? lev.meshes[ci] : -1;
+  if (mesh < 0 || !t.blended_valid || !lev.morph_colored(ci)) {
+    return 0;
+  }
+  auto& mc = lev.morph_colors[lev.chunk_morph[ci]];
+  const u32 nt = (u32)t.table.size();
+  if (mc.mesh != mesh) {
+    mc.mesh = mesh;
+    mc.ver = 0;
+  }
+  if (!(mc.mask & 0x100)) {
+    u32 m = 0x100;
+    for (u32 i = mc.first; i < mc.first + mc.count; i++) {
+      const u16 e = lev.morph_palette[i];
+      m |= e < t.color_mask.size() ? t.color_mask[e] : 0xff;
+    }
+    mc.mask = m;
+  }
+  if (mc.ver && mc.ver >= t.lut[mc.mask & 0xff]) {
+    return 0;
+  }
+  int n = 0;
+  u8* const base = (u8*)ctr_gpu_mesh_vertices_inplace(mesh, &n);
+  if (!base || (u32)n != lev.chunks[ci].vertex_count) {
+    return 0;
+  }
+  mc.ver = std::max<u32>(t.ver, 1);
+  const u8* const rec = base + lev.normals_offset_in_mesh(ci);
+  tod_word* const col = (tod_word*)(base + lev.morph_colors_offset(ci));
+  u32 pal[256];
+  for (u32 i = 0; i < 256; i++) {
+    const u32 e = i < mc.count ? lev.morph_palette[mc.first + i] : nt;
+    pal[i] = e < nt ? tod_entry(t, e) : 0u;
+  }
+  auto avg = [](u32 a, u32 b) { return (a & b) + (((a ^ b) & 0xfefefefeu) >> 1); };
+  u32 written = 0;
+  for (u32 v = 0; v < (u32)n; v++) {
+    const u32 w = col[v], a = rec[8 * v + 7], b = w >> 24;
+    if (a >= mc.count || b >= mc.count) {
+      continue;
+    }
+    col[v] = (w & 0xff000000u) | (avg(pal[a], pal[b]) & 0xffffffu);
+    written++;
+  }
+  tod_dirty().emplace_back((uintptr_t)col, (uintptr_t)(col + n));
+  return written;
+}
+
 // After a level draw's tod_recolor calls: the rewritten vertices' cache flushes (the ranges sorted
 // and merged where less than 64 KB apart: a few ctr_gpu_flush_range per frame rather than one per
 // chunk, see ctr_gpu_citro3d.c DEFER_GAP2).
@@ -5361,6 +5414,9 @@ void load_morph(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   lev->morph_chunks.clear();
   lev->chunk_morph.clear();
   lev->draw_morph_rows.clear();
+  lev->morph_colors.clear();
+  lev->morph_band1.clear();
+  lev->morph_palette.clear();
   c3l::ExtHeader eh;
   if (!hdr.ext_offset || lev->lod_groups.empty() || !read_ext_header(f, hdr, &eh) ||
       eh.size < c3l::kExtHeaderMorphSize) {
@@ -5375,6 +5431,29 @@ void load_morph(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
             f.read_array(em.rows_offset, em.row_count, &lev->morph_rows) &&
             f.read_array(em.draw_rows_offset, em.draw_rows_size, &lev->morph_draw_rows) &&
             f.read_array(em.group_mid_offset, (u32)lev->lod_groups.size(), &lev->group_mid);
+  // the color targets: each chunk's palette from its first to the next chunk's
+  lev->morph_colors.assign(lev->morph_chunks.size(), {});
+  u32 np = 0;
+  const u32 nf = (em.inst_count + 3) & ~3u;
+  if (ok && em.colors_offset && f.read(em.colors_offset + nf, &np, 4) && np) {
+    ok = f.read_array(em.colors_offset, em.inst_count, &lev->morph_band1) &&
+         f.read_array(em.colors_offset + nf + 4, np, &lev->morph_palette);
+    for (size_t i = 0; ok && i < lev->morph_chunks.size(); i++) {
+      const u32 c = lev->morph_chunks[i].colors;
+      if (!c || c - 1 >= np) {
+        continue;
+      }
+      u32 end = np;
+      for (size_t j = i + 1; j < lev->morph_chunks.size(); j++) {
+        if (lev->morph_chunks[j].colors) {
+          end = std::min<u32>(end, lev->morph_chunks[j].colors - 1);
+          break;
+        }
+      }
+      lev->morph_colors[i].first = c - 1;
+      lev->morph_colors[i].count = end > c - 1 ? std::min<u32>(end - (c - 1), 255) : 0;
+    }
+  }
   lev->chunk_morph.assign(lev->chunks.size(), -1);
   lev->draw_morph_rows.assign(lev->draws.size(), UINT32_MAX);
   for (size_t i = 0; ok && i < lev->morph_chunks.size(); i++) {
@@ -5413,6 +5492,8 @@ void load_morph(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
     lev->morph_chunks.clear();
     lev->chunk_morph.clear();
     lev->draw_morph_rows.clear();
+    lev->morph_colors.clear();
+    lev->morph_band1.clear();
     return;
   }
   size_t groups = 0;
@@ -12032,7 +12113,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     };
     lev.morph_k = kd;
 #ifndef __3DS__
-    // host A/B, env CTR_MORPH_AB: on odd frames 1 every morph group's near version, 2 no morph
+    // host A/B, env CTR_MORPH_AB: on odd frames 1 every morph group's near version, 2 no morph; 3
+    // the far-plane switch of every group (odd frames the mid version morphed through, even the far)
     static const int morph_ab = getenv("CTR_MORPH_AB") ? atoi(getenv("CTR_MORPH_AB")) : 0;
 #endif
     // (AI-assisted, j2cull) cluster by cluster (CtrLevelData::CullCluster): a cluster beyond every
@@ -12078,18 +12160,21 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if (morph_on && lev.group_mid[g] > 0) {
         // the PS2's rule (c3l::ExtMorph) by the group's nearest point (its sphere: no instance is
         // nearer): the near version within the mid-plane, the mid version within the far-plane;
-        // each instance morphs by its own distance, and every version draws that surface (geometry
-        // 2 with geometry 0's colors): no hysteresis. Geometry 3 has colors of its own (fitted to
-        // the near surface): the title's flight (titlemove) has none nearer than kTitleLodMin
+        // each instance morphs by its own distance and color (c3l::MorphChunk::colors), and every
+        // version draws that surface: no hysteresis
         const float dv = std::sqrt(dx2(lg.bsphere)) - lg.bsphere[3];
-        const float tmin = lev.lod_min_e * k;
-        u8 v = !(kd > 0)                                    ? 2
-               : dv < lev.group_mid[g] * kd                 ? 0
-               : dv < std::max(lg.dist * kd, tmin)          ? 1
-                                                            : 2;
+        u8 v = !(kd > 0)                    ? 2
+               : dv < lev.group_mid[g] * kd ? 0
+               : dv < lg.dist * kd          ? 1
+                                            : 2;
 #ifndef __3DS__
         if (morph_ab == 1 && (rs.frame_idx & 1)) {
           v = 0;  // (host A/B: every group's near version, the surface the same)
+        }
+        if (morph_ab == 3 && v < 2) {
+          // (host A/B: the far-plane switch of every group at once: odd frames the mid version
+          // at the end of its morph, even frames the far version)
+          v = (rs.frame_idx & 1) ? 1 : 2;
         }
 #endif
         const u8 v_nat = v;  // (ctr_pop: by distance alone)
@@ -13543,6 +13628,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if (vc.tmorph) {
         m_tf_colors_written += tf_morph_colors(lev, vc.chunk, shown_of(vc));
       }
+      if (lev.morph_colored(vc.chunk)) {
+        m_tf_colors_written += tie_morph_colors(lev, vc.chunk);
+      }
     }
     tod_finish();
     tod_ms += tod_now_ms() - t0;
@@ -13819,22 +13907,34 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const float kd = morph_kd;
     const float floor = m_visible[slot].floor;
     const float px = cam.trans[0], py = cam.trans[1], pz = cam.trans[2];
-    row[0] = row[1] = row[2] = row[3] = 0.f;
+    row[0] = row[1] = row[2] = 0.f;
+    row[3] = 1.f / 255.f;  // (ctr_gpu_draw_mesh_morph: the color's factors)
     const u32* keys = &lev.morph_rows[mc.row_first];
     for (u32 r = 0; r < mc.row_count; r++) {
       const auto& in = lev.morph_insts[keys[r]];
       const float ex = in.c[0] - px, ey = in.c[1] - py, ez = in.c[2] - pz;
       const float d = std::sqrt(ex * ex + ey * ey + ez * ez) - in.r;
       float* rr = row + 4 * (r + 1);
+      float fb[2];
       for (int b = 0; b < 2; b++) {
         const float f = kd > 0 ? (d - in.start[b] * kd) * in.rlen[b] / kd : 0.f;
-        rr[b] = std::max(std::clamp(f, 0.f, 1.f), floor) * mc.delta_scale;
+        fb[b] = std::max(std::clamp(f, 0.f, 1.f), floor);
+        rr[b] = fb[b] * mc.delta_scale;
       }
-      rr[2] = rr[3] = 0.f;
+      // the color targets' factor: band 1's for the instance copies that carry it, else band 2's
+      const float gc = keys[r] < lev.morph_band1.size() && lev.morph_band1[keys[r]] ? fb[0] : fb[1];
+      rr[2] = gc / 255.f;
+      rr[3] = (1.f - gc) / 255.f;
 #ifndef __3DS__
       static const int morph_ab = getenv("CTR_MORPH_AB") ? atoi(getenv("CTR_MORPH_AB")) : 0;
       if (morph_ab == 2 && (rs.frame_idx & 1)) {
-        rr[0] = rr[1] = 0.f;
+        rr[0] = rr[1] = rr[2] = 0.f;
+        rr[3] = 1.f / 255.f;
+      }
+      if (morph_ab == 3) {
+        rr[0] = rr[1] = mc.delta_scale;
+        rr[2] = 1.f / 255.f;
+        rr[3] = 0.f;
       }
 #endif
     }
@@ -13970,6 +14070,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                                  m_morph_row_of[slot] >= 0 && morph_moving(mlist, slot);
     const float* const mrows = morph ? morph_rows_of(slot) : nullptr;
     const int moff = morph ? (int)lev.normals_offset_in_mesh(vc.chunk) : 0;
+    const int mcoff = morph ? (int)lev.morph_colors_offset(vc.chunk) : 0;
     // the tfrag geomorph: a chunk with near or mid versions shown
     const bool tmorph = vc.tmorph && !vista_pass && !wind && env < 0;
     if (part == kPartMoving && !tmorph) {
@@ -14000,7 +14101,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         m_morph_prog_tris[0] += count / 3;
         m_calls.push_back({&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], (int)first,
                            (int)count, vc.nofog ? 1 : 0, mrows, &lev.morph_draw_rows[mlist + 1],
-                           lev.morph_draw_rows[mlist], moff, m_morph_row_id[slot], nullptr, 0});
+                           lev.morph_draw_rows[mlist], moff, m_morph_row_id[slot], nullptr, 0,
+                           mcoff});
         return;
       }
       if (tm_call) {
@@ -14036,8 +14138,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         m_morph_prog_tris[0] += count / 3;
         ctr_gpu_draw_mesh_morph(&lev.draw_states[di], &vc.gpu, mrows,
                                 &lev.morph_draw_rows[mlist + 1], lev.morph_draw_rows[mlist],
-                                m_morph_row_id[slot], lev.meshes[vc.chunk], moff, (int)first,
-                                (int)count);
+                                m_morph_row_id[slot], lev.meshes[vc.chunk], moff, mcoff,
+                                (int)first, (int)count);
         return;
       }
       if (tm_call) {

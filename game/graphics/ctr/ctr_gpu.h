@@ -662,6 +662,7 @@ typedef struct {
    * tmorph_offset); NULL: none */
   const float* tmorph;
   int tmorph_offset;
+  int morph_color_offset; /* a morph draw's color target words (0: none) */
 } ctr_mesh_call;
 void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n);
 /* Jak 1's wind ties (c3l::ExtWind): a level mesh draw (as ctr_gpu_draw_mesh_prepared) whose
@@ -679,14 +680,19 @@ int ctr_gpu_wind_ready(void);
 /* The PS2's tie geomorph (c3l::ExtMorph): a level mesh draw (as ctr_gpu_draw_mesh_prepared) whose
  * vertices move by their row's morph factor, platform/3ds/shaders/ctr_mesh_morph.v.pica. The mesh
  * holds from byte morph_offset (a multiple of 16) a c3l::MorphVertex per vertex (8 bytes: int8
- * delta[3], row, delta2[3], pad): the vertex is drawn at pos + f * delta + f2 * delta2, f =
- * rows[4 * row], f2 = rows[4 * row + 1] (row 0: 0; the caller folds the deltas' scale in). list: the rows the draw's vertices use (1 .. CTR_MORPH_ROWS - 1);
+ * delta[3], row, delta2[3], color): the vertex is drawn at pos + f * delta + f2 * delta2, f =
+ * rows[4 * row], f2 = rows[4 * row + 1] (row 0: 0; the caller folds the deltas' scale in); its
+ * rgb c * 255 * rows[4 * row + 3] + target * 255 * rows[4 * row + 2] (its color target word's at
+ * color_offset, 0: none; c3l::MorphChunk::colors): c + g * (target - c) with rows g / 255, (1 - g)
+ * / 255 (row 0: 0, 1 / 255). list: the rows the draw's vertices
+ * use (1 .. CTR_MORPH_ROWS - 1);
  * rows_id: new whenever the rows change (rows the GPU has for this id aren't sent again). Without
  * the program it is drawn at rest. */
 #define CTR_MORPH_ROWS 80
 void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                              const float* rows, const uint8_t* list, int list_n, uint32_t rows_id,
-                             int mesh, int morph_offset, int first_index, int index_count);
+                             int mesh, int morph_offset, int color_offset, int first_index,
+                             int index_count);
 /* 1 when the morph program can be loaded (ctr_gpu_draw_mesh_morph moves the vertices) */
 int ctr_gpu_morph_ready(void);
 /* The PS2's tfrag geomorph (c3l::ExtTfrag): a level mesh draw whose vertices move by their own clip
