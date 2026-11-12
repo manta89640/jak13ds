@@ -57,13 +57,9 @@ struct CtrSettings {
   bool distort = true;  // (AI-assisted) on (Oct 16 config cleanup; was off: square sprites on hardware, fixed)
   // the envmap shine of merc models (power cells, precursor metal): a second pass over their draws
   bool envmap = true;
-  // (AI-assisted) models with only lod0 (the yeti, ...) switch to the converter's generated low LOD
-  // (c3l::kMercGenLodSuffix: same vertices, ~40-60% of the triangles) beyond max(25 m, 12.5 x the
-  // model's size) x merc_lod_scale. Needs .c3l files from a converter with --gen-lod
+  // models at their lowest game LOD (the yeti, ...) switch to the converter's generated low LOD
+  // (c3l::kMercGenLodSuffix) where its simplification error is under a pixel on screen
   bool merc_gen_lod = true;
-  // config merc_lod_scale (also read by kmachine.cpp for the game's own LOD distances).
-  // (AI-assisted) default 1 (the PS2's distances; was 0.5)
-  float merc_lod_scale = 1.f;
   // config shadows = full | off (on = full). full: the game's shadow volumes (Jak, enemies,
   // objects; the game runs shadow-execute-all, CtrShadow draws them with the stencil buffer).
   enum class ShadowMode { Off, Full };

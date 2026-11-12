@@ -106,7 +106,7 @@ bool alpha_weighted_blend(u64 alpha_data) {
 
 // the transfers the snapshot copies
 bool snap_kind(DmaTag::Kind kind) {
-  return kind == DmaTag::Kind::REF || kind == DmaTag::Kind::REFS;
+  return kind == DmaTag::Kind::REF || kind == DmaTag::Kind::REFS || kind == DmaTag::Kind::REFE;
 }
 
 // sin and cos of an angle in radians, to ~1e-5: sprite rotations don't need libm's (slow) ones
@@ -162,8 +162,8 @@ CtrSpriteRenderer::~CtrSpriteRenderer() = default;
 void CtrSpriteRenderer::snapshot(DmaFollower& dma, CtrRenderState& rs) {
   m_snap_refs.clear();
   m_snap_quads = 0;
-  m_snap_cursor = 0;
   while (dma.current_tag_offset() != rs.next_bucket) {
+    const u32 tag = dma.current_tag_offset();
     const DmaTag::Kind kind = dma.current_tag().kind;
     const DmaTransfer t = dma.read_and_advance();
     if (!snap_kind(kind) || !t.data || !t.size_bytes) {
@@ -181,38 +181,41 @@ void CtrSpriteRenderer::snapshot(DmaFollower& dma, CtrRenderState& rs) {
       m_snap_cap = cap;
     }
     memcpy(m_snap_data.get() + m_snap_quads, t.data, t.size_bytes);
-    m_snap_refs.push_back({t.data, t.size_bytes, (u32)m_snap_quads});
+    m_snap_refs.push_back({tag, t.size_bytes, (u32)m_snap_quads});
     m_snap_quads += q;
   }
+  std::sort(m_snap_refs.begin(), m_snap_refs.end(),
+            [](const SnapRef& x, const SnapRef& y) { return x.tag < y.tag; });
   m_snap_valid = true;
 }
 
-const u8* CtrSpriteRenderer::snap_data(const u8* src, u32 bytes) {
-  if (!m_snap_valid) {
-    return src;
+DmaTransfer CtrSpriteRenderer::next(DmaFollower& dma) {
+  const u32 tag = dma.current_tag_offset();
+  const DmaTag::Kind kind = dma.current_tag().kind;
+  DmaTransfer t = dma.read_and_advance();
+  if (!m_snap_valid || !snap_kind(kind) || !t.data || !t.size_bytes) {
+    return t;
   }
-  // the render reads the transfers in the chain's order: the next one from the cursor on
-  for (size_t i = m_snap_cursor; i < m_snap_refs.size(); i++) {
-    const SnapRef& r = m_snap_refs[i];
-    if (r.src == src && r.bytes == bytes) {
-      m_snap_cursor = i + 1;
-      const u8* copy = m_snap_data[r.at].b;
-      if (!m_snap_logged) {
-        m_snap_logged = true;
-        lg::info("[ctr] sprite snapshot: in use ({} transfers, {} KB this frame)",
-                 m_snap_refs.size(), m_snap_quads * 16 / 1024);
-      }
+  auto it = std::lower_bound(m_snap_refs.begin(), m_snap_refs.end(), tag,
+                             [](const SnapRef& r, u32 v) { return r.tag < v; });
+  if (it == m_snap_refs.end() || it->tag != tag || it->bytes != t.size_bytes) {
+    m_snap_misses++;
+    return t;
+  }
+  const u8* copy = m_snap_data[it->at].b;
+  if (!m_snap_logged) {
+    m_snap_logged = true;
+    lg::info("[ctr] sprite snapshot: in use ({} transfers, {} KB this frame)", m_snap_refs.size(),
+             m_snap_quads * 16 / 1024);
+  }
 #ifndef __3DS__
-      // host (synchronous: game memory doesn't change under the render): the same bytes
-      if (memcmp(copy, src, bytes)) {
-        m_snap_mismatch++;
-      }
-#endif
-      return copy;
-    }
+  // host (synchronous: game memory doesn't change under the render): the same bytes
+  if (memcmp(copy, t.data, t.size_bytes)) {
+    m_snap_mismatch++;
   }
-  m_snap_misses++;
-  return src;
+#endif
+  t.data = copy;
+  return t;
 }
 
 void CtrSpriteRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
@@ -221,16 +224,15 @@ void CtrSpriteRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     bool& valid;
     ~SnapDone() { valid = false; }
   } snap_done{m_snap_valid};
-  m_snap_cursor = 0;
   auto skip_rest = [&]() {
     while (dma.current_tag_offset() != rs.next_bucket) {
-      dma.read_and_advance();
+      next(dma);
     }
   };
   if (dma.current_tag_offset() == rs.next_bucket) {
     return;
   }
-  dma.read_and_advance();  // jump from the bucket to the sprite data
+  next(dma);  // jump from the bucket to the sprite data
   if (dma.current_tag().kind == DmaTag::Kind::CALL) {
     skip_rest();  // the sprite renderer didn't run
     return;
@@ -286,10 +288,10 @@ void CtrSpriteRenderer::log_slow_frame(CtrRenderState& rs,
               m_stats.sprites_2d, m_stats.sprites_hud, m_stats.sprites_3d,
               m_stats.distort, m_stats.unseen, m_stats.draws);
     m_stats = Stats();
-    // (AI-assisted) the sprite arrays' snapshot (game thread): its size in the last frame, and
-    // chunks that found none (read in place) or (host) whose copy differs from game memory
-    lg::debug("[ctr] sprite snapshot: {} transfers, {} KB in the last frame", m_snap_refs.size(),
-              m_snap_quads * 16 / 1024);
+    // the sprite arrays' snapshot: its size in the last frame; REF transfers read in place
+    // (game memory the game thread may be rewriting) or (host) copies that differ: bugs
+    lg::debug("[ctr] sprite snapshot: {} transfers, {} KB in the last frame, {} read in place",
+              m_snap_refs.size(), m_snap_quads * 16 / 1024, m_snap_misses);
     if (m_snap_misses || m_snap_mismatch) {
       lg::warn("[ctr] sprite snapshot: {} transfers read in place, {} copies differ (since the "
                "last stats)",
@@ -302,7 +304,7 @@ void CtrSpriteRenderer::log_slow_frame(CtrRenderState& rs,
 void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
   auto skip_rest = [&]() {
     while (dma.current_tag_offset() != rs.next_bucket) {
-      dma.read_and_advance();
+      next(dma);
     }
   };
   m_last_tex = -1;  // textures may have changed since the last frame
@@ -320,7 +322,7 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
   // direct GS data sent before the sprites
   m_direct->reset_state();
   while (dma.current_tag().qwc != 7 && dma.current_tag_offset() != rs.next_bucket) {
-    auto d = dma.read_and_advance();
+    auto d = next(dma);
     if (d.size_bytes) {
       m_direct->render_vif(d.vif0(), d.vif1(), d.data, d.size_bytes);
     }
@@ -341,8 +343,8 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
   }
 
   // frame setup: direct data (3 qw), frame data, mscalf, base/offset
-  auto direct_setup = dma.read_and_advance();
-  auto frame_data = dma.read_and_advance();
+  auto direct_setup = next(dma);
+  auto frame_data = next(dma);
   // (AI-assisted) Jak II's SpriteFrameData: sprite_3d_giftag_2 after sprite_3d_giftag
   constexpr int kJak2Extra = 16;
   constexpr int kGiftag2At = offsetof(FrameDataJak1, screen_shader);
@@ -386,11 +388,11 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
     m_st_out[k][0] = m_st_array[k].x();
     m_st_out[k][1] = m_st_array[k].y();
   }
-  dma.read_and_advance();  // mscalf
-  dma.read_and_advance();  // base / offset
+  next(dma);  // mscalf
+  next(dma);  // base / offset
 
   // 3D matrix data: camera + hvdf offset
-  auto matrix_data = dma.read_and_advance();
+  auto matrix_data = next(dma);
   if (matrix_data.size_bytes != 5 * 16) {
     skip_rest();
     return;
@@ -414,12 +416,12 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
   flush();
   // fake shadow (nop + flushe)
   if (dma.current_tag_offset() != rs.next_bucket) {
-    dma.read_and_advance();
+    next(dma);
   }
 
   // group 1: HUD
   if (dma.current_tag_offset() != rs.next_bucket) {
-    auto mat = dma.read_and_advance();
+    auto mat = next(dma);
     if (mat.size_bytes == (int)kHudMatrixBytes) {
       memcpy(m_hud_matrix, mat.data, 64);
       memcpy(m_hud_hvdf, mat.data + 64, 76 * 16);
@@ -442,7 +444,7 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
   flush(true);
   if (m_jak2 && dma.current_tag_offset() != rs.next_bucket) {
     // (AI-assisted) Jak II: nop + flushe, then the glows (Sprite3::glow_dma_and_draw)
-    dma.read_and_advance();
+    next(dma);
     if (cs.sprites) {
 #ifndef __3DS__
       ctr_gpu_soft_bucket("sprite-glow");
@@ -497,18 +499,18 @@ void CtrSpriteRenderer::draw_glows(DmaFollower& dma, CtrRenderState& rs) {
   if (!more()) {
     return;
   }
-  auto consts_xfer = dma.read_and_advance();
+  auto consts_xfer = next(dma);
   if (consts_xfer.size_bytes != sizeof(GlowConsts)) {
     return;
   }
   GlowConsts c;
   memcpy(&c, consts_xfer.data, sizeof(c));
   for (int i = 0; i < 4 && more(); i++) {
-    dma.read_and_advance();  // two templates, base / offset, flushe
+    next(dma);  // two templates, base / offset, flushe
   }
   auto next_control = [&]() {
     while (more()) {
-      auto t = dma.read_and_advance();
+      auto t = next(dma);
       if (t.size_bytes == 0 && t.vifcode0().kind == VifCode::Kind::NOP &&
           t.vifcode1().kind == VifCode::Kind::NOP) {
         continue;
@@ -522,25 +524,22 @@ void CtrSpriteRenderer::draw_glows(DmaFollower& dma, CtrRenderState& rs) {
   m_have_last_ad = false;
   for (auto control = next_control(); control.size_bytes == 16 && more();
        control = next_control()) {
-    // (the snapshot holds REF transfers only: the others are in the frame's DMA buffer)
-    const bool vec_ref = snap_kind(dma.current_tag().kind);
-    auto vec_xfer = dma.read_and_advance();
+    auto vec_xfer = next(dma);
     if (!more()) {
       break;
     }
-    const bool shader_ref = snap_kind(dma.current_tag().kind);
-    auto shader_xfer = dma.read_and_advance();
+    auto shader_xfer = next(dma);
     if (more()) {
-      dma.read_and_advance();  // the program call
+      next(dma);  // the program call
     }
     if (vec_xfer.size_bytes != 64 || shader_xfer.size_bytes != 80) {
       continue;
     }
     GlowData in;
-    memcpy(&in, vec_ref ? snap_data(vec_xfer.data, 64) : vec_xfer.data, 64);
+    memcpy(&in, vec_xfer.data, 64);
     AdGif ad;
     memset(&ad, 0, sizeof(ad));
-    memcpy(&ad, shader_ref ? snap_data(shader_xfer.data, 80) : shader_xfer.data, 80);
+    memcpy(&ad, shader_xfer.data, 80);
     // glow_math: camera frame, fade by depth, the z offset towards the camera, perspective
     math::Vector4f p = c.camera[3] + c.camera[0] * in.pos[0] + c.camera[1] * in.pos[1] +
                        c.camera[2] * in.pos[2];
@@ -626,7 +625,7 @@ bool CtrSpriteRenderer::read_distorter(DmaFollower& dma, CtrRenderState& rs) {
   bool ok = true;
   auto more = [&]() { return dma.current_tag_offset() != rs.next_bucket; };
   for (int i = 0; i < 3 && more(); i++) {
-    auto t = dma.read_and_advance();
+    auto t = next(dma);
     if (i == 0) {
       ok &= t.size_bytes == 7 * 16;
     } else if (i == 2) {
@@ -645,7 +644,7 @@ bool CtrSpriteRenderer::read_distorter(DmaFollower& dma, CtrRenderState& rs) {
   while (looks_like_distort_frame_data(dma)) {
     while (looks_like_distort_frame_data(dma)) {
       const u32 dest = dma.current_tag_vifcode1().immediate & 0x3ff;
-      auto t = dma.read_and_advance();
+      auto t = next(dma);
       if (dest == 511) {
         u32 n;
         memcpy(&n, t.data, 4);
@@ -658,7 +657,7 @@ bool CtrSpriteRenderer::read_distorter(DmaFollower& dma, CtrRenderState& rs) {
       }
     }
     if (dma.current_tag_vifcode0().kind == VifCode::Kind::MSCALF) {
-      dma.read_and_advance();
+      next(dma);
     }
   }
   m_distort_count = ok ? std::min<int>(idx, (int)total) : 0;
@@ -756,16 +755,15 @@ void CtrSpriteRenderer::draw_distorter() {
 
 bool CtrSpriteRenderer::read_chunk(DmaFollower& dma, u32* count, u32* program) {
   // header, vector data, adgif data, program call
-  auto header = dma.read_and_advance();
+  auto header = next(dma);
   u32 h[4];
   memcpy(h, header.data, 16);
   *count = std::min<u32>(h[0], kSpritesPerChunk);
-  // (AI-assisted) from the snapshot of the sprite arrays when there is one (see snapshot)
-  auto vec = dma.read_and_advance();
-  m_vec = (const VecData*)snap_data(vec.data, vec.size_bytes);
-  auto adgif = dma.read_and_advance();
-  m_adgif = (const AdGif*)snap_data(adgif.data, adgif.size_bytes);
-  auto run = dma.read_and_advance();
+  auto vec = next(dma);
+  m_vec = (const VecData*)vec.data;
+  auto adgif = next(dma);
+  m_adgif = (const AdGif*)adgif.data;
+  auto run = next(dma);
   if (run.vifcode1().kind != VifCode::Kind::MSCAL) {
     return false;
   }
@@ -819,11 +817,7 @@ void CtrSpriteRenderer::flush(bool hud) {
       }
     }
     if (!b.clip.empty()) {
-      if (m_jak2) {
-        ctr_gpu_draw_clip_pz(&b.state, b.clip.data(), (int)b.clip.size());
-      } else {
-        ctr_gpu_draw_clip(&b.state, b.clip.data(), (int)b.clip.size());
-      }
+      ctr_gpu_draw_clip_pz(&b.state, b.clip.data(), (int)b.clip.size());
       m_stats.draws++;
     }
     b.verts.clear();
@@ -1008,10 +1002,9 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
   // position that times w, so the division cancels: c = t * k + w * o (see the corner loop)
   const float k3x = m_pfog0 * (1.f / 256.f), o3x = (m_hvdf_offset.x() - 2048.f) * (1.f / 256.f);
   const float k3y = -m_pfog0 * kInvY, o3y = (2048.f - m_hvdf_offset.y()) * kInvY;
-  // Jak II: z as the PICA's, -(GS z / (2^24 - 1)) * w, in float32 here (ctr_gpu_draw_clip_pz)
-  const float k3z = m_jak2 ? m_pfog0 * (-1.f / 16777215.f) : m_pfog0 * (1.f / 8388607.5f);
-  const float o3z = m_jak2 ? m_hvdf_offset.z() * (-1.f / 16777215.f)
-                           : m_hvdf_offset.z() * (1.f / 8388607.5f) - 1.f;
+  // z as the PICA's, -(GS z / (2^24 - 1)) * w, in float32 here (ctr_gpu_draw_clip_pz)
+  const float k3z = m_pfog0 * (-1.f / 16777215.f);
+  const float o3z = m_hvdf_offset.z() * (-1.f / 16777215.f);
   // (AI-assisted) the frame's values in locals: the vertex stores could be to any float as far as
   // the compiler knows, which made it load the matrix and these again for every sprite
   float m[16];

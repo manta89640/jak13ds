@@ -378,7 +378,7 @@ class CtrJak2BlitRenderer : public CtrBucketRenderer {
  * (the projection matrix in its first 4 qw, a giftag, two extra GS registers), one adgif and up
  * to 32 vertices of 3 qw (s t as ints, rgba, xyz in camera space; s bit 0 set: no kick). The
  * vertices go to clip space the way generic.vert (not the full-matrix path) and CtrShadowJak2 do
- * it and are drawn as strips with ctr_gpu_draw_clip (the GPU clips them). Generic2's lightning
+ * it and are drawn as strips with ctr_gpu_draw_clip_pz (the GPU clips them). Generic2's lightning
  * state: no alpha test, depth test GEQUAL without depth writes, blend from the adgif; no fog.
  */
 class CtrLightningJak2Renderer : public CtrBucketRenderer {
@@ -468,7 +468,7 @@ class CtrLightningJak2Renderer : public CtrBucketRenderer {
       const float w = col[3] * a;
       clip[c] = (col[0] + (hvdf[0] - 2048.f) * w) * (1.f / 256.f);
       clip[4 + c] = -(col[1] + (hvdf[1] - 2048.f) * w) * ky;
-      clip[8 + c] = col[2] * (1.f / 8388608.f) + (hvdf[2] * (1.f / 8388608.f) - 1.f) * w;
+      clip[8 + c] = -(col[2] + hvdf[2] * w) * (1.f / 16777215.f);  // the PICA's z
       clip[12 + c] = w;
     }
   }
@@ -564,7 +564,7 @@ class CtrLightningJak2Renderer : public CtrBucketRenderer {
       }
     }
     if (!m_tri.empty()) {
-      ctr_gpu_draw_clip(&st, m_tri.data(), (int)m_tri.size());
+      ctr_gpu_draw_clip_pz(&st, m_tri.data(), (int)m_tri.size());
     }
     return (int)m_tri.size() / 3;
   }

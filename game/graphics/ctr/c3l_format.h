@@ -11,6 +11,7 @@
  */
 
 #include <cstdint>
+#include <cstring>
 #include <string_view>
 
 namespace c3l {
@@ -829,6 +830,15 @@ constexpr uint8_t kMercDrawCullBack = 0x01;
 // first_vertex and vertex_count; draws and indices of its own, ctr_level_converter --gen-lod). No
 // layout change: older readers load it as one more model, which nothing asks for.
 constexpr char kMercGenLodSuffix[] = "~genlod";
+// The generated LOD's MercModel::pad: its simplification error in model units (float bits; 0 in
+// older files: then at most kMercGenLodErrorMax of the model's extent, the converter's default
+// --gen-lod-error)
+constexpr float kMercGenLodErrorMax = 0.02f;
+inline float merc_gen_lod_error(const MercModel& gen) {
+  float e;
+  memcpy(&e, &gen.pad, 4);
+  return e > 0.f && e < 1e30f ? e : 0.f;
+}
 // (AI-assisted, j1ocean) Merc models always drawn at full detail, never as a generated low LOD:
 // the pickups (power cells, scout flies, precursor orbs, orb caches, eco vents), small things the
 // player looks for from far away. The converter makes no low LOD for them; the runtime ignores one

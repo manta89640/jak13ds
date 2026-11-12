@@ -1489,10 +1489,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   const bool bone_cache = !hud_model;
   const u32 bone_stamp = bone_cache ? next_bone_rows_stamp() : 0;
   g_pal.models++;
-  // (AI-assisted) config merc_gen_lod: the converter's generated low LOD of a model with only lod0
-  // (the yeti; (j1ocean) never the pickups: CtrLevel gives those no gen_draws,
-  // c3l::merc_gen_lod_exempt) when its first bone is further from the camera than max(25 m, 12.5 x the model's
-  // size) x merc_lod_scale; 10% either side of that before it switches (per instance: inst_state)
+  // merc_gen_lod: the per-instance LOD state (inst_state)
   u32 inst = ~0u;  // (AI-assisted) this instance's InstState in m_inst_cur (~0u: not made yet)
   auto inst_now = [&]() -> InstState& {
     if (inst == ~0u) {
@@ -1509,15 +1506,34 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     m_levels->stream_note_target(t.x(), t.y(), t.z(), rs.frame_idx);
   }
   const std::vector<c3l::MercDraw>* draws = &model->draws;
-  if (!model->gen_draws.empty() && cs.merc_gen_lod && !hud_model && i > 0 &&
-      slots[0] < 128) {
-    const math::Vector4f& t = bones[slots[0]]->tmat[3];
-    const float d = std::sqrt(t.x() * t.x() + t.y() * t.y() + t.z() * t.z()) * (1.f / 4096.f);
-    const float size_m = model->scale * 32767.f * (1.f / 4096.f);
-    const float at = std::max(25.f, 12.5f * size_m) * cs.merc_lod_scale;
+  if (!model->gen_draws.empty() && model->gen_err > 0.f && cs.merc_gen_lod && !hud_model &&
+      i > 0 && slots[0] < 128) {
+    // The converter's simplified copy (below a model's lowest game LOD, not c3l::merc_gen_lod_exempt) while
+    // its simplification error projects to under 0.75 px on the top screen; full detail again
+    // above 1 px. Nearest point: the nearest bone origin less the model's reach.
+    const float* cw = m_clip + 12;
+    const float grad = std::sqrt(cw[0] * cw[0] + cw[1] * cw[1] + cw[2] * cw[2]);
+    const float focal =
+        std::max(200.f * std::sqrt(m_clip[0] * m_clip[0] + m_clip[1] * m_clip[1] +
+                                   m_clip[2] * m_clip[2]),
+                 120.f * std::sqrt(m_clip[4] * m_clip[4] + m_clip[5] * m_clip[5] +
+                                   m_clip[6] * m_clip[6]));
+    float w = INFINITY, col = 0.f;
+    for (int b = 0; b < i; b++) {
+      if (slots[b] >= 128) {
+        continue;
+      }
+      const math::Vector4f* t = bones[slots[b]]->tmat;
+      w = std::min(w, -(cw[0] * t[3].x() + cw[1] * t[3].y() + cw[2] * t[3].z()) + cw[3]);
+      for (int c = 0; c < 3; c++) {
+        col = std::max(col, t[c].x() * t[c].x() + t[c].y() * t[c].y() + t[c].z() * t[c].z());
+      }
+    }
+    const float s = std::sqrt(col);
+    const float d = w - grad * model->scale * 32767.f * s;
     InstState& g = inst_now();
-    // a new instance: at the limit itself
-    g.low = g.low == kInstUnknown ? d > at : (g.low ? d > 0.9f * at : d > 1.1f * at);
+    const float limit = g.low == 1 ? 1.f : 0.75f;
+    g.low = d > 0.f && model->gen_err * s * focal < limit * d;
     if (g.low) {
       draws = &model->gen_draws;
       m_stats.gen_lod++;

@@ -115,15 +115,14 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   int m_distort_count = 0;
   std::vector<ctr_vertex> m_distort_verts;  // (AI-assisted) one triangle strip (ctr_gpu_draw_strip)
 
-  // (AI-assisted) the chunk's sprites: in the snapshot (see snapshot), else in place in the DMA
-  // data (read_chunk checked that it holds count of each)
+  // the chunk's sprites (read_chunk checked that it holds count of each)
   const VecData* m_vec = nullptr;
   const AdGif* m_adgif = nullptr;
-  // (AI-assisted) the snapshot: the REF transfers' data in the order of the chain, each at a
-  // 16-byte offset of m_snap_data; m_snap_cursor: the next one the render may ask for. Valid from
-  // snapshot to the end of the next render.
+  // The snapshot: the data of the bucket's REF transfers (the only ones whose data lies outside
+  // the double buffered DMA buffer), keyed by their tag's address (sorted), each at a 16-byte
+  // offset of m_snap_data. Valid from snapshot to the end of the next render.
   struct SnapRef {
-    const u8* src;
+    u32 tag;
     u32 bytes;
     u32 at;  // in quadwords
   };
@@ -133,12 +132,11 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   std::vector<SnapRef> m_snap_refs;
   std::unique_ptr<Quad[]> m_snap_data;
   size_t m_snap_quads = 0, m_snap_cap = 0;
-  size_t m_snap_cursor = 0;
   bool m_snap_valid = false;
-  // the snapshot's copy of a transfer's data (src, bytes), else src itself
-  const u8* snap_data(const u8* src, u32 bytes);
-  bool m_snap_logged = false;  // (AI-assisted) the first use is logged
-  u32 m_snap_misses = 0;    // (AI-assisted) statistics: transfers read in place with a snapshot
+  // every read of the render: the next transfer, a REF one's data from the snapshot
+  DmaTransfer next(DmaFollower& dma);
+  bool m_snap_logged = false;
+  u32 m_snap_misses = 0;  // REF transfers read in place with a snapshot (a bug if not 0)
   u32 m_snap_mismatch = 0;  // host: snapshot bytes that differ from game memory (synchronous)
 
   // (AI-assisted) a vertex array that grows without zeroing the new vertices (std::vector's

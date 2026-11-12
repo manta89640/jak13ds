@@ -115,6 +115,7 @@ int CtrShadowJak2Renderer::upload_base(int k) {
   }
   const int n = m_src_count[k];
   if (!reserve() || !m_src[k] || m_nv + n > m_cap_verts) {
+    fail();
     return -1;
   }
   ctr_clip_vertex* v = m_verts + m_nv;
@@ -136,10 +137,25 @@ int CtrShadowJak2Renderer::upload_base(int k) {
 
 bool CtrShadowJak2Renderer::index_room(int count) {
   if (m_nf + m_nb + count > m_cap_indices) {
-    m_stats.dropped++;
+    fail();
     return false;
   }
   return true;
+}
+
+void CtrShadowJak2Renderer::end_volume() {
+  if (m_vol_bad) {
+    m_nv = m_vol_nv;
+    m_nf = m_vol_nf;
+    m_nb = m_vol_nb;
+    m_oc.resize(m_nv);
+    m_base[0] = m_base[1] = -1;  // (their vertices are gone: copied again if used again)
+    m_stats.dropped++;
+  }
+  m_vol_bad = false;
+  m_vol_nv = m_nv;
+  m_vol_nf = m_nf;
+  m_vol_nb = m_nb;
 }
 
 void CtrShadowJak2Renderer::add_face(const u16 idx[3], bool away) {
@@ -151,7 +167,7 @@ void CtrShadowJak2Renderer::add_face(const u16 idx[3], bool away) {
   }
   if (!(any & kCutPlanes)) {
     if (m_nf + m_nb + 3 > m_cap_indices) {
-      m_stats.dropped++;  // (the cut faces before took more room than counted)
+      fail();  // (the cut faces before took more room than counted)
       return;
     }
     out[0] = idx[0];
@@ -215,6 +231,7 @@ void CtrShadowJak2Renderer::add_face(const u16 idx[3], bool away) {
     fresh += in[i].index < 0;
   }
   if (m_nv + fresh > m_cap_verts || !index_room(3 * (n - 2))) {
+    fail();
     return;
   }
   for (int i = 0; i < n; i++) {
@@ -246,9 +263,8 @@ void CtrShadowJak2Renderer::add_caps(const u8* idx, bool flip, bool flippable, i
   // the frame's index memory (faces turned to the camera) or the back list (the others)
   const int n = idx[0];
   idx += 4;
-  const int base = upload_base(k);
+  const int base = m_vol_bad ? -1 : upload_base(k);
   if (base < 0 || !index_room(3 * n)) {
-    m_stats.dropped += base < 0;
     return;
   }
   const u8* verts = m_src[k];
@@ -259,8 +275,8 @@ void CtrShadowJak2Renderer::add_caps(const u8* idx, bool flip, bool flippable, i
       continue;  // padding of the unpack
     }
     if (a >= count || b >= count || c >= count) {
-      m_stats.dropped++;  // (not in the upload)
-      continue;
+      fail();  // (not in the upload)
+      return;
     }
     const bool swap = flippable ? ((flip ^ (idx[3] != 0)) == 0) : flip;
     const int i1 = swap ? c : b, i2 = swap ? b : c;
@@ -276,9 +292,8 @@ void CtrShadowJak2Renderer::add_walls(const u8* idx) {
   // Shadow2::add_wall_quads: drawn as the strip 1 0 2 3
   const int n = idx[0];
   idx += 4;
-  const int tb = upload_base(0), bb = upload_base(1);
+  const int tb = m_vol_bad ? -1 : upload_base(0), bb = m_vol_bad ? -1 : upload_base(1);
   if (tb < 0 || bb < 0 || !index_room(6 * n)) {
-    m_stats.dropped += tb < 0 || bb < 0;
     return;
   }
   const u8* top = m_src[0];
@@ -290,8 +305,8 @@ void CtrShadowJak2Renderer::add_walls(const u8* idx) {
       continue;
     }
     if (a >= tcount || b >= tcount || a >= bcount || b >= bcount) {
-      m_stats.dropped++;
-      continue;
+      fail();
+      return;
     }
     // q0 q1 on top, q2 q3 below (a and b swapped when idx[2] is 0); the strip q1 q0 q2 q3:
     // triangles (q1 q0 q2), (q0 q2 q3)
@@ -317,6 +332,8 @@ void CtrShadowJak2Renderer::render(DmaFollower& dma, CtrRenderState& rs) {
   m_reserved = m_full = false;
   m_nv = 0;
   m_nf = m_nb = 0;
+  m_vol_nv = m_vol_nf = m_vol_nb = 0;
+  m_vol_bad = false;
   m_base[0] = m_base[1] = -1;  // (AI-assisted, j2gpu) nothing copied yet this frame
   m_src[0] = m_src[1] = nullptr;
   m_oc.clear();
@@ -378,6 +395,7 @@ void CtrShadowJak2Renderer::render(DmaFollower& dma, CtrRenderState& rs) {
     const VifCode v0 = t.vifcode0(), v1 = t.vifcode1();
     if (v1.kind == VifCode::Kind::UNPACK_V4_32) {
       if (v1.immediate == kTopVertexDataAddr) {
+        end_volume();  // a new volume starts
         top = t.data;
         // (AI-assisted, j2gpu) new vertices: copied at their first use
         m_src[0] = t.data;
@@ -434,6 +452,7 @@ void CtrShadowJak2Renderer::render(DmaFollower& dma, CtrRenderState& rs) {
     }
   }
   (void)have_color;
+  end_volume();
   if (m_full && m_no_room++ % 300 == 0) {
     lg::warn("[ctr] shadow2: no room in the frame's vertex memory, shadows not drawn");
   }
@@ -441,11 +460,11 @@ void CtrShadowJak2Renderer::render(DmaFollower& dma, CtrRenderState& rs) {
   if (rs.log_now) {
 #ifndef __3DS__
     if (getenv("CTR_DIRECT_STATS")) {  // host diagnosis
-      lg::info("[ctr] {} {}: {} faces, {} left out, {} cut to the guard band", m_name, m_id,
+      lg::info("[ctr] {} {}: {} faces, {} volumes left out, {} cut to the guard band", m_name, m_id,
                m_stats.faces, m_stats.dropped, m_stats.clipped);
     }
 #endif
-    lg::debug("[ctr] {}: {} faces, {} left out, {} cut to the guard band", m_name, m_stats.faces,
+    lg::debug("[ctr] {}: {} faces, {} volumes left out, {} cut to the guard band", m_name, m_stats.faces,
               m_stats.dropped, m_stats.clipped);
     m_stats = Stats();
   }
