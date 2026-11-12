@@ -12092,9 +12092,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
 #endif
         const u8 v_nat = v;  // (ctr_pop: by distance alone)
         bool gone = false;   // its near data left (not: beyond its near chunk's distance, far mode)
-        bool held_now = false;
         bool covered = false;
         if (v < 2 && has_units) {
+          // data presence only stops an upgrade: absent near data draws the far version, and its
+          // arrival starts at that surface (the units' morph floor)
           bool ok = g < lev.group_unit_count.size() && lev.group_unit_count[g] > 0;
           bool late = false;
           const u32* gu = ok ? &lev.group_units[lev.group_unit_first[g]] : nullptr;
@@ -12103,7 +12104,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             late = late || lev.unit_ok[gu[j]] == 3;
           }
           gone = late;
-          bool keep_far = (st & 4) != 0 && !g_screen_black;
           if (!ok) {
             v = 2;
             if (late && !j2_hidden) {
@@ -12122,28 +12122,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                   lev.stream_units[gu[j]].late_seen = frame32p;
                 }
               }
-              if (!keep_far && !g_screen_black && seen) {
-                keep_far = true;
-                lev.lod_hold_since[g] = (u32)rs.frame_idx;
-              }
-            }
-          } else if (keep_far) {
-            // its data came: its units begin at the far version's surface (their morph floor);
-            // units without moving vertices: kept far while in view (at most kHoldFrames)
-            bool morphs = true;
-            for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
-              morphs = morphs && lev.chunk_morphs(lev.stream_units[gu[j]].chunk);
-            }
-            if (!morphs && sphere_in_view(cam, lg.bsphere) &&
-                (u32)rs.frame_idx - lev.lod_hold_since[g] < kHoldFrames) {
-              v = 2;
-              held_groups++;
-              held_now = true;
-            } else {
-              keep_far = false;
             }
           }
-          st = (u8)(st & ~4) | (keep_far ? 4 : 0);
           // (ctr_pop: a switch under a unit's morph in, or after its morph out, doesn't show)
           for (u32 j = 0; gu && j < lev.group_unit_count[g]; j++) {
             const auto& su = lev.stream_units[gu[j]];
@@ -12169,11 +12149,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           pop(far_flip  ? ctr_pop::kFar
               : !forced ? ctr_pop::kLate
               : gone     ? ctr_pop::kEvict
-              : held_now ? ctr_pop::kHold
                          : ctr_pop::kUnit,
               lg.bsphere, forced ? "morph group far" : "morph group near", (u32)g);
         }
-        st = (u8)((st & 4) | 2 | (v < 2 ? 1 : 0) | (v == 1 ? 8 : 0) | (forced ? 16 : 0));
+        st = (u8)(2 | (v < 2 ? 1 : 0) | (v == 1 ? 8 : 0) | (forced ? 16 : 0));
         near += v < 2;
         continue;
       }
