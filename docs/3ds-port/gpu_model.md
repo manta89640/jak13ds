@@ -77,6 +77,23 @@ draws and binds explain little (best fit, triangles + binds with the other windo
 bounds: cross-validated rms 5.0 ms; `gpu_model.py hwfit`), because the fill varies from view to
 view and the logs don't see it.
 
+## Costs from the console's bench (Nov 12, hw-nov12e): what `predict` uses
+
+pica_bench ran on the console, and `gpu_perflog` gives the GPU's 3D time (P3D) per window. `predict`
+now prices P3D with the bench's own costs (`gpu_model_calib.json` "p3d"), no fitting:
+
+- every index is shaded: the hardware reuses no vertex across a list (B4: a 16-entry cache does not
+  exist). Per index: max(48.6 ns, 17.1 + 14 per attribute buffer + 2.1 per instruction) (B3 / B5:
+  the level mesh 52.1 ns, the skin program 100.4 ns; 48.6 ns is the setup stage's floor per index);
+- a triangle costs nothing beyond its indices, drawn or culled (B7), so a strip's triangle costs one
+  index and a list's three;
+- 4.8 ns per fragment, 45 ns per KB of texture missed (B6), 0.46 us per draw, +0.19 per bind,
+  +1.37 per program switch (B2). The clears and the display transfer are not P3D.
+
+Check: jungle d0 on the host route is 249 ns per triangle; the console's jungle window is 242 (94k
+triangles, 22.8 ms P3D). The sections below describe the model before the bench: its vertex cache,
+its group scales and its absolute numbers are superseded.
+
 ## Calibration (status: Nov 11, no pica_bench run yet)
 
 `gpu_model.py calibrate` gives each hardware window the host features of the same place (its loaded
