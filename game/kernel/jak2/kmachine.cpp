@@ -813,21 +813,6 @@ void InitMachine_PCPort() {
     intern_from_c("*pc-3ds-anim-lod-far*")->value() =
         anim_lod_far ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
   }
-  // config.ini logic_lod (default on): far processes out of view run on every other frame
-  // (process-drawable.gc logic-lod-check). Off on other builds unless OPENGOAL_LOGIC_LOD is 1.
-  {
-    bool logic_lod = false;
-#ifdef __3DS__
-    logic_lod = ctr_config_bool("logic_lod", 1);
-    lg::info("logic LOD {} (config.ini logic_lod)", logic_lod ? "on" : "off");
-#else
-    if (const char* e = getenv("OPENGOAL_LOGIC_LOD")) {
-      logic_lod = atoi(e) >= 1;
-    }
-#endif
-    intern_from_c("*pc-3ds-logic-lod*")->value() =
-        logic_lod ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
-  }
   // (AI-assisted, j2cuts) config.ini merc_lod_scale (default 1, as Jak 1): characters and objects
   // other than Jak switch to their lower detail models at this fraction of the game's distances
   // (drawable.gc, TARGET_3DS; the distance cull stays). Fewer joints and vertices per model.

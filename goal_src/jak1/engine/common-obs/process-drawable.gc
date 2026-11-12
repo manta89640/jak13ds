@@ -247,7 +247,7 @@
                   (< r2 (vector-vector-distance-squared (-> dc origin) (-> *target* control trans)))))
            (not (anim-lod-may-show? dc))))))
 
-;; og:preserve-this 3DS logic LOD (config.ini logic_lod, default on). An enemy or platform that is
+;; og:preserve-this 3DS logic LOD (always on). An enemy or platform that is
 ;; out of view (not drawn last frame, its sphere grown by LOGIC_LOD_VIEW outside the view) and
 ;; LOGIC_LOD_DIST or more (plus its bounds) from the camera and Jak runs its trans, code and post
 ;; on every other frame only (staggered by pid). The frame after a wait it runs with the display's
@@ -255,7 +255,8 @@
 ;; animates and counts time as if it had run both. Never twice in a row; never Jak's processes,
 ;; movies, or while the game lags (time ratio over 2).
 (#when TARGET_3DS
-  (define-extern *pc-3ds-logic-lod* symbol)
+  ;; on (logic-lod-set!, for A/B tests)
+  (define *pc-3ds-logic-lod* #t)
   (defconstant LOGIC_LOD_DIST (meters 20))
   (defconstant LOGIC_LOD_VIEW (meters 4))
   ;; per frame (stats for a debugger or a REPL): processes that waited

@@ -1837,8 +1837,8 @@
   (define *kernel-pre-pool-hook* (the-as (function none) #f))
   )
 
-;; og:preserve-this 3DS logic LOD (process-drawable.gc logic-lod-check): a far process out of view
-;; waits every other frame, and the frame after it runs on *logic-lod-clock* (its clock over both)
+;; og:preserve-this 3DS logic LOD (process-drawable.gc logic-lod-check): a far process waits some
+;; frames, then runs on *logic-lod-clock* (its clock over all of them); frames waited per pid
 (#when TARGET_3DS
   (define *logic-lod-hook* (the-as (function process-tree int) #f))
   (define *logic-lod-clock* (the-as clock #f))
@@ -2717,9 +2717,7 @@
     ;; og:preserve-this 3DS logic LOD: a new pid hasn't waited
     (#when TARGET_3DS
       (when *logic-lod-skipped*
-        (let ((idx (logand v1-5 #xffff)))
-          (logclear! (-> *logic-lod-skipped* (shr idx 3)) (ash 1 (logand idx 7)))
-          )
+        (set! (-> *logic-lod-skipped* (logand v1-5 #xffff)) 0)
         )
       )
     )

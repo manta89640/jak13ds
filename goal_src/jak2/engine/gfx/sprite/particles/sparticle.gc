@@ -646,7 +646,7 @@
 
 ;; ERROR: Unsupported inline assembly instruction kind - [mfc0 gp, Count]
 ;; ERROR: Unsupported inline assembly instruction kind - [mfc0 v1, Count]
-;; og:preserve-this 3DS particle LOD (config.ini logic_lod; native_sparticle.cpp sp_lod_2d): far 2d
+;; og:preserve-this 3DS particle LOD (with the logic LOD; native_sparticle.cpp sp_lod_2d): far 2d
 ;; particles and the ones behind the camera are updated on every other frame, over both frames
 (#when TARGET_3DS
   (define-extern *pc-3ds-logic-lod* symbol)

@@ -85,7 +85,7 @@ inline TimeVec time_vec(const ParticleMem& m, u32 spad, u32 info) {
 }
 
 /*!
- * Particle LOD (config.ini logic_lod; sparticle.gc process-particles fills *sp-lod-work*: the
+ * Particle LOD (with the logic LOD; sparticle.gc process-particles fills *sp-lod-work*: the
  * camera's position, its forward axis, then the frame count, on, the squared distance and the
  * depth behind the camera). A 2d particle of a plain block without a callback, an orbit, an aux
  * sprite or an alpha to restore that is that far from the camera or that far behind it is updated

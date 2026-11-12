@@ -56,7 +56,7 @@ struct ParticleMem {
 };
 
 /*!
- * Particle LOD (config.ini logic_lod; sparticle.gc process-particles fills *sp-lod-work*: the
+ * Particle LOD (with the logic LOD; sparticle.gc process-particles fills *sp-lod-work*: the
  * camera's position, its forward axis, then the frame count, on, the squared distance and the
  * depth behind the camera). A 2d particle without a callback, an orbit or an alpha to restore that
  * is that far from the camera or that far behind it is updated on every other frame only

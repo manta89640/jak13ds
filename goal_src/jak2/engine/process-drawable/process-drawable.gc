@@ -684,121 +684,211 @@
     )
   )
 
-;; og:preserve-this 3DS logic LOD (config.ini logic_lod, default on). An enemy, guard, vehicle or
-;; civilian on the entity clock that is out of view (not drawn last frame, its sphere grown by
-;; LOGIC_LOD_VIEW outside the view) and LOGIC_LOD_DIST or more (plus its bounds) from the camera and
-;; Jak runs its trans, code and post on every other frame only (staggered by pid). The frame after
-;; a wait it runs on *logic-lod-clock*: the entity clock over both frames (twice its ratio, its
-;; old counters two frames back), so it moves, animates and counts time as if it had run both.
-;; Never twice in a row; never Jak's processes, movies, or anything another clock runs.
+;; og:preserve-this 3DS logic LOD (always on). An enemy, guard, vehicle or civilian on the entity
+;; clock runs its trans, code and post on every LOGIC_LOD_SLOW-th frame when it is out of view (not
+;; drawn last frame, its sphere grown by LOGIC_LOD_VIEW outside the view) and LOGIC_LOD_FAR_OFF or
+;; more from the camera and Jak; every 2nd frame when it is out of view and LOGIC_LOD_DIST or more
+;; away, or in view and LOGIC_LOD_FAR_ON or more away (distances plus its bounds); staggered by pid.
+;; The frame it runs after waiting it runs on a copy of the entity clock over all the frames since
+;; its last run (that many times the ratio, the old counters that far back), so it moves, animates
+;; and counts time as if it had run each frame. A waiting process in view keeps moving: its root,
+;; bones and draw origin go on by its velocity, and its root is put back before it runs again.
+;; Never Jak's processes, movies, or anything another clock runs.
 (#when TARGET_3DS
-  (define-extern *pc-3ds-logic-lod* symbol)
   (defconstant LOGIC_LOD_DIST (meters 20))
+  (defconstant LOGIC_LOD_FAR_OFF (meters 45))
+  (defconstant LOGIC_LOD_FAR_ON (meters 50))
   (defconstant LOGIC_LOD_VIEW (meters 4))
-  (define *logic-lod-clock-frame* -1)
-  ;; per frame (stats for a debugger or a REPL): processes that waited
+  (defconstant LOGIC_LOD_SLOW 4)
+  ;; on (logic-lod-set!, for A/B tests)
+  (define *pc-3ds-logic-lod* #t)
+  ;; per frame (stats for a debugger or a REPL): processes that waited, in view
   (define *logic-lod-wait-count* 0)
+  (define *logic-lod-view-count* 0)
   (define *logic-lod-wait-frame* -1)
+  ;; the entity clock over 2, 3 and 4 frames, and the frame each was made for
+  (define *logic-lod-clocks* (new 'global 'boxed-array clock 3))
+  (define *logic-lod-clock-frames* (new 'global 'array 'int32 3))
+  ;; a waiting process in view: its pid and its root's true place (pid & 1023)
+  (define *logic-lod-held-pid* (new 'global 'array 'int32 1024))
+  (define *logic-lod-held-trans* (the-as (inline-array vector) (malloc 'global #x4000)))
 
-  (defun logic-lod-clock-update ()
-    "*logic-lod-clock*: the entity clock over the last two frames (once per frame)."
-    (when (!= *logic-lod-clock-frame* *logic-lod-frame*)
-      (set! *logic-lod-clock-frame* *logic-lod-frame*)
-      (let* ((src (-> *display* entity-clock))
-             (dst *logic-lod-clock*)
-             (d2 (* 2 (- (-> src frame-counter) (-> src old-frame-counter))))
-             (f2 (the float d2))
+  (defun logic-lod-clock ((frames int))
+    "The entity clock over the last frames frames (2..4), made once per frame."
+    (let ((i (- frames 2)))
+      (let ((dst (-> *logic-lod-clocks* i)))
+        (when (!= (-> *logic-lod-clock-frames* i) *logic-lod-frame*)
+          (set! (-> *logic-lod-clock-frames* i) *logic-lod-frame*)
+          (let* ((src (-> *display* entity-clock))
+                 (d (* frames (- (-> src frame-counter) (-> src old-frame-counter))))
+                 (fd (the float d))
+                 (ff (the float frames))
+                 )
+            (set! (-> dst index) (-> src index))
+            (set! (-> dst mask) (-> src mask))
+            (set! (-> dst clock-ratio) (-> src clock-ratio))
+            (set! (-> dst accum) (-> src accum))
+            (set! (-> dst integral-accum) (-> src integral-accum))
+            (set! (-> dst frame-counter) (-> src frame-counter))
+            (set! (-> dst old-frame-counter) (- (-> src frame-counter) d))
+            (set! (-> dst integral-frame-counter) (-> src integral-frame-counter))
+            (set! (-> dst old-integral-frame-counter)
+                  (- (-> src integral-frame-counter)
+                     (* frames (- (-> src integral-frame-counter) (-> src old-integral-frame-counter)))
+                     )
+                  )
+            (set! (-> dst time-adjust-ratio) (* ff (-> src time-adjust-ratio)))
+            (set! (-> dst seconds-per-frame) (* ff (-> src seconds-per-frame)))
+            (set! (-> dst frames-per-second) (/ (-> src frames-per-second) ff))
+            ;; as update-rates! makes it from the frame count
+            (set-vector! (-> dst sparticle-data) (the-as float d) fd (* 0.2 fd) (* 0.2 fd))
+            )
+          )
+        (set! *logic-lod-base-clock* (-> *display* entity-clock))
+        dst
+        )
+      )
+    )
+
+  (defun logic-lod-rate ((proc process))
+    "1: every frame; 2: every 2nd; LOGIC_LOD_SLOW; negative: every 2nd, held in view."
+    (if (not (and *target*
+                  (eq? (-> proc clock) (-> *display* entity-clock))
+                  (not (logtest? (-> *kernel-context* prevent-from-run) (process-mask movie)))
+                  (type? proc process-drawable)
+                  )
              )
-        (set! *logic-lod-base-clock* src)
-        (set! (-> dst index) (-> src index))
-        (set! (-> dst mask) (-> src mask))
-        (set! (-> dst clock-ratio) (-> src clock-ratio))
-        (set! (-> dst accum) (-> src accum))
-        (set! (-> dst integral-accum) (-> src integral-accum))
-        (set! (-> dst frame-counter) (-> src frame-counter))
-        (set! (-> dst old-frame-counter) (- (-> src frame-counter) d2))
-        (set! (-> dst integral-frame-counter) (-> src integral-frame-counter))
-        (set! (-> dst old-integral-frame-counter)
-              (- (-> src integral-frame-counter) (* 2 (- (-> src integral-frame-counter) (-> src old-integral-frame-counter))))
+        (return 1)
+        )
+    (let* ((pd (the-as process-drawable proc))
+           (dc (-> pd draw))
+           )
+      (if (or (zero? dc) (zero? (-> pd root)) (= (ppointer->process (-> pd parent)) *target*))
+          (return 1)
+          )
+      (let* ((d2 (fmin (vector-vector-distance-squared (-> pd root trans) (-> *math-camera* trans))
+                       (vector-vector-distance-squared (-> pd root trans) (-> *target* root trans))
+                       )
+                 )
+             (rb (-> dc bounds w))
+             (r-near (+ rb LOGIC_LOD_DIST))
+             )
+        (cond
+          ((< d2 (* r-near r-near))
+           1
+           )
+          ((logtest? (-> dc status) (draw-control-status on-screen))
+           (let ((r (+ rb LOGIC_LOD_FAR_ON)))
+             (if (and (< (* r r) d2) (not (logtest? (-> dc status) (draw-control-status no-draw no-draw-temp))))
+                 -2
+                 1
+                 )
+             )
+           )
+          ((let ((s (new 'stack-no-clear 'sphere)))
+             (set! (-> s quad) (-> dc origin quad))
+             (set! (-> s r) (+ rb LOGIC_LOD_VIEW))
+             (sphere-in-view-frustum? s)
+             )
+           1
+           )
+          (else
+            (let ((r (+ rb LOGIC_LOD_FAR_OFF)))
+              (if (< (* r r) d2) LOGIC_LOD_SLOW 2)
               )
-        (set! (-> dst time-adjust-ratio) (* 2.0 (-> src time-adjust-ratio)))
-        (set! (-> dst seconds-per-frame) (* 2.0 (-> src seconds-per-frame)))
-        (set! (-> dst frames-per-second) (* 0.5 (-> src frames-per-second)))
-        ;; as update-rates! makes it from the frame count
-        (set-vector! (-> dst sparticle-data) (the-as float d2) f2 (* 0.2 f2) (* 0.2 f2))
+            )
+          )
+        )
+      )
+    )
+
+  (defun logic-lod-hold! ((pd process-drawable))
+    "A process in view waits: its root, bones and draw origin go on by its velocity."
+    (let* ((root (-> pd root))
+           (dc (-> pd draw))
+           (sk (-> dc skeleton))
+           (slot (logand (-> pd pid) 1023))
+           (dt (-> *display* entity-clock seconds-per-frame))
+           (dx (* dt (-> root transv x)))
+           (dy (* dt (-> root transv y)))
+           (dz (* dt (-> root transv z)))
+           )
+      (when (!= (-> *logic-lod-held-pid* slot) (-> pd pid))
+        (set! (-> *logic-lod-held-pid* slot) (-> pd pid))
+        (set! (-> *logic-lod-held-trans* slot quad) (-> root trans quad))
+        )
+      (+! (-> root trans x) dx)
+      (+! (-> root trans y) dy)
+      (+! (-> root trans z) dz)
+      (when (nonzero? sk)
+        (dotimes (i (-> sk length))
+          (let ((t (-> sk bones i transform trans)))
+            (+! (-> t x) dx)
+            (+! (-> t y) dy)
+            (+! (-> t z) dz)
+            )
+          )
+        )
+      (+! (-> dc origin x) dx)
+      (+! (-> dc origin y) dy)
+      (+! (-> dc origin z) dz)
+      )
+    0
+    (none)
+    )
+
+  (defun logic-lod-unhold! ((proc process))
+    "Back to its true place before it runs, if it was held in view."
+    (let ((slot (logand (-> proc pid) 1023)))
+      (when (= (-> *logic-lod-held-pid* slot) (-> proc pid))
+        (set! (-> *logic-lod-held-pid* slot) -1)
+        (set! (-> (the-as process-drawable proc) root trans quad) (-> *logic-lod-held-trans* slot quad))
         )
       )
     0
     (none)
     )
 
-  (defun logic-lod-wait? ((proc process))
-    "May proc wait this frame (out of view, far from the camera and Jak)?"
-    (and *target*
-         (eq? (-> proc clock) (-> *display* entity-clock))
-         (not (logtest? (-> *kernel-context* prevent-from-run) (process-mask movie)))
-         (type? proc process-drawable)
-         (let* ((pd (the-as process-drawable proc))
-                (dc (-> pd draw))
-                )
-           (and (nonzero? dc)
-                (nonzero? (-> pd root))
-                (!= (ppointer->process (-> pd parent)) *target*)
-                (not (logtest? (-> dc status) (draw-control-status on-screen)))
-                (let* ((r (+ (-> dc bounds w) LOGIC_LOD_DIST))
-                       (r2 (* r r))
-                       )
-                  (and (< r2 (vector-vector-distance-squared (-> pd root trans) (-> *math-camera* trans)))
-                       (< r2 (vector-vector-distance-squared (-> pd root trans) (-> *target* root trans)))
-                       )
-                  )
-                (let ((s (new 'stack-no-clear 'sphere)))
-                  (set! (-> s quad) (-> dc origin quad))
-                  (set! (-> s r) (+ (-> dc bounds w) LOGIC_LOD_VIEW))
-                  (not (sphere-in-view-frustum? s))
-                  )
-                )
-           )
-         )
-    )
-
   (defun logic-lod-check ((arg0 process-tree))
-    "The kernel's question (gkernel.gc logic-lod-run): 0 run, 1 wait, 2 run over two frames."
+    "The kernel's question (gkernel.gc logic-lod-run): 0 run, 1 wait, 2 run on *logic-lod-clock*."
     (let ((proc (the-as process arg0)))
-      (if (or (not *pc-3ds-logic-lod*)
-              (not (logtest? (-> proc mask) (process-mask enemy guard vehicle civilian)))
-              )
+      (if (not (logtest? (-> proc mask) (process-mask enemy guard vehicle civilian)))
           (return 0)
           )
-      (let* ((bits *logic-lod-skipped*)
+      (let* ((waits *logic-lod-skipped*)
              (idx (logand (-> proc pid) #xffff))
-             (byte (shr idx 3))
-             (bit (ash 1 (logand idx 7)))
+             (waited (the int (-> waits idx)))
+             (rate (if *pc-3ds-logic-lod* (logic-lod-rate proc) 1))
+             (n (abs rate))
              )
         (cond
-          ((logtest? (-> bits byte) bit)
-           (logclear! (-> bits byte) bit)
+          ((or (= n 1) (>= (+ waited 1) n) (zero? (mod (+ *logic-lod-frame* (-> proc pid)) n)))
+           ;; runs this frame, over the frames since its last run
+           (set! (-> waits idx) 0)
            (cond
-             ((eq? (-> proc clock) (-> *display* entity-clock))
-              (logic-lod-clock-update)
-              2
+             ((zero? waited)
+              0
               )
              (else
-               0
+               (logic-lod-unhold! proc)
+               (set! *logic-lod-clock* (logic-lod-clock (+ waited 1)))
+               2
                )
              )
            )
-          ((and (logtest? (+ *logic-lod-frame* (-> proc pid)) 1) (logic-lod-wait? proc))
-           (logior! (-> bits byte) bit)
-           (when (!= *logic-lod-wait-frame* *logic-lod-frame*)
-             (set! *logic-lod-wait-frame* *logic-lod-frame*)
-             (set! *logic-lod-wait-count* 0)
-             )
-           (+! *logic-lod-wait-count* 1)
-           1
-           )
           (else
-            0
+            (set! (-> waits idx) (+ waited 1))
+            (when (!= *logic-lod-wait-frame* *logic-lod-frame*)
+              (set! *logic-lod-wait-frame* *logic-lod-frame*)
+              (set! *logic-lod-wait-count* 0)
+              (set! *logic-lod-view-count* 0)
+              )
+            (+! *logic-lod-wait-count* 1)
+            (when (< rate 0)
+              (+! *logic-lod-view-count* 1)
+              (logic-lod-hold! (the-as process-drawable proc))
+              )
+            1
             )
           )
         )
@@ -807,9 +897,7 @@
 
   (defun logic-lod-waited? ((proc process))
     "Did proc wait this frame (logic LOD)?"
-    (let ((idx (logand (-> proc pid) #xffff)))
-      (and *logic-lod-skipped* (logtest? (-> *logic-lod-skipped* (shr idx 3)) (ash 1 (logand idx 7))))
-      )
+    (and *logic-lod-skipped* (nonzero? (-> *logic-lod-skipped* (logand (-> proc pid) #xffff))))
     )
 
   (defun logic-lod-set! ((on int))
@@ -818,11 +906,18 @@
     0
     )
 
-  (set! *logic-lod-clock* (new 'global 'clock 0))
+  (dotimes (i 3)
+    (set! (-> *logic-lod-clocks* i) (new 'global 'clock 0))
+    (set! (-> *logic-lod-clock-frames* i) -1)
+    )
+  (dotimes (i 1024)
+    (set! (-> *logic-lod-held-pid* i) -1)
+    )
+  (set! *logic-lod-clock* (-> *logic-lod-clocks* 0))
   (set! *logic-lod-base-clock* (-> *display* entity-clock))
-  (let ((bits (the-as (pointer uint8) (malloc 'global 8192))))
-    (mem-set32! bits 2048 0)
-    (set! *logic-lod-skipped* bits)
+  (let ((waits (the-as (pointer uint8) (malloc 'global #x10000))))
+    (mem-set32! waits #x4000 0)
+    (set! *logic-lod-skipped* waits)
     )
   (set! *logic-lod-hook* logic-lod-check)
   )

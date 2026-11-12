@@ -9,7 +9,7 @@ reset-and-call
 (method thread-resume cpu-thread)
 logic-lod-run
 logic-lod-check
-logic-lod-wait?
+logic-lod-rate
 execute-math-engine
 anim-lod-math!
 anim-lod-skip?
