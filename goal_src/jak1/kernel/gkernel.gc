@@ -1611,6 +1611,23 @@
   (define *kernel-pre-pool* (the-as process-tree #f))
   (define *kernel-pre-pool-hook* (the-as (function none) #f)))
 
+;; og:preserve-this 3DS logic LOD (process-drawable.gc logic-lod-check): a far process out of view
+;; waits every other frame, and the frame after it runs with the display's rates over both frames
+;; (*logic-lod-begin* / *logic-lod-end*)
+(#when TARGET_3DS
+  (define *logic-lod-hook* (the-as (function process-tree int) #f))
+  (define *logic-lod-begin* (the-as (function none) #f))
+  (define *logic-lod-end* (the-as (function none) #f))
+  (define *logic-lod-skipped* (the-as (pointer uint8) #f))
+  (define *logic-lod-frame* 0)
+  (defun logic-lod-run ((this process-tree) (func (function object object)))
+    "Run this as its logic LOD says; #t when it waits this frame."
+    (let ((lod (if *logic-lod-hook* (*logic-lod-hook* this) 0)))
+      (cond
+        ((= lod 1) #t)
+        ((= lod 2) (*logic-lod-begin*) (let ((ret (func this))) (*logic-lod-end*) ret))
+        (else (func this))))))
+
 (defun execute-process-tree ((this process-tree) (func (function object object)) (context kernel-context))
   "Like iterate, but also requires that prevent-from-run's mask doesn't block, and that run-logic?
   is true in order to call the function."
@@ -1619,7 +1636,7 @@
   ;; check mask for tree, mask for prevent, run-logic?, then run!
   (let ((ret (or (process-mask? (-> this mask) process-tree)
                  (not (and (or (zero? (logand (-> context prevent-from-run) (-> this mask)))) (run-logic? this)))
-                 (func this))))
+                 (#if TARGET_3DS (logic-lod-run this func) (func this)))))
     ;; run on our children
     (cond
       ((eq? ret 'dead) ;; if dead, don't bother checking children.
@@ -1676,6 +1693,8 @@
     ;; clear pending function
     (set! *listener-function* #f)
     (+! *enable-method-set* -1))
+  (#when TARGET_3DS
+    (+! *logic-lod-frame* 1))
   ;; iterate over all processes, running this lambda:
   (execute-process-tree *active-pool*
                         (lambda ((this process))
@@ -2280,7 +2299,14 @@
   (set! (-> this mask) (logand (-> dest mask) PROCESS_CLEAR_MASK))
   (set! (-> this status) 'ready)
   ;; get a unique pid.
-  (let ((pid (-> *kernel-context* next-pid))) (set! (-> this pid) pid) (set! (-> *kernel-context* next-pid) (+ 1 pid)))
+  (let ((pid (-> *kernel-context* next-pid)))
+    (set! (-> this pid) pid)
+    (set! (-> *kernel-context* next-pid) (+ 1 pid))
+    ;; og:preserve-this 3DS logic LOD: a new pid hasn't waited
+    (#when TARGET_3DS
+      (when *logic-lod-skipped*
+        (let ((idx (logand pid #xffff)))
+          (logclear! (-> *logic-lod-skipped* (shr idx 3)) (ash 1 (logand idx 7)))))))
   (set! (-> this top-thread) #f)
   (set! (-> this main-thread) #f)
   (set! (-> this name) name)

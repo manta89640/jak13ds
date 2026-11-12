@@ -1837,6 +1837,43 @@
   (define *kernel-pre-pool-hook* (the-as (function none) #f))
   )
 
+;; og:preserve-this 3DS logic LOD (process-drawable.gc logic-lod-check): a far process out of view
+;; waits every other frame, and the frame after it runs on *logic-lod-clock* (its clock over both)
+(#when TARGET_3DS
+  (define *logic-lod-hook* (the-as (function process-tree int) #f))
+  (define *logic-lod-clock* (the-as clock #f))
+  (define *logic-lod-base-clock* (the-as clock #f))
+  (define *logic-lod-skipped* (the-as (pointer uint8) #f))
+  (define *logic-lod-frame* 0)
+
+  (defun logic-lod-run ((arg0 process-tree) (arg1 (function object object)))
+    "Run arg0 as its logic LOD says; #t when it waits this frame."
+    (let ((lod (if *logic-lod-hook* (*logic-lod-hook* arg0) 0)))
+      (cond
+        ((= lod 1)
+         #t
+         )
+        ((= lod 2)
+         (logior! (-> arg0 mask) (process-mask kernel-run))
+         (let ((proc (the-as process arg0)))
+           (set! (-> proc clock) *logic-lod-clock*)
+           (let ((ret (arg1 arg0)))
+             (if (eq? (-> proc clock) *logic-lod-clock*)
+                 (set! (-> proc clock) *logic-lod-base-clock*)
+                 )
+             ret
+             )
+           )
+         )
+        (else
+          (logior! (-> arg0 mask) (process-mask kernel-run))
+          (arg1 arg0)
+          )
+        )
+      )
+    )
+  )
+
 (defun execute-process-tree ((arg0 process-tree) (arg1 (function object object)) (arg2 kernel-context))
   "Iterate over the process tree, running only if the mask doesn't prevent it.
    Update the mask of the process-tree to have kernel-run if and only if we run at least one process."
@@ -1856,7 +1893,10 @@
   (let ((s3-0 (or (logtest? (-> arg0 mask) (process-mask process-tree))
                   ;; prevent if not both (clear to run and run-logic? = #t)
                   (not (and (not (logtest? (-> arg2 prevent-from-run) (-> arg0 mask))) (run-logic? arg0)))
-                  (begin (logior! (-> arg0 mask) (process-mask kernel-run)) (arg1 arg0))
+                  (#if TARGET_3DS
+                    (logic-lod-run arg0 arg1)
+                    (begin (logior! (-> arg0 mask) (process-mask kernel-run)) (arg1 arg0))
+                    )
                   )
               )
         )
@@ -1922,6 +1962,9 @@
     (set! *enable-method-set* (+ *enable-method-set* -1))
     )
 
+  (#when TARGET_3DS
+    (+! *logic-lod-frame* 1)
+    )
   ;; for each active proces...
   (execute-process-tree
     *active-pool*
@@ -2660,11 +2703,25 @@
 
   ;; inherit clock
   (set! (-> this clock) (-> arg0 clock))
+  ;; og:preserve-this 3DS logic LOD: a child spawned during a two-frame run gets the real clock
+  (#when TARGET_3DS
+    (if (and *logic-lod-clock* (eq? (-> this clock) *logic-lod-clock*))
+        (set! (-> this clock) *logic-lod-base-clock*)
+        )
+    )
   (set! (-> this status) 'ready)
   ;; get unique pid
   (let ((v1-5 (-> *kernel-context* next-pid)))
     (set! (-> this pid) v1-5)
     (set! (-> *kernel-context* next-pid) (+ v1-5 1))
+    ;; og:preserve-this 3DS logic LOD: a new pid hasn't waited
+    (#when TARGET_3DS
+      (when *logic-lod-skipped*
+        (let ((idx (logand v1-5 #xffff)))
+          (logclear! (-> *logic-lod-skipped* (shr idx 3)) (ash 1 (logand idx 7)))
+          )
+        )
+      )
     )
   (set! (-> this top-thread) #f)
   (set! (-> this main-thread) #f)

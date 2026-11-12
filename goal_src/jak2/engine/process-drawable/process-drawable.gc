@@ -684,6 +684,149 @@
     )
   )
 
+;; og:preserve-this 3DS logic LOD (config.ini logic_lod, default on). An enemy, guard, vehicle or
+;; civilian on the entity clock that is out of view (not drawn last frame, its sphere grown by
+;; LOGIC_LOD_VIEW outside the view) and LOGIC_LOD_DIST or more (plus its bounds) from the camera and
+;; Jak runs its trans, code and post on every other frame only (staggered by pid). The frame after
+;; a wait it runs on *logic-lod-clock*: the entity clock over both frames (twice its ratio, its
+;; old counters two frames back), so it moves, animates and counts time as if it had run both.
+;; Never twice in a row; never Jak's processes, movies, or anything another clock runs.
+(#when TARGET_3DS
+  (define-extern *pc-3ds-logic-lod* symbol)
+  (defconstant LOGIC_LOD_DIST (meters 20))
+  (defconstant LOGIC_LOD_VIEW (meters 4))
+  (define *logic-lod-clock-frame* -1)
+  ;; per frame (stats for a debugger or a REPL): processes that waited
+  (define *logic-lod-wait-count* 0)
+  (define *logic-lod-wait-frame* -1)
+
+  (defun logic-lod-clock-update ()
+    "*logic-lod-clock*: the entity clock over the last two frames (once per frame)."
+    (when (!= *logic-lod-clock-frame* *logic-lod-frame*)
+      (set! *logic-lod-clock-frame* *logic-lod-frame*)
+      (let* ((src (-> *display* entity-clock))
+             (dst *logic-lod-clock*)
+             (d2 (* 2 (- (-> src frame-counter) (-> src old-frame-counter))))
+             (f2 (the float d2))
+             )
+        (set! *logic-lod-base-clock* src)
+        (set! (-> dst index) (-> src index))
+        (set! (-> dst mask) (-> src mask))
+        (set! (-> dst clock-ratio) (-> src clock-ratio))
+        (set! (-> dst accum) (-> src accum))
+        (set! (-> dst integral-accum) (-> src integral-accum))
+        (set! (-> dst frame-counter) (-> src frame-counter))
+        (set! (-> dst old-frame-counter) (- (-> src frame-counter) d2))
+        (set! (-> dst integral-frame-counter) (-> src integral-frame-counter))
+        (set! (-> dst old-integral-frame-counter)
+              (- (-> src integral-frame-counter) (* 2 (- (-> src integral-frame-counter) (-> src old-integral-frame-counter))))
+              )
+        (set! (-> dst time-adjust-ratio) (* 2.0 (-> src time-adjust-ratio)))
+        (set! (-> dst seconds-per-frame) (* 2.0 (-> src seconds-per-frame)))
+        (set! (-> dst frames-per-second) (* 0.5 (-> src frames-per-second)))
+        ;; as update-rates! makes it from the frame count
+        (set-vector! (-> dst sparticle-data) (the-as float d2) f2 (* 0.2 f2) (* 0.2 f2))
+        )
+      )
+    0
+    (none)
+    )
+
+  (defun logic-lod-wait? ((proc process))
+    "May proc wait this frame (out of view, far from the camera and Jak)?"
+    (and *target*
+         (eq? (-> proc clock) (-> *display* entity-clock))
+         (not (logtest? (-> *kernel-context* prevent-from-run) (process-mask movie)))
+         (type? proc process-drawable)
+         (let* ((pd (the-as process-drawable proc))
+                (dc (-> pd draw))
+                )
+           (and (nonzero? dc)
+                (nonzero? (-> pd root))
+                (!= (ppointer->process (-> pd parent)) *target*)
+                (not (logtest? (-> dc status) (draw-control-status on-screen)))
+                (let* ((r (+ (-> dc bounds w) LOGIC_LOD_DIST))
+                       (r2 (* r r))
+                       )
+                  (and (< r2 (vector-vector-distance-squared (-> pd root trans) (-> *math-camera* trans)))
+                       (< r2 (vector-vector-distance-squared (-> pd root trans) (-> *target* root trans)))
+                       )
+                  )
+                (let ((s (new 'stack-no-clear 'sphere)))
+                  (set! (-> s quad) (-> dc origin quad))
+                  (set! (-> s r) (+ (-> dc bounds w) LOGIC_LOD_VIEW))
+                  (not (sphere-in-view-frustum? s))
+                  )
+                )
+           )
+         )
+    )
+
+  (defun logic-lod-check ((arg0 process-tree))
+    "The kernel's question (gkernel.gc logic-lod-run): 0 run, 1 wait, 2 run over two frames."
+    (let ((proc (the-as process arg0)))
+      (if (or (not *pc-3ds-logic-lod*)
+              (not (logtest? (-> proc mask) (process-mask enemy guard vehicle civilian)))
+              )
+          (return 0)
+          )
+      (let* ((bits *logic-lod-skipped*)
+             (idx (logand (-> proc pid) #xffff))
+             (byte (shr idx 3))
+             (bit (ash 1 (logand idx 7)))
+             )
+        (cond
+          ((logtest? (-> bits byte) bit)
+           (logclear! (-> bits byte) bit)
+           (cond
+             ((eq? (-> proc clock) (-> *display* entity-clock))
+              (logic-lod-clock-update)
+              2
+              )
+             (else
+               0
+               )
+             )
+           )
+          ((and (logtest? (+ *logic-lod-frame* (-> proc pid)) 1) (logic-lod-wait? proc))
+           (logior! (-> bits byte) bit)
+           (when (!= *logic-lod-wait-frame* *logic-lod-frame*)
+             (set! *logic-lod-wait-frame* *logic-lod-frame*)
+             (set! *logic-lod-wait-count* 0)
+             )
+           (+! *logic-lod-wait-count* 1)
+           1
+           )
+          (else
+            0
+            )
+          )
+        )
+      )
+    )
+
+  (defun logic-lod-waited? ((proc process))
+    "Did proc wait this frame (logic LOD)?"
+    (let ((idx (logand (-> proc pid) #xffff)))
+      (and *logic-lod-skipped* (logtest? (-> *logic-lod-skipped* (shr idx 3)) (ash 1 (logand idx 7))))
+      )
+    )
+
+  (defun logic-lod-set! ((on int))
+    "Logic and particle LOD on (1) or off (0), for A/B tests (pad script: call logic-lod-set! 0)."
+    (set! *pc-3ds-logic-lod* (nonzero? on))
+    0
+    )
+
+  (set! *logic-lod-clock* (new 'global 'clock 0))
+  (set! *logic-lod-base-clock* (-> *display* entity-clock))
+  (let ((bits (the-as (pointer uint8) (malloc 'global 8192))))
+    (mem-set32! bits 2048 0)
+    (set! *logic-lod-skipped* bits)
+    )
+  (set! *logic-lod-hook* logic-lod-check)
+  )
+
 (defun execute-math-engine ()
   (let ((gp-0 *matrix-engine*))
     ;; og:preserve-this (AI-assisted) 3DS animation LOD (above): last frame's skipped requests of
@@ -702,7 +845,8 @@
           (let ((h (-> skipped i)))
             (when (not (anim-lod-queued? gp-0 h))
               (let ((pd (the-as process-drawable (handle->process h))))
-                (if pd
+                ;; a process the logic LOD held this frame asks again next frame
+                (if (and pd (not (logic-lod-waited? pd)))
                     (anim-lod-joint-math! pd)
                     )
                 )

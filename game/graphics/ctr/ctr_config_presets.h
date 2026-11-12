@@ -37,6 +37,7 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"streaming", "off"}, /* (AI-assisted, streaming) */
     /* the Nov 11 options, on by default */
     {"vfp_vector", "off"},    {"anim_lod_far", "off"},
+    {"logic_lod", "off"},
     {"merc_lod_scale", "1"},  {"shadow_count", "0"},
 };
 /* bench: normal plus the GPU benchmark at boot (~20-60 s, data/log/bench.txt), the GSP perf log
@@ -56,6 +57,7 @@ static const ctr_cfg_kv ctr_cfg_preset_full[] = {
  * normal (anim_lod on is its default). Not yet run on a console. */
 static const ctr_cfg_kv ctr_cfg_preset_fast[] = {
     {"anim_lod", "on"},
+    {"logic_lod", "on"},
 #if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
     {"anim_lod_far", "on"},      {"merc_lod_scale", "0.58"}, {"shadow_count", "4"},
     {"traffic_density", "0.35"}, {"particle_density", "0.5"},
@@ -136,6 +138,7 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
 #endif
     {"shield_density", "1"}, /* Citadel robot cage, 0.125..1 (1: every panel) */
     {"anim_lod", "on"},
+    {"logic_lod", "on"},
     {"vfp_vector", "on"},    /* (AI-assisted, vfpvec) bone matrices as VFP short vectors */
     {"ocean", "full"},
     {"shadows", "full"},

@@ -752,6 +752,21 @@ void InitMachine_PCPort() {
     intern_from_c("*pc-3ds-anim-lod*")->value =
         anim_lod ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
   }
+  // config.ini logic_lod (default on): far enemies and platforms out of view run on every other
+  // frame (process-drawable.gc logic-lod-check). Off on other builds unless OPENGOAL_LOGIC_LOD is 1.
+  {
+    bool logic_lod = false;
+#ifdef __3DS__
+    logic_lod = ctr_config_bool("logic_lod", 1);
+    lg::info("logic LOD {} (config.ini logic_lod)", logic_lod ? "on" : "off");
+#else
+    if (const char* e = getenv("OPENGOAL_LOGIC_LOD")) {
+      logic_lod = atoi(e) >= 1;
+    }
+#endif
+    intern_from_c("*pc-3ds-logic-lod*")->value =
+        logic_lod ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
+  }
   // (AI-assisted) The joint decompressor's requests and final normalize run as native code on the
   // 3DS (joint.gc, game/mips2c/jak1_functions/native_anim.cpp; the same results, always on: no
   // config.ini switch since Oct 18). Off on other builds (the GOAL versions).

@@ -195,6 +195,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
                key == "shield_density" ||
                key == "io_checksum" || key == "anim_lod" || key == "io_cache" ||
                key == "anim_lod_far" || key == "shadow_count" ||  // (AI-assisted, j2cuts)
+               key == "logic_lod" ||
                key == "vfp_vector" ||  // (AI-assisted, vfpvec) native_bones_vfp.h
                key == "log_async" || key == "c3l_read_buffer" || key == "text_scale" ||
                key == "text_min_height" ||
