@@ -607,12 +607,10 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     const auto& vs = m_vram->stats();
     lg::debug("[ctr] frame {}: {} draws {} tris, vram uploads {} (written {}, chunks {} written, {} "
               "already there), relocates skipped {}, textures decoded {} (reused {}), gpu "
-              "textures {} ({} KB), linear free {} KB, vram free {} KB ({} vram textures, {} "
-              "failed copies)",
+              "textures {} ({} KB), linear free {} KB, vram free {} KB",
               m_rs.frame_idx, gs.draws, gs.triangles, vs.uploads, vs.uploads_changed,
               vs.chunks_written, vs.chunks_skipped, vs.relocates_skipped, vs.decoded, vs.revived,
-              gs.textures, gs.tex_bytes / 1024, gs.linear_free / 1024, gs.vram_free / 1024,
-              gs.vram_textures, gs.vram_copy_failures);
+              gs.textures, gs.tex_bytes / 1024, gs.linear_free / 1024, gs.vram_free / 1024);
     if (m_timing.frames) {
       const double n = m_timing.frames;
       // (AI-assisted) gpu-wait: in C3D_FrameBegin (part of wait-gpu, or of submit with the
@@ -659,11 +657,10 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
                m_timing.vsh_instr / n / 1000.0, m_timing.prog_switches / n,
                m_timing.state_changes / n, m_timing.blend_states / n);
       lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB "
-               "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB ({} in reserved "
-               "VRAM); last frame: {} level draws with the fog in the vertex alpha ({} texture unit 1 switches); {} program switches, {} with a shader upload, {} uniform vectors at switches",
+               "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB; last frame: {} level draws with the fog in the vertex alpha ({} texture unit 1 switches); {} program switches, {} with a shader upload, {} uniform vectors at switches",
                gs.pools, gs.pool_bytes / 1024, gs.pools_in_vram, gs.pool_vram_bytes / 1024,
                gs.linear_free / 1024, gs.linear_largest / 1024, gs.vram_free / 1024,
-               gs.compact_textures, gs.compact_bytes / 1024, gs.compact_in_vram,
+               gs.compact_textures, gs.compact_bytes / 1024,
                gs.fog_alpha_draws, gs.unit1_toggles, gs.prog_switches, gs.prog_uploads,
                gs.prog_unif_vectors);
       // build time by bucket renderer
@@ -1213,7 +1210,6 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   }
 #endif
   ctr_gpu_set_rgba4_as_rgba8(ctr_settings().rgba4_as_rgba8 ? 1 : 0);
-  // (AI-assisted) before vram_textures: the reserved VRAM for compact textures is taken there
   ctr_gpu_set_compact_textures(ctr_settings().compact_textures ? 1 : 0);
   ctr_gpu_set_vram_textures(ctr_settings().vram_textures ? 1 : 0);
   ctr_gpu_set_mip_mode(ctr_settings().mipmaps);

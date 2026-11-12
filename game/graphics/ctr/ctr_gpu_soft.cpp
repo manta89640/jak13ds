@@ -2635,7 +2635,6 @@ void ctr_gpu_pool_delete(int pool) {
   }
 }
 
-void ctr_gpu_pool_set_priority(int, int) {}
 
 int ctr_gpu_mesh_begin(int vertex_count, int index_count, void** verts, uint16_t** indices) {
   return ctr_gpu_mesh_begin_tail(vertex_count, 0, index_count, verts, indices);

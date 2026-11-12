@@ -114,7 +114,8 @@ void ctr_linear_unlock(void);
  * running away on its overwritten buffer), and VRAM is filled with level textures as far as it
  * goes. All allocations here leave some free; textures made by citro3d check the room first. */
 #define LINEAR_RESERVE (128u * 1024u)
-#define VRAM_RESERVE (16u * 1024u)
+/* VRAM: 1 MB always free (the level texture pools fill it at load, never to the last byte) */
+#define VRAM_RESERVE (1024u * 1024u)
 static void* safe_linear_alloc(size_t size) {
   if ((size_t)linearSpaceFree() < size + LINEAR_RESERVE) {
     return NULL;
@@ -221,10 +222,8 @@ static inline int words_equal(const void* a, const void* b, unsigned n) {
 #define CMD_DRAW_WORDS 384
 /* quads per ctr_gpu_draw_quads batch: 4 vertices each, u16 indices */
 #define QUAD_MAX 4096
-/* texture pool bytes copied to VRAM per frame (a bigger pool alone), and how long a pool stays
- * before one with a higher priority may take its place */
+/* texture pool bytes copied to VRAM per frame (a bigger pool alone) */
 #define POOL_COPY_BYTES (256u * 1024u)
-#define POOL_STAY_FRAMES 60
 
 typedef struct {
   C3D_Tex tex;
@@ -240,9 +239,6 @@ typedef struct {
   /* (AI-assisted) ctr_gpu_tex_create_compact textures */
   uint8_t compact;    /* made by ctr_gpu_tex_create_compact (counted in the stats) */
   uint8_t alpha_full; /* texel alpha 0xff = 1.0 (compact formats store GS alpha doubled) */
-  uint8_t want_vram;  /* waiting to move to the reserved VRAM (migrate_small_textures) */
-  int arena_off;      /* >= 0: the texels are in the reserved VRAM at this offset, not citro3d's */
-  void* home;         /* arena_off >= 0: the texels in linear memory (the copy that is kept) */
 } TexSlot;
 
 typedef struct {
@@ -250,13 +246,11 @@ typedef struct {
                        * delete held one more frame (process_pending_deletes) */
   int ready;          /* all texels written (ctr_gpu_pool_ready) */
   uint8_t* linear;    /* the pool's bytes, all of them, always */
-  void* vram;         /* a copy of [0, vram_bytes) the GPU reads instead, or NULL */
+  void* vram;         /* its place in VRAM for its whole life, or NULL (vram_fill) */
+  int vram_ok;        /* the copy there is queued: the textures read it */
   unsigned int bytes;
-  unsigned int vram_bytes; /* whole textures from the start; less than bytes when VRAM is short */
-  int priority;
-  int no_room_frame;  /* last frame it didn't fit in VRAM (don't try again every frame) */
-  int vram_frame;     /* the frame its copy to VRAM was queued */
-  unsigned int vram_serial; /* which move into VRAM this copy is from (0: none) */
+  u32 seq;            /* ready order */
+  u32 tried_gen;      /* s_vram_gen when it last found no room (0: not tried) */
 } TexPool;
 
 #define MAX_MESHES 8192
@@ -460,8 +454,6 @@ static struct {
   int pending_delete_count;
   void* pending_staging[MAX_STAGING]; /* linear buffers of queued VRAM texture copies */
   int pending_staging_count;
-  int vram_textures;
-  int vram_copy_failures;
   int screen_tex; /* texture slot of ctr_gpu_copy_screen (-1: not made yet), 256x512 RGBA8 */
   int screen_tex_vram; /* (AI-assisted) it is in VRAM (a kept copy that found no linear memory) */
   int screen_tex_pinned; /* ctr_gpu_screen_copy_pin */
@@ -536,95 +528,13 @@ void ctr_gpu_request_screenshot(const char* path) {
   g.screenshot_state = 1;
 }
 
-/* (AI-assisted) Reserved VRAM for the small textures made on the fly (sprites, HUD, font:
- * ctr_gpu_tex_create_compact). Taken once before the level texture pools fill VRAM (they move
- * whole pools in, so small textures scattered over VRAM would split it). First fit, in 128-byte
- * units, with the free ranges sorted by offset. Used by the render thread only. */
-#define ARENA_BYTES (384 * 1024)
-#define ARENA_ALIGN 128
-/* (AI-assisted, streammem) as many free ranges as the arena can have (every other granule free):
- * with 128 a fragmented arena lost each freed range that had no free neighbour, for good (compact
- * textures then went to linear memory) */
-#define ARENA_MAX_FREE (ARENA_BYTES / ARENA_ALIGN / 2 + 1)
-static struct {
-  uint8_t* base;
-  u32 free_off[ARENA_MAX_FREE];
-  u32 free_len[ARENA_MAX_FREE];
-  int nfree;
-} s_arena;
-/* (AI-assisted) a compact texture may be waiting to move there (migrate_small_textures) */
-static int s_small_waiting;
-
-static u32 arena_round(u32 bytes) {
-  return (bytes + ARENA_ALIGN - 1) & ~(u32)(ARENA_ALIGN - 1);
-}
-
-static int arena_alloc(u32 bytes) {
-  bytes = arena_round(bytes);
-  for (int i = 0; i < s_arena.nfree; i++) {
-    if (s_arena.free_len[i] >= bytes) {
-      const u32 off = s_arena.free_off[i];
-      s_arena.free_off[i] += bytes;
-      s_arena.free_len[i] -= bytes;
-      if (!s_arena.free_len[i]) {
-        memmove(&s_arena.free_off[i], &s_arena.free_off[i + 1],
-                (size_t)(s_arena.nfree - i - 1) * sizeof(u32));
-        memmove(&s_arena.free_len[i], &s_arena.free_len[i + 1],
-                (size_t)(s_arena.nfree - i - 1) * sizeof(u32));
-        s_arena.nfree--;
-      }
-      return (int)off;
-    }
-  }
-  return -1;
-}
-
-static void arena_free(u32 off, u32 bytes) {
-  bytes = arena_round(bytes);
-  int i = 0;
-  while (i < s_arena.nfree && s_arena.free_off[i] < off) {
-    i++;
-  }
-  /* merge with the range before and / or after */
-  const int prev = i > 0 && s_arena.free_off[i - 1] + s_arena.free_len[i - 1] == off;
-  const int next = i < s_arena.nfree && off + bytes == s_arena.free_off[i];
-  if (prev && next) {
-    s_arena.free_len[i - 1] += bytes + s_arena.free_len[i];
-    memmove(&s_arena.free_off[i], &s_arena.free_off[i + 1],
-            (size_t)(s_arena.nfree - i - 1) * sizeof(u32));
-    memmove(&s_arena.free_len[i], &s_arena.free_len[i + 1],
-            (size_t)(s_arena.nfree - i - 1) * sizeof(u32));
-    s_arena.nfree--;
-  } else if (prev) {
-    s_arena.free_len[i - 1] += bytes;
-  } else if (next) {
-    s_arena.free_off[i] = off;
-    s_arena.free_len[i] += bytes;
-  } else if (s_arena.nfree < ARENA_MAX_FREE) {
-    memmove(&s_arena.free_off[i + 1], &s_arena.free_off[i],
-            (size_t)(s_arena.nfree - i) * sizeof(u32));
-    memmove(&s_arena.free_len[i + 1], &s_arena.free_len[i],
-            (size_t)(s_arena.nfree - i) * sizeof(u32));
-    s_arena.free_off[i] = off;
-    s_arena.free_len[i] = bytes;
-    s_arena.nfree++;
-  } /* else: too fragmented, the range stays used (lost until exit) */
-}
-
 /* the texels of a slot: freed (or given back to the reserved VRAM) */
 static void tex_slot_free_texels(TexSlot* t) {
-  if (t->arena_off >= 0) {
-    arena_free((u32)t->arena_off, C3D_TexCalcTotalSize(t->tex.size, t->tex.maxLevel));
-    t->arena_off = -1;
-    linearFree(t->home);
-    t->home = NULL;
-    t->tex.data = NULL;
-  } else if (t->pool < 0) {
+  if (t->pool < 0) {
     C3D_TexDelete(&t->tex);
   }
   t->compact = 0;
   t->alpha_full = 0;
-  t->want_vram = 0;
 }
 
 /* Texture and mesh slots, the delete lists and linear memory are shared with the level loader
@@ -752,6 +662,7 @@ static int reserve_mesh_slot(void) {
 /* hold (render.ini pipeline): the GPU may still draw the frame before the one that asked for a
  * delete, so a slot waits one more frame (2 -> 4 -> freed). Not 3: that is a slot or pool the
  * loader thread is still filling (the pool loop looks at every pool, not a delete list). */
+static void vram_freed(void);
 static void process_pending_deletes(int hold) {
   ctr_linear_lock();
   for (int i = 0; i < g.pending_staging_count; i++) {
@@ -782,6 +693,7 @@ static void process_pending_deletes(int hold) {
     } else if (p->used == 2 || p->used == 4) {
       if (p->vram) {
         vramFree(p->vram);
+        vram_freed();
       }
       if (p->linear) {
         linearFree(p->linear);
@@ -1462,7 +1374,6 @@ int ctr_gpu_init(void) {
   GSPGPU_FlushDataCache(g.quad_indices, QUAD_MAX * 6 * sizeof(uint16_t));
   for (int i = 0; i < MAX_TEXTURES; i++) {
     g.textures[i].pool = -1;
-    g.textures[i].arena_off = -1;
   }
   g.screen_tex = -1;
   setup_projection();
@@ -1526,10 +1437,6 @@ void ctr_gpu_exit(void) {
     }
   }
   linearFree(g.vbuf);
-  if (s_arena.base) {
-    vramFree(s_arena.base);
-    memset(&s_arena, 0, sizeof(s_arena));
-  }
   ctr_linear_unlock();
   /* (AI-assisted) the programs, then their shbins */
   prog_set_free(&s_ps);
@@ -1553,8 +1460,7 @@ void ctr_gpu_exit(void) {
   g.ready = 0;
 }
 
-static void update_pool_residency(void);
-static int g_vram_textures;
+static void vram_fill(void);
 
 /* (AI-assisted) citro3d's internal context (source/internal.h of the citro3d that libcitro3d.a is
  * built from: ~/devkitpro-3ds/src/citro3d). The raw command path below keeps it in step with the
@@ -2541,7 +2447,6 @@ void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* drop
   *floor = s_pres.floor;
 }
 
-static void migrate_small_textures(void);
 
 
 /* (AI-assisted) Jak II's menu: the next frame begin clears only the depth */
@@ -2584,7 +2489,6 @@ static void frame_state_reset(void) {
   memset(&g.cur, 0, sizeof(g.cur));
   s_gm_tris = 0;
   g.in_frame = 1;
-  migrate_small_textures();
 }
 
 /* (AI-assisted) the clear color as the color buffer stores it (memory fill value) */
@@ -2620,6 +2524,9 @@ static void pipeline_frame_begin(u32 clear) {
     return;
   }
   c3d_frame_abort();
+  /* the queue runs what this frame begin adds (stopped after the HOME Menu or sleep: citro3d's
+   * frame begin at the frame end would clear the clear and the VRAM copies unrun) */
+  gxCmdQueueRun(&__C3D_Context.gxQueue);
   GPUCMD_SetBuffer(s_cmdbufs[s_k], PIPE_CMD_BYTES / 4, 0);
   g.cmd_base = gpuCmdBuf;
   g.cmd_flushed_words = 0;
@@ -2627,7 +2534,7 @@ static void pipeline_frame_begin(u32 clear) {
   g.frame_no++;
   bd_frame_begin(); /* (AI-assisted, gpu-rt) gpu_breakdown: the frame before is done first */
   gt_note_first(); /* (AI-assisted) the clear below starts the GPU on this frame */
-  update_pool_residency();
+  vram_fill();
   if (s_bd.frame) {
     bd_clear_begin();
   }
@@ -2702,7 +2609,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   g.frame_no++;
   process_pending_deletes(0);
   /* before any draw: copies to VRAM are queued ahead of this frame's draws */
-  update_pool_residency();
+  vram_fill();
   if (g.screenshot_state == 2) {
     write_screenshot();
     g.screenshot_state = 0;
@@ -2975,7 +2882,6 @@ void ctr_gpu_frame_end(void) {
         if (t->compact) {
           g.cur.compact_textures++;
           g.cur.compact_bytes += t->tex.size;
-          g.cur.compact_in_vram += t->arena_off >= 0;
         }
       }
     }
@@ -2988,16 +2894,14 @@ void ctr_gpu_frame_end(void) {
   /* times of the last frame the GPU finished (the one before this) */
   g.cur.gpu_ms = C3D_GetProcessingTime();
   g.cur.draw_ms = C3D_GetDrawingTime();
-  g.cur.vram_textures = g.vram_textures;
-  g.cur.vram_copy_failures = g.vram_copy_failures;
   for (int i = 0; i < MAX_POOLS; i++) {
     const TexPool* p = &g.pools[i];
     if (p->used == 1) {
       g.cur.pools++;
       g.cur.pool_bytes += p->bytes;
-      if (p->vram) {
+      if (p->vram_ok) {
         g.cur.pools_in_vram++;
-        g.cur.pool_vram_bytes += p->vram_bytes;
+        g.cur.pool_vram_bytes += p->bytes;
       }
     }
   }
@@ -3049,29 +2953,14 @@ int ctr_gpu_rgba4_as_rgba8(void) {
   return g_rgba4_as_rgba8;
 }
 
-/* texture pools in VRAM (update_pool_residency) */
+/* level texture pools in VRAM (vram_fill), set at init */
 static int g_vram_textures = 0;
 
 static int g_compact;
 
 void ctr_gpu_set_vram_textures(int on) {
   g_vram_textures = on;
-  /* (AI-assisted) the reserved VRAM for compact textures: taken before any level pool moves in */
-  if (on && g_compact && g.ready && !s_arena.base) {
-    ctr_linear_lock();
-    s_arena.base = (uint8_t*)vramAlloc(ARENA_BYTES);
-    ctr_linear_unlock();
-    if (s_arena.base) {
-      s_arena.free_off[0] = 0;
-      s_arena.free_len[0] = ARENA_BYTES;
-      s_arena.nfree = 1;
-    }
-  }
 }
-
-/* Textures made on the fly (ctr_gpu_tex_create) outside of a frame in VRAM: off. Their upload
- * check reads VRAM with the CPU, which isn't mapped for every kind of launch. */
-static const int g_vram_dynamic = 0;
 
 static int g_mip_mode = 1;
 
@@ -3158,13 +3047,32 @@ static void tex_init_external(C3D_Tex* tex, void* data, int w, int h, int format
 
 /* ---------------- texture pools ---------------- */
 
-/* VRAM holds copies of what linear memory holds: the GPU reads them faster. The CPU never reads
- * VRAM (its mapping is cached: a read can return what was there before the GPU's last write), and
- * what is there may be gone after the HOME Menu or sleep. */
-/* a copy at frame begin, in the queue's order behind the frames in flight (not waited for);
- * 0: not queued */
+/* VRAM as a static cache of the level texture pools (vram_fill). A pool that is ready gets a place
+ * in VRAM once, in the order pools become ready, while that leaves VRAM_RESERVE free; the rest
+ * stay in linear memory. A place is kept until the pool is deleted (no eviction, no partial pools);
+ * a pool that found no room tries again only after another pool gave VRAM back. Linear memory keeps
+ * every pool: after the HOME Menu or sleep the copies are made again from there (vram_after_home).
+ * The CPU never reads VRAM. */
+static u32 s_pool_seq;     /* pools made ready so far */
+static u32 s_vram_gen = 1; /* + 1 when a pool gives its VRAM back */
+static volatile int s_vram_work; /* a pool may want a place or a copy */
+static void vram_freed(void) {
+  s_vram_gen++;
+  s_vram_work = 1;
+}
+
+/* a copy into VRAM queued ahead of the draws built after it; 0: not queued (HOME Menu, sleep) */
 static int queue_texture_copy(void* in, void* out, u32 size) {
-  return sync_texture_copy((u32*)in, 0, (u32*)out, 0, size, 8);
+  if (!s_pipeline) {
+    return sync_texture_copy((u32*)in, 0, (u32*)out, 0, size, 8);
+  }
+  if (!gx_begin()) {
+    return 0;
+  }
+  /* (the pipeline's frame begin: the queue runs the frame before; nothing of this one is built) */
+  GX_TextureCopy((u32*)in, 0, (u32*)out, 0, size, 8);
+  gx_end();
+  return 1;
 }
 
 int ctr_gpu_pool_create(unsigned int bytes) {
@@ -3187,7 +3095,6 @@ int ctr_gpu_pool_create(unsigned int bytes) {
       p->used = 3;
       p->linear = mem;
       p->bytes = bytes;
-      p->no_room_frame = -1000;
     } else {
       slot = -1;
     }
@@ -3216,9 +3123,8 @@ int ctr_gpu_pool_tex(int pool, unsigned int offset, int w, int h, int format, in
   TexSlot* t = &g.textures[slot];
   TexPool* p = &g.pools[pool];
   t->bytes = ctr_gpu_tex_bytes(w, h, format, levels);
-  /* reads the pool's current place: set before the pool is ready (it stays in linear memory
-   * until then) */
-  tex_init_external(&t->tex, (p->vram ? (uint8_t*)p->vram : p->linear) + offset, w, h, format,
+  /* in linear memory until the pool's copy to VRAM is queued (vram_fill) */
+  tex_init_external(&t->tex, (p->vram_ok ? (uint8_t*)p->vram : p->linear) + offset, w, h, format,
                     levels);
   t->pool = pool;
   t->offset = offset;
@@ -3237,9 +3143,11 @@ void ctr_gpu_pool_ready(int pool) {
   cache_flush_now(p->linear, p->bytes);
   ctr_linear_lock();
   p->ready = 1;
+  p->seq = ++s_pool_seq;
   if (p->used == 3) {
     p->used = 1;
   }
+  s_vram_work = 1;
   ctr_linear_unlock();
 }
 
@@ -3254,23 +3162,14 @@ void ctr_gpu_pool_delete(int pool) {
   ctr_linear_unlock();
 }
 
-void ctr_gpu_pool_set_priority(int pool, int priority) {
-  if (pool >= 0 && pool < MAX_POOLS && g.pools[pool].used) {
-    g.pools[pool].priority = priority;
-  }
-}
-
-/* point the pool's textures at its VRAM copy (the ones in [0, vram_bytes)) or linear memory */
+/* point the pool's textures at its VRAM copy or linear memory */
 static void pool_repoint(int pool) {
   TexPool* p = &g.pools[pool];
+  uint8_t* base = p->vram_ok ? (uint8_t*)p->vram : p->linear;
   for (int i = 0; i < MAX_TEXTURES; i++) {
     TexSlot* t = &g.textures[i];
     if (t->used && t->pool == pool) {
-      if (p->vram && t->offset + t->bytes <= p->vram_bytes) {
-        t->tex.data = (uint8_t*)p->vram + t->offset;
-      } else {
-        t->tex.data = p->linear + t->offset;
-      }
+      t->tex.data = base + t->offset;
     }
   }
   g.bound_tex = NULL;
@@ -3292,262 +3191,77 @@ static void defer_linear_free(void* mem) {
   }
 }
 
-/* (AI-assisted) The end of the pool after `part` bytes, without a straddling texture: textures in
- * [0, result) are whole, the others start at result or later. */
-static unsigned int pool_split(int pool, unsigned int part) {
-  for (int changed = 1; changed;) {
-    changed = 0;
-    for (int i = 0; i < MAX_TEXTURES; i++) {
-      const TexSlot* t = &g.textures[i];
-      if (t->used && t->pool == pool && t->offset < part && t->offset + t->bytes > part) {
-        part = t->offset;
-        changed = 1;
-      }
-    }
-  }
-  return part;
-}
-
-/* the GPU reads linear memory again (frames in flight keep the VRAM copy: whatever takes its
- * place is queued behind them) */
-static void pool_leave_vram(int pool) {
-  TexPool* p = &g.pools[pool];
-  if (!p->vram) {
+/* At frame begin, before any draw (render thread): the next pools in ready order get their place
+ * in VRAM and their copy queued, at most POOL_COPY_BYTES a frame (a bigger pool alone). */
+static void vram_fill(void) {
+  if (!g_vram_textures || !s_vram_work) {
     return;
   }
-  void* v = p->vram;
-  p->vram = NULL;
-  p->vram_bytes = 0;
-  p->vram_serial = 0;
-  pool_repoint(pool);
-  vramFree(v);
-}
-
-static void arena_leave_vram(int back);
-
-/* nothing in VRAM is what was copied there any more (after the HOME Menu or sleep): everything is read from linear memory; back: and copied to VRAM again from there */
-static void vram_copies_lost(int back) {
-  ctr_linear_lock();
-  for (int i = 0; i < MAX_POOLS; i++) {
-    if (g.pools[i].used == 1 && g.pools[i].vram) {
-      pool_leave_vram(i);
-      g.pools[i].no_room_frame = -1000;
-    }
-  }
-  ctr_linear_unlock();
-  arena_leave_vram(back);
-}
-
-/* At frame begin, before any draw: copy the pools that want to be in VRAM there, most wanted
- * first, moving pools with a lower priority out if that makes room. The copies are queued ahead of
- * this frame's draws, which read the VRAM copy. */
-static void update_pool_residency(void) {
-  if (!g_vram_textures) {
-    int any = s_arena.base && !(s_arena.nfree == 1 && s_arena.free_len[0] == ARENA_BYTES);
-    for (int i = 0; i < MAX_POOLS && !any; i++) {
-      any = g.pools[i].used == 1 && g.pools[i].vram != NULL;
-    }
-    if (any) {
-      vram_copies_lost(0);
-    }
-    return;
-  }
-  /* (AI-assisted) the largest block VRAM can give at all: two separate 3 MB banks, each with a
-   * render target buffer. Measured once (only the screens' buffers are there yet). A pool bigger
-   * than this never fits whole. */
-  static unsigned int s_vram_max_block = 0;
-  if (!s_vram_max_block) {
-    ctr_linear_lock();
-    for (unsigned int sz = 6u << 20; sz >= (256u << 10); sz -= 64u << 10) {
-      void* probe = vramAlloc(sz);
-      if (probe) {
-        vramFree(probe);
-        s_vram_max_block = sz;
-        break;
-      }
-    }
-    ctr_linear_unlock();
-    if (!s_vram_max_block) {
-      s_vram_max_block = 1;
-    }
-  }
-  static int s_copy_released_frame = -1000; /* the distorter's screen copy gave up its VRAM */
-  unsigned int copied = 0;
-  int tried[MAX_POOLS] = {0};
-  int evictions = 0;
-  while (copied < POOL_COPY_BYTES) {
-    int best = -1;
+  s_vram_work = 0;
+  u32 copied = 0;
+  for (;;) {
+    int next = -1;
     ctr_linear_lock();
     for (int i = 0; i < MAX_POOLS; i++) {
       const TexPool* p = &g.pools[i];
-      if (p->used != 1 || !p->ready || p->vram || tried[i] ||
-          g.frame_no - p->no_room_frame < 60) {
+      if (p->used != 1 || !p->ready || p->vram_ok || (!p->vram && p->tried_gen == s_vram_gen)) {
         continue;
       }
-      if (best < 0 || p->priority > g.pools[best].priority) {
-        best = i;
+      if (next < 0 || p->seq < g.pools[next].seq) {
+        next = i;
+      }
+    }
+    TexPool* p = next >= 0 ? &g.pools[next] : NULL;
+    if (p && !p->vram && (!copied || copied + p->bytes <= POOL_COPY_BYTES)) {
+      p->vram = vramAlloc(p->bytes); /* (keeps VRAM_RESERVE free) */
+      if (!p->vram) {
+        p->tried_gen = s_vram_gen;
       }
     }
     ctr_linear_unlock();
-    if (best < 0) {
-      break;
+    if (!p) {
+      return;
     }
-    tried[best] = 1;
-    TexPool* p = &g.pools[best];
     if (copied && copied + p->bytes > POOL_COPY_BYTES) {
-      break; /* the next frame's */
+      s_vram_work = 1; /* the next frame's */
+      return;
     }
-    ctr_linear_lock();
-    void* v = safe_vram_alloc(p->bytes);
-    while (!v && p->bytes <= s_vram_max_block && evictions < 4) {
-      /* move out the resident pool with the lowest priority below this one's */
-      int victim = -1;
-      for (int i = 0; i < MAX_POOLS; i++) {
-        const TexPool* q = &g.pools[i];
-        if (q->used == 1 && q->vram && q->priority < p->priority &&
-            g.frame_no - q->vram_frame >= POOL_STAY_FRAMES &&
-            (victim < 0 || q->priority < g.pools[victim].priority)) {
-          victim = i;
-        }
-      }
-      if (victim < 0) {
-        /* (AI-assisted, gpu-home) last, the distorter's screen copy: level textures are read for
-         * most of the screen, the copy for a few distort pixels. Only for a pool at least as big
-         * (its linear memory freed pays for the copy's, made there at the next distort sprite);
-         * the copy's VRAM is free after the next frame begin's deletes (this pool's retry). */
-        const u32 screen_bytes = 256u * 512u * 4u;
-        if (g.screen_tex >= 0 && g.screen_tex_vram && !g.screen_tex_pinned &&
-            p->bytes >= screen_bytes) {
-          ctr_linear_unlock();
-          ctr_gpu_screen_copy_release();
-          ctr_linear_lock();
-          s_copy_released_frame = g.frame_no;
-          printf("[ctr] distorter screen copy: VRAM given to a texture pool (%u KB)\n",
-                 p->bytes / 1024);
-        }
-        break;
-      }
-      pool_leave_vram(victim);
-      evictions++;
-      v = safe_vram_alloc(p->bytes);
-    }
-    unsigned int part = p->bytes & ~15u;
-    if (part < p->bytes) {
-      part = pool_split(best, part);
-    }
-    if (!v) {
-      /* (AI-assisted) not all of it: as much as fits in the VRAM that's left (whole textures from
-       * the start), so the GPU reads those fast */
-      /* (config.ini texshare = off: the steps from before texture sharing) */
-      static int s_texshare = -1;
-      if (s_texshare < 0) {
-        s_texshare = ctr_config_bool("texshare", 1);
-      }
-      const unsigned int kStep = s_texshare ? 32 * 1024 : 128 * 1024,
-                         kMinPart = s_texshare ? 64 * 1024 : 256 * 1024;
-      unsigned int want = (unsigned int)vramSpaceFree();
-      want = want > VRAM_RESERVE ? want - VRAM_RESERVE : 0;
-      if (want > p->bytes) {
-        want = p->bytes;
-      }
-      want &= ~(kStep - 1);
-      while (want >= kMinPart && !(v = vramAlloc(want))) {
-        want -= kStep;
-      }
-      if (v) {
-        part = pool_split(best, want);
-        if (part < kMinPart) {
-          vramFree(v);
-          v = NULL;
-        }
-      }
-    }
-    ctr_linear_unlock();
-    if (!v || !part) {
-      if (v) {
-        ctr_linear_lock();
-        vramFree(v);
-        ctr_linear_unlock();
-      }
-      /* (not while the screen copy's VRAM waits in the deferred deletes: retried each frame) */
-      if (g.frame_no - s_copy_released_frame > 3) {
-        p->no_room_frame = g.frame_no;
-      }
+    if (!p->vram) {
       continue;
     }
-    if (!queue_texture_copy(p->linear, v, part)) {
-      ctr_linear_lock();
-      vramFree(v);
-      ctr_linear_unlock();
-      break;
+    if (!queue_texture_copy(p->linear, p->vram, p->bytes)) {
+      s_vram_work = 1;
+      return;
     }
-    p->vram_frame = g.frame_no;
-    p->vram = v;
-    p->vram_bytes = part;
-    static unsigned int s_serial;
-    p->vram_serial = ++s_serial ? s_serial : ++s_serial;
-    pool_repoint(best);
-    copied += part;
+    p->vram_ok = 1;
+    pool_repoint(next);
+    copied += p->bytes;
   }
 }
 
-/* allow_vram: only from the render thread (the copy to VRAM goes through the GX queue) */
-static void* tex_alloc(C3D_Tex* tex, int w, int h, GPU_TEXCOLOR fmt, int* on_vram, int allow_vram) {
-  *on_vram = 0;
-  void* result = NULL;
+/* After the HOME Menu or sleep (VRAM may hold anything): the textures read linear memory until
+ * vram_fill has queued their copy again, into the same places. */
+static void vram_after_home(void) {
   ctr_linear_lock();
-  /* only outside of a frame: a copy in a frame needs a command list split and a queue entry
-   * each, and a level's worth of them overflows the GX queue */
-  if (allow_vram && g_vram_dynamic && !g.in_frame && vram_room((size_t)w * h * 4u) &&
-      C3D_TexInitVRAM(tex, (u16)w, (u16)h, fmt)) {
-    void* staging = linearAlloc(tex->size);
-    if (staging) {
-      *on_vram = 1;
-      result = staging;
-    } else {
-      C3D_TexDelete(tex);
+  for (int i = 0; i < MAX_POOLS; i++) {
+    if (g.pools[i].vram_ok) {
+      g.pools[i].vram_ok = 0;
+      pool_repoint(i);
     }
   }
-  if (!result && linear_room_for_tex(w, h, 0) && C3D_TexInit(tex, (u16)w, (u16)h, fmt)) {
+  s_vram_work = 1;
+  ctr_linear_unlock();
+}
+
+/* a texture citro3d allocates in linear memory (also from the level loader thread) */
+static void* tex_alloc(C3D_Tex* tex, int w, int h, GPU_TEXCOLOR fmt) {
+  void* result = NULL;
+  ctr_linear_lock();
+  if (linear_room_for_tex(w, h, 0) && C3D_TexInit(tex, (u16)w, (u16)h, fmt)) {
     result = tex->data;
   }
   ctr_linear_unlock();
   return result;
-}
-
-static int tex_commit(C3D_Tex* tex, void* buf, int on_vram) {
-  if (!on_vram) {
-    tex_flush_now(tex);
-    return 1;
-  }
-  const char* const prev_stage = s_diag_stage;
-  diag_rt("texture upload: copy to VRAM");
-  cache_flush_now(buf, tex->size);
-  sync_texture_copy((u32*)buf, 0, (u32*)tex->data, 0, tex->size, 8);
-  diag_rt(prev_stage);
-  /* check that the copy landed (VRAM is readable by the CPU); if not, use linear memory */
-  int ok = memcmp(tex->data, buf, tex->size) == 0;
-  if (!ok) {
-    g.vram_copy_failures++;
-    GPU_TEXCOLOR fmt = tex->fmt;
-    u16 w = tex->width, h = tex->height;
-    ctr_linear_lock();
-    C3D_TexDelete(tex);
-    if (!linear_room_for_tex(w, h, 0) || !C3D_TexInit(tex, w, h, fmt)) {
-      linearFree(buf);
-      ctr_linear_unlock();
-      return 0;
-    }
-    ctr_linear_unlock();
-    memcpy(tex->data, buf, tex->size);
-    tex_flush_now(tex);
-  } else {
-    g.vram_textures++;
-  }
-  ctr_linear_lock();
-  linearFree(buf);
-  ctr_linear_unlock();
-  return 1;
 }
 
 /* linear RGBA8 (top row first) -> the GPU's tiled RGBA8 (A, B, G, R; bottom row first): 8x8 tiles
@@ -3601,17 +3315,13 @@ int ctr_gpu_tex_create(int w, int h, const uint8_t* rgba) {
     return -1;
   }
   C3D_Tex* tex = &g.textures[slot].tex;
-  int on_vram;
-  uint8_t* dst = (uint8_t*)tex_alloc(tex, w, h, GPU_RGBA8, &on_vram, 1);
+  uint8_t* dst = (uint8_t*)tex_alloc(tex, w, h, GPU_RGBA8);
   if (!dst) {
     release_tex_slot(slot);
     return -1;
   }
   swizzle_rgba8(dst, w, h, rgba);
-  if (!tex_commit(tex, dst, on_vram)) {
-    release_tex_slot(slot);
-    return -1;
-  }
+  tex_flush_now(tex);
   g.textures[slot].pool = -1;
   g.textures[slot].levels = 1;
   g.textures[slot].used = 1;
@@ -3861,117 +3571,10 @@ int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba) {
   t->levels = 1;
   t->compact = 1;
   t->alpha_full = 1;
-  t->arena_off = -1;
-  t->want_vram = s_arena.base != NULL;
-  s_small_waiting |= t->want_vram;
   ctr_linear_lock();
   t->used = 1;
   ctr_linear_unlock();
   return slot;
-}
-
-/* (AI-assisted) At frame begin, in the frame (the copy is queued before its draws): compact
- * textures made in linear memory move to the reserved VRAM, a batch of them in one GPU copy
- * (each copy is a GX queue entry). The linear copy is freed once the GPU is done with the frames
- * that read it. */
-#define SMALL_BATCH_BYTES (64 * 1024)
-#define SMALL_BATCH_MAX 32
-static void migrate_small_textures(void) {
-  /* (AI-assisted) s_small_waiting: a compact texture may wait (set when one is made); the scan of
-   * all 2048 slots ran every frame */
-  if (!s_arena.base || !s_small_waiting) {
-    return;
-  }
-  static int scan = 0;
-  int pick[SMALL_BATCH_MAX];
-  u32 sizes[SMALL_BATCH_MAX];
-  int npick = 0;
-  u32 total = 0;
-  int k = 0;
-  for (; k < MAX_TEXTURES && npick < SMALL_BATCH_MAX; k++) {
-    const int i = (scan + k) % MAX_TEXTURES;
-    TexSlot* t = &g.textures[i];
-    if (t->used != 1 || !t->want_vram) {
-      continue;
-    }
-    const u32 bytes = arena_round(C3D_TexCalcTotalSize(t->tex.size, t->tex.maxLevel));
-    if (bytes > SMALL_BATCH_BYTES) {
-      t->want_vram = 0; /* too big for the reserved VRAM */
-      continue;
-    }
-    if (total + bytes > SMALL_BATCH_BYTES) {
-      break;
-    }
-    pick[npick] = i;
-    sizes[npick] = bytes;
-    npick++;
-    total += bytes;
-  }
-  scan = (scan + k) % MAX_TEXTURES;
-  if (!npick) {
-    s_small_waiting = 0; /* all slots looked at: none waits */
-    return;
-  }
-  const int off = arena_alloc(total);
-  if (off < 0) {
-    for (int j = 0; j < npick; j++) {
-      g.textures[pick[j]].want_vram = 0; /* full: they stay in linear memory */
-    }
-    return;
-  }
-  ctr_linear_lock();
-  uint8_t* staging = (uint8_t*)linearAlloc(total);
-  ctr_linear_unlock();
-  if (!staging) {
-    arena_free((u32)off, total);
-    return;
-  }
-  u32 pos = 0;
-  for (int j = 0; j < npick; j++) {
-    TexSlot* t = &g.textures[pick[j]];
-    memcpy(staging + pos, t->tex.data, C3D_TexCalcTotalSize(t->tex.size, t->tex.maxLevel));
-    pos += sizes[j];
-  }
-  cache_flush_now(staging, total);
-  if (!sync_texture_copy((u32*)staging, 0, (u32*)(s_arena.base + off), 0, total, 8)) {
-    arena_free((u32)off, total);
-    defer_linear_free(staging);
-    return;
-  }
-  pos = 0;
-  for (int j = 0; j < npick; j++) {
-    TexSlot* t = &g.textures[pick[j]];
-    t->home = t->tex.data;
-    t->tex.data = s_arena.base + off + pos;
-    t->arena_off = off + (int)pos;
-    t->want_vram = 0;
-    pos += sizes[j];
-  }
-  defer_linear_free(staging);
-  g.bound_tex = NULL;
-}
-
-/* the reserved VRAM's textures are read from linear memory again; back: and move there again */
-static void arena_leave_vram(int back) {
-  if (!s_arena.base) {
-    return;
-  }
-  ctr_linear_lock();
-  for (int i = 0; i < MAX_TEXTURES; i++) {
-    TexSlot* t = &g.textures[i];
-    if (t->arena_off >= 0 && t->home) {
-      t->tex.data = t->home;
-      t->home = NULL;
-      t->arena_off = -1;
-      t->want_vram = back && t->used == 1;
-    }
-  }
-  ctr_linear_unlock();
-  s_arena.free_off[0] = 0;
-  s_arena.free_len[0] = ARENA_BYTES;
-  s_arena.nfree = 1;
-  s_small_waiting = back;
-  g.bound_tex = NULL;
 }
 
 /* (AI-assisted) C3D_TexGenerateMipmap for an RGBA8 texture in linear memory, the same tiled walk
@@ -4289,9 +3892,7 @@ static void apt_resume_state(void) {
   g.last_skin_valid = 0;
   g.skin_bl_valid = 0;
   g.bound_tex = NULL;
-  if (g_vram_textures) {
-    vram_copies_lost(1);
-  }
+  vram_after_home();
   if (s_pres.on) {
     gspSetEventCallback(GSPGPU_EVENT_VBlank0, pres_vblank, NULL, false);
   }
@@ -6443,7 +6044,7 @@ int ctr_gpu_mesh_peek(int mesh, const void** verts, int* vertex_count, const uin
 
 /* ---------------- static meshes ---------------- */
 
-/* Also called from the level loader thread: always in linear memory (see tex_alloc). */
+/* Also called from the level loader thread: in linear memory (tex_alloc). */
 int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int size) {
   if (!g.ready || w < 8 || h < 8 || w > 1024 || h > 1024) {
     return -1;
@@ -6453,10 +6054,9 @@ int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int siz
     return -1;
   }
   C3D_Tex* tex = &g.textures[slot].tex;
-  int on_vram;
   if (format == 1 && g_rgba4_as_rgba8) {
     /* RGBA4 texels expanded to RGBA8 (same tiled order; GPU_RGBA8 is stored A, B, G, R) */
-    uint8_t* dst = (uint8_t*)tex_alloc(tex, w, h, GPU_RGBA8, &on_vram, 0);
+    uint8_t* dst = (uint8_t*)tex_alloc(tex, w, h, GPU_RGBA8);
     if (!dst) {
       release_tex_slot(slot);
       return -1;
@@ -6477,25 +6077,19 @@ int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int siz
         dst[4 * i + 3] = (uint8_t)(((v >> 12) & 0xf) * 17);
       }
     }
-    if (!tex_commit(tex, dst, on_vram)) {
-      release_tex_slot(slot);
-      return -1;
-    }
+    tex_flush_now(tex);
     g.textures[slot].pool = -1;
     g.textures[slot].levels = 1;
     g.textures[slot].used = 1;
     return slot;
   }
-  void* dst = tex_alloc(tex, w, h, format == 0 ? GPU_RGB565 : GPU_RGBA4, &on_vram, 0);
+  void* dst = tex_alloc(tex, w, h, format == 0 ? GPU_RGB565 : GPU_RGBA4);
   if (!dst) {
     release_tex_slot(slot);
     return -1;
   }
   memcpy(dst, data, (size_t)size < tex->size ? (size_t)size : tex->size);
-  if (!tex_commit(tex, dst, on_vram)) {
-    release_tex_slot(slot);
-    return -1;
-  }
+  tex_flush_now(tex);
   g.textures[slot].pool = -1;
   g.textures[slot].levels = 1;
   g.textures[slot].used = 1;
@@ -8420,7 +8014,7 @@ void ctr_gpu_linear_account_get(ctr_gpu_linear_account* out) {
     if ((t->used != 1 && t->used != 2 && t->used != 4) || t->pool >= 0) {
       continue;
     }
-    const u32 own = lin_size(t->arena_off >= 0 ? t->home : t->tex.data);
+    const u32 own = lin_size(t->tex.data);
     const u32 alt = lin_size(t->alt);
     if (t->used != 1) {
       out->tex_pending += own + alt;

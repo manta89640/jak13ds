@@ -168,8 +168,7 @@ void ctr_gpu_anim_slot_set(int slot, int tex);
 uint64_t ctr_gpu_anim_slots_drawn(void);
 /* (AI-assisted) The same as ctr_gpu_tex_create (GS alpha: 0x80 = 1.0), stored in the smallest
  * 3DS format that keeps it (config.ini compact_textures): gray -> L8 / LA8, opaque -> RGB565,
- * on/off alpha -> RGBA5551, else RGBA8 (as ctr_gpu_tex_create), and moved to a reserved part of
- * VRAM when there's room (vram_textures). */
+ * on/off alpha -> RGBA5551, else RGBA8 (as ctr_gpu_tex_create). In linear memory. */
 int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba);
 
 /* Draw a triangle list. */
@@ -362,10 +361,9 @@ int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int siz
 
 /* ---------------- texture pools (a level's textures) ----------------
  * All textures of a level in one block of linear memory, with their mip levels. The GPU reads
- * VRAM much faster than linear (FCRAM) memory: at the start of a frame the render thread copies
- * pools to VRAM while there is room (one GPU copy per pool), and moves a pool back out of VRAM
- * when a pool with a higher priority needs the room (the linear copy stays, so that costs nothing
- * but the copy). Pools are created and filled on the level loader thread:
+ * VRAM much faster than linear (FCRAM) memory: a ready pool gets a place in VRAM once, in ready
+ * order, while 1 MB of VRAM stays free, and keeps it until it is deleted (one GPU copy per pool;
+ * the linear copy stays). Pools are created and filled on the level loader thread:
  *   pool = ctr_gpu_pool_create(bytes); write the texels to ctr_gpu_pool_data(pool) at offsets
  *   aligned to 128 bytes; tex = ctr_gpu_pool_tex(pool, offset, ...) for each; ctr_gpu_pool_ready.
  * Textures from a pool are drawn and deleted like others; ctr_gpu_pool_delete after them. */
@@ -374,16 +372,13 @@ void* ctr_gpu_pool_data(int pool);
 int ctr_gpu_pool_tex(int pool, unsigned int offset, int w, int h, int format, int levels);
 void ctr_gpu_pool_ready(int pool);
 void ctr_gpu_pool_delete(int pool);
-/* Render thread. Higher = VRAM first: a pool only moves another one out of VRAM if its priority
- * is higher. */
-void ctr_gpu_pool_set_priority(int pool, int priority);
 
 /* Store RGBA4 textures as RGBA8 (twice the memory): Azahar (OpenGL and Vulkan) renders RGBA4
  * textures as noise or a solid color (config.ini rgba4_as_rgba8, default: on in the emulator). */
 void ctr_gpu_set_rgba4_as_rgba8(int on);
 int ctr_gpu_rgba4_as_rgba8(void);
-/* Copies of the texture pools in VRAM while there is room (config.ini vram_textures); linear
- * memory keeps every pool. */
+/* Copies of the texture pools in VRAM while there is room (config.ini vram_textures, at init);
+ * linear memory keeps every pool. */
 void ctr_gpu_set_vram_textures(int on);
 /* Mip levels: 0 = off (always the first level), 1 = nearest level (default), 2 = blend two levels
  * (trilinear, slower) (config.ini mipmaps). */
@@ -758,16 +753,12 @@ typedef struct {
   unsigned int cmd_bytes; /* GPU commands of the frame */
   unsigned int linear_free; /* free linear memory (meshes, textures, vertex ring), bytes */
   unsigned int vram_free;   /* free VRAM (render target, textures), bytes */
-  int vram_textures;        /* textures created in VRAM so far */
-  int vram_copy_failures;   /* VRAM uploads that didn't land (then in linear memory) */
   unsigned int pool_bytes;      /* texture pools (all in linear memory; see ctr_gpu_pool_create) */
   unsigned int pool_vram_bytes; /* of which also in VRAM (the copy the GPU reads) */
   int pools, pools_in_vram;
-  /* (AI-assisted) ctr_gpu_tex_create_compact textures: how many, their bytes, how many of them
-   * are in the reserved VRAM */
+  /* (AI-assisted) ctr_gpu_tex_create_compact textures: how many, their bytes */
   int compact_textures;
   unsigned int compact_bytes;
-  int compact_in_vram;
   int color_clear_skipped; /* (AI-assisted) this frame cleared only the depth */
   int unit1_toggles; /* (AI-assisted) texture unit 1 switched on again */
   int fog_alpha_draws; /* (AI-assisted) level draws with the fog in the vertex alpha (alpha masks) */

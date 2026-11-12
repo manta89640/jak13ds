@@ -6428,17 +6428,11 @@ void ctr_tie_shine(const char* level, const u8* mem, u32 size, u32 tree) {
            level, env_protos, insts.size(), total, env_protos ? lo / 4096.f : 0.f, hi / 4096.f);
 }
 
-// A level's texture pools: VRAM first by the level's priority, within it the earlier pieces (the
-// background's textures) first.
+// A level's texture pools, the background's textures first (VRAM takes pools in ready order).
 constexpr u32 kTexPoolPiece = 256 * 1024;
 // config.ini texshare = off: the pieces before texture sharing
 static u32 tex_pool_piece() {
   return ctr_settings().texshare ? kTexPoolPiece : 1024 * 1024;
-}
-void set_tex_priority(const std::vector<int>& pools, int priority) {
-  for (size_t i = 0; i < pools.size(); i++) {
-    ctr_gpu_pool_set_priority(pools[i], priority * 16 + 15 - (int)std::min<size_t>(i, 15));
-  }
 }
 
 // All textures (with their mip levels) in pools of at most kTexPoolPiece (a texture bigger than
@@ -6677,7 +6671,6 @@ bool CtrLevels::load_textures(c3l::Reader& f,
       } else {
         std::lock_guard<std::mutex> lk(m_share_lock);
         m_share_groups[(u32)piece_group[k]].pools.push_back(all_pools[k]);
-        ctr_gpu_pool_set_priority(all_pools[k], 2 * 16 + 15);
       }
     }
     std::vector<u8> texels;
@@ -7893,7 +7886,6 @@ void CtrLevels::process_pending_loads(u64 frame) {
     if (d.job.common && name != "GAME") {
       // (AI-assisted) load_extra
       if (d.result == LoadResult::LOADED) {
-        set_tex_priority(d.lev->tex_pools, 3);
         lg::info("[ctr] loaded {}.c3l ({} models)", name, d.lev->merc_models.size());
         m_extras[name] = std::move(d.lev);
         rebuild_merc_index();
@@ -7905,8 +7897,6 @@ void CtrLevels::process_pending_loads(u64 frame) {
     if (d.job.common) {
       if (d.result == LoadResult::LOADED) {
         m_common = std::move(d.lev);
-        // Jak and the shared models: on screen all the time, and small
-        set_tex_priority(m_common->tex_pools, 3);
         rebuild_merc_index();
       } else {
         lg::warn("[ctr] no common models ({}/GAME.c3l): Jak won't be drawn",
@@ -11650,8 +11640,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     ctr_gpu_set_mesh_fog(fog0, fog1, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
   }
-  // this level's textures: VRAM first if the camera is in it (see ctr_gpu_pool_create)
-  set_tex_priority(lev.tex_pools, far_level ? 1 : 2);
   // Jak 1 scissor adjust (tfrag3.vert: y *= 512 / 448); (AI-assisted) Jak II's 512 / 416 * 0.5
   const float kYScale = ctr_gs_y_scale();
   m_visible.clear();
