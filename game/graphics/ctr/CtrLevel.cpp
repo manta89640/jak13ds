@@ -1560,11 +1560,12 @@ void CtrLevels::unload_detail(CtrLevelData& lev) {
 // A level the game's visibility string hides whole for kDormantFrames level draws is dormant: it
 // wants no near chunks, and its tie chunks with a draw distance that the string hides are needed
 // only within kNeedDormMeters ("Residency by need"). One not back when the string shows the level
-// again isn't drawn; once its mesh comes it stays hidden while in view, at most
-// kDormantHoldFrames.
+// again isn't drawn; once its mesh comes it fades in (kArriveFrames).
 namespace {
 constexpr u32 kDormantFrames = 90;  // 3 s at 30 fps
-constexpr u32 kDormantHoldFrames = 120;
+// a dormant chunk's arrival in view: faded in over this many frames (chunk_hold_since)
+constexpr u32 kArriveFrames = 8;
+constexpr u32 kArrived = 0x80000000u;
 // a chunk the visibility string hides whole when it is zero: visibility runs, each with an id
 bool chunk_hideable(const CtrLevelData& lev, size_t ci) {
   const auto& ch = lev.chunks[ci];
@@ -13207,25 +13208,34 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         (m_copy_fade[ci] < kRunOpaque || m_tie_fade[ci] < kRunOpaque)) {
       vista_source(ci);  // (its vista copy with the chunk, in the band)
     }
-    // (AI-assisted, j2-mem) dormant levels: a tie chunk without its mesh within its distance in
-    // view stays hidden while in view once it came (at most kDormantHoldFrames from then)
+    // (AI-assisted, j2-mem) dormant levels: a tie chunk seen without its mesh within its distance
+    // fades in over kArriveFrames once it comes (chunk_hold_since: the frame it was seen missing,
+    // then its arrival frame | kArrived)
     if (dorm && ch.lod_tier == 0 && !far_level) {
-      u32& hold = lev.chunk_hold_since[ci];
+      u32& since = lev.chunk_hold_since[ci];
       if (!dist_ok) {
-        hold = 0;
-      } else if (meshes[ci] < 0 ? lev.dormant_freed(ci) && !lev.dormant : hold != 0) {
-        // (while dormant the string hides it anyway: no hold)
+        since = 0;
+      } else if (meshes[ci] < 0 ? lev.dormant_freed(ci) && !lev.dormant : since != 0) {
+        // (while dormant the string hides it anyway)
         const bool seen = !string_hides(ci, ch) && sphere_in_view(cam, ch.bsphere);
         if (meshes[ci] < 0) {
-          hold = seen ? (hold ? hold : frame32) : 0;
+          since = seen ? (since && !(since & kArrived) ? since : frame32 & ~kArrived) : 0;
           m_levels->stream_check().dorm_missing += seen;
           m_late_in_view += seen;  // (AI-assisted, j2intro)
-        } else if (seen && !g_screen_black && frame32 - hold < kDormantHoldFrames) {
-          // (AI-assisted, j2intro: not while the screen is black: nobody saw it missing)
-          continue;
+        } else if (!(since & kArrived) && (!seen || g_screen_black)) {
+          since = 0;  // (nobody saw it missing)
         } else {
-          m_levels->stream_check().dorm_switch_in_view += seen;
-          hold = 0;
+          if (!(since & kArrived)) {
+            since = (frame32 & ~kArrived) | kArrived;
+            m_levels->stream_check().dorm_switch_in_view++;
+          }
+          const u32 age = (frame32 - since) & ~kArrived;
+          if (age >= kArriveFrames) {
+            since = 0;
+          } else {
+            const u8 a = (u8)(((age + 1) * (kRunOpaque / 8) / kArriveFrames) * 8);
+            m_tie_fade[ci] = std::min(m_tie_fade[ci], a);
+          }
         }
       }
     }

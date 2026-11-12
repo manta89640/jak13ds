@@ -533,8 +533,8 @@ if that was not enough, the whole arena at the second try. The arena then comes 
 **Dormant levels** (config `dormant_levels`): a level whose visibility string is all zero for 90
 level draws is dormant: no near chunks are wanted (stream_k 0), and its hidden ties are needed
 only within 45 m (above). When the string shows it again their reach is their own; one not back
-yet within its distance in view is not drawn, and once its mesh comes it stays hidden while in
-view, at most 120 frames from when that began.
+yet within its distance in view is not drawn, and once its mesh comes it fades in over 8 frames
+(the tie fade path), with no hold.
 
 Log, every stats period: `[ctr] chunks by need: R of M KB there; N freed for room (KB; KB for a
 load out of memory), J reads of K chunks (KB needed, KB to fill), P passes short of room (at
