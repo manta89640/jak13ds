@@ -57,7 +57,7 @@ enum Cause : u8 {
   kEvict,  // near data was freed
   kLate,   // a group back to its version once its near data came
   kLod,    // a version switch without a morph
-  kFar,    // far mode switched, or its landmark reach was crossed
+  kFar,    // (none: a neighbour level is drawn by its string, not by a far mode)
   kShrub,  // a shrub's fade jumped
   kVista,  // the vista distance
   kTier,   // a tfrag cell switched tier 1 / 2 (lod_distance)
@@ -79,8 +79,6 @@ struct Stats {
   u32 hole_draw_frames = 0;          // tfrag chunk frames beyond the draw distance, nothing in place
   u32 hole_groups = 0;               // group frames: kept far or coarse and that version not drawn
   u32 morph_in = 0, morph_out = 0;   // near chunks that came / went in view under a morph
-  u32 far_held = 0;    // level draws a far mode switch waited: something it changes in view
-  u32 far_forced = 0;  // far mode switches made at a hold's bound with something it changes in view
   u32 copy_held = 0;   // tie chunk frames in view kept off the vista copies that came
   u32 holes = 0, hole_longest = 0;   // holes of kHoleFrames or more that ended; frames
   u32 frames = 0;
@@ -301,11 +299,6 @@ struct CtrLevelData {
   // (AI-assisted, title-popin) per chunk of tiers 1/2: a sphere around its lod_center holding both
   // versions of the cell (the same for both: their in-view tests agree), x y z r
   std::vector<float> lod_cell_sphere;
-  bool was_far = false;
-  // the far mode in effect (0 near, 1 far, 0xff not yet): was_far's switch waits while something it
-  // changes is in view (draw_level), since far_want_frame
-  u8 far_eff = 0xff;
-  u64 far_want_frame = 0;
   // the vista copies became drawable (vista_ok) at this frame; per tie chunk whether it was last
   // decided with them (0xff: not yet): one in view keeps deciding without them for a while
   bool vista_ok_last = false;
@@ -349,7 +342,6 @@ struct CtrLevelData {
   std::vector<u8> vista_copy;
   std::vector<u16> pop_far_chunk, pop_tf_chunk;  // per tie LOD / tfrag group: its far version's chunk
   float pop_cam[4] = {0, 0, 0, 0};
-  u8 pop_far = 0;
   std::vector<u32> hole_since, hole_last;
   bool cull_made = false;
   size_t cull_sizes[3] = {0, 0, 0};  // chunks, tie LOD groups, chunk_unit when made
@@ -1506,7 +1498,6 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   void draw_wind_calls(const CtrLevelData& lev);
   void draw_env_calls(std::vector<EnvCall>& calls);
   CtrLevels* m_levels;
-  int m_far_levels = 0;  // level draws in the "seen from another level" mode (statistics)
   int m_level_draws = 0;
   // (AI-assisted) the game's visibility string for the level being drawn (nullptr: none), and
   // what it hid (statistics)

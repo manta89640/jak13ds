@@ -194,20 +194,8 @@ constexpr u32 kFailedRetryGrowth = 256 * 1024;
 // on the zoomer).
 constexpr double kAgeMs = 250.0, kPrefetchAgeMs = 1500.0;
 constexpr u32 kStreamStreak = 2;
-// (AI-assisted, streammem) a detail reload reads at most this much per job (the tfrag first, then
-// the nearest chunks): what it read is kept and the next job asked for at once. Lava tube's
-// non-near chunks are 10.9 MB: one job of all of them failed for want of room and read it all again
-// 10 s later, far mode meanwhile.
+// the title's read back reads at most this much per job (what it read is kept)
 constexpr u64 kDetailJobBytes = 2u * 1024 * 1024;
-
-// (AI-assisted) what far mode draws (a level seen from a neighbouring one): its low resolution
-// tfrag (or the coarse one) and, in c3l files with chunk kinds, its ties without a distance limit
-// (landmarks: houses, towers, rocks), which popped in at far_level_distance
-bool far_chunk(const CtrLevelData& lev, const c3l::Chunk& ch) {
-  return ch.lod_tier == (lev.has_lowres ? 3u : 2u) ||
-         (ch.lod_tier == 0 && ch.kind == c3l::CHUNK_KIND_TIE && ch.max_dist <= 0.f) ||
-         ch.kind == c3l::CHUNK_KIND_VISTA;  // (AI-assisted) v13 vista tier: far scenery
-}
 
 // what a chunk is, for the lines about parts not made
 std::string chunk_section(const c3l::Chunk& ch) {
@@ -1615,13 +1603,14 @@ float need_reach(const CtrLevelData& lev, const c3l::Chunk& ch) {
 float need_excess(const c3l::Chunk& ch, float reach, const float pos[][3], int np) {
   return std::sqrt(dist_d2(ch, pos, np)) - reach - ch.bsphere[3];
 }
-// every position is beyond far mode's distance and the read margin outside the level's bounds
+// every position is beyond kFarLevelMeters outside the level's bounds: a level seen from a
+// neighbouring one, whose managed chunks go first
+constexpr float kFarLevelMeters = 120.f;
 bool need_level_far(const CtrLevelData& lev, const float pos[][3], int np) {
-  const float fl = ctr_settings().far_level_distance;
-  if (!(fl > 0) || !np) {
+  if (!np) {
     return false;
   }
-  const float m = (fl * 1.1f + kNeedReadMeters) * 4096.f;
+  const float m = kFarLevelMeters * 4096.f;
   for (int i = 0; i < np; i++) {
     float d2 = 0;
     for (int c = 0; c < 3; c++) {
@@ -1731,7 +1720,7 @@ void CtrLevels::need_scan(const float pos[kNeedPos][3], int np, u64 frame) {
       continue;
     }
     // (far mode draws none of them; a level not drawn lately shows nothing)
-    const bool drawn = lev.last_draw_frame + 3 >= frame && !lev.was_far &&
+    const bool drawn = lev.last_draw_frame + 3 >= frame &&
                        lev.chunk_state.size() == n;
     const float far_e = need_level_far(lev, pos, np) ? kNeedFarMeters * kM : 0.f;
     bool left_out = false;
@@ -9864,14 +9853,13 @@ void CtrLevels::pop_log() {
            "frames ({} without their mesh), {} of {:.1f} s or more ended, {} open, longest {:.1f} "
            "s; {} chunk frames drawn by a vista copy within the config's distance; {} tfrag chunk "
            "frames beyond the draw distance with nothing in place; {} group frames kept far with "
-           "that version not drawn; near chunks under a morph: {} in, {} out; far mode switches "
-           "waiting in view {} level frames, made in view {}; tie chunk frames kept off their "
-           "vista copies {}",
+           "that version not drawn; near chunks under a morph: {} in, {} out; tie chunk frames kept "
+           "off their vista copies {}",
            m_sst.frames, pops, pops * 1800.0 / frames, by, m_pop.hole_frames[ctr_pop::kHoleTfrag],
            m_pop.hole_frames[ctr_pop::kHoleTie], m_pop.hole_frames[ctr_pop::kHoleVista],
            m_pop.hole_mesh_frames, m_pop.holes, ctr_pop::kHoleFrames / 30.0, open,
            m_pop.hole_longest / 30.0, m_pop.copy_frames, m_pop.hole_draw_frames,
-           m_pop.hole_groups, m_pop.morph_in, m_pop.morph_out, m_pop.far_held, m_pop.far_forced,
+           m_pop.hole_groups, m_pop.morph_in, m_pop.morph_out,
            m_pop.copy_held);
   m_pop = ctr_pop::Stats();
 }
@@ -11032,10 +11020,8 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
     m_shrub_run_hid = 0;
     m_fade_runs = 0;
   }
-  if (rs.log_now && m_level_draws) {
-    lg::debug("[ctr] {}: {} of {} level draws seen from another level", m_name, m_far_levels,
-              m_level_draws);
-    m_far_levels = m_level_draws = 0;
+  if (rs.log_now) {
+    m_level_draws = 0;
   }
   if (rs.log_now && m_vis_frames) {
     lg::info("[ctr] {}: visibility hid {:.0f} chunks, {:.0f} tris of partly drawn chunks hidden (visibility and view) per frame ({} frames with data, {} of them the level's own)",
@@ -11331,79 +11317,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // fog (ctr_gpu_set_mesh_fog): the game's (tfrag3.vert), and towards the draw distance
   const float draw_dist = settings.draw_distance * 4096.f;
   const float lod_dist = dfl.lod_distance * 4096.f;
-  const float lod_dist_cfg = settings.lod_distance * 4096.f;  // (far mode's landmark rule)
-  // camera outside the level's bounds by more than far_level_distance: the level is only seen
-  // from a neighbouring one
-  bool far_level = false;
-  // (AI-assisted, streammem) the level's tfrag by far mode's rules (its far tier) while a partial
-  // unload's tier 1 / 2 tfrag isn't all back; far_level for everything else
-  bool far_tfrag = false;
-  bool far_inside = true;  // (AI-assisted, levellod) the camera within the near switch (chunk loop)
-  if (settings.far_level_distance > 0) {
-    float d2 = 0;
-    for (int c = 0; c < 3; c++) {
-      const float v = cam.trans[c];
-      const float o = v < lev.bbox_min[c] ? lev.bbox_min[c] - v
-                                         : (v > lev.bbox_max[c] ? v - lev.bbox_max[c] : 0.f);
-      d2 += o * o;
-    }
-    const float m = settings.far_level_distance * 4096.f;
-    // (AI-assisted) +-10% hysteresis: a camera at the edge doesn't switch the level's ties and
-    // shrubs on and off every few frames
-    const float mf = m * (lev.was_far ? 0.9f : 1.1f);
-    far_level = d2 > mf * mf;
-    lev.was_far = far_level;
-    far_inside = d2 <= (m * 0.9f) * (m * 0.9f);
-    // The switch is level-wide (tiers 1/2 and tier 3 overlap: no chunk by chunk): it waits while
-    // something it changes was drawn last frame, near kept out to 1.5 x the distance (not past the
-    // unload distance) for at most 10 s, far kept in to half of it for at most 2 s
-    {
-      constexpr u64 kFarHoldNearFrames = 300, kFarHoldFarFrames = 60;
-      const u8 want = far_level ? 1 : 0;
-      if (lev.far_eff > 1 || reveal || g_screen_black) {
-        lev.far_eff = want;
-      }
-      if (lev.far_eff != want) {
-        if (!lev.far_want_frame) {
-          lev.far_want_frame = rs.frame_idx;
-        }
-        const u64 waited = rs.frame_idx - lev.far_want_frame;
-        const float rn = m * 1.5f, rf = m * 0.5f;
-        const bool bound = want ? (d2 > rn * rn || waited >= kFarHoldNearFrames)
-                                : (d2 < rf * rf || waited >= kFarHoldFarFrames);
-        bool seen = false;
-        for (const u32 ci : lev.pop_drawn) {
-          if (ci >= lev.chunks.size()) {
-            continue;
-          }
-          const auto& ch = lev.chunks[ci];
-          const bool fc = far_chunk(lev, ch) && !lev.is_unit(ci);
-          if (want ? !fc : (fc && (ch.lod_tier != 0 || ch.kind == c3l::CHUNK_KIND_VISTA))) {
-            seen = true;
-            break;
-          }
-        }
-        if (!seen || bound) {
-          lev.far_eff = want;
-          pst.far_forced += seen;
-        } else {
-          pst.far_held++;
-        }
-      }
-      if (lev.far_eff == want) {
-        lev.far_want_frame = 0;
-      }
-      far_level = lev.far_eff != 0;
-    }
-    far_tfrag = far_level;
-  }
-  m_far_levels += far_level;
   m_level_draws++;
   bool j2_hidden = false;  // (AI-assisted, j2-mem) Jak II: its string is all zero this frame
   // (AI-assisted) the game's visibility string for this level (bucket of level 1 or 0). Ties are
   // hidden by it always; tfrag only when the string is the level's own: seen from another
-  // level's place the game picks the low resolution tfrag through these bits, which the 3DS
-  // picks by distance (far_level) instead, so the detailed tfrag would get holes.
+  // level's place the game picks the low resolution tfrag through these bits (neighbour_vis).
   bool vis_own = false;
   if (m_jak2_slot >= 0) {
     // (AI-assisted) Jak II: the slot's string (bucket 2). It has no 3DS flags; the PC hides the
@@ -11486,7 +11404,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // finalboss's far view 26-63% fog color at 1-2 km where the PC has none
     ctr_haze_row(settings, false, lev.has_vista, pzw, fog1);
     ctr_haze_row(settings, true, lev.has_vista, pzw, fog1_vista);
-    if (lev.has_vista && !far_level) {
+    if (lev.has_vista) {
       ctr_haze_note_vista(rs.frame_idx);  // (merc's haze: CtrHaze.h)
     }
     ctr_gpu_set_mesh_fog(fog0, fog1, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
@@ -11755,7 +11673,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     for (size_t u = 0; u < lev.stream_units.size(); u++) {
       const auto& su = lev.stream_units[u];
       const u32 ci = su.chunk;
-      if (far_level || su.state == CtrLevelData::kUnitNever) {
+      if (su.state == CtrLevelData::kUnitNever) {
         continue;
       }
       {
@@ -11781,10 +11699,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // hysteresis, decided for every group every frame (turning the camera doesn't switch any).
   // tie_lod = off: the far versions only (as before v17).
   const bool tie_lod = !lev.lod_groups.empty() && lev.run_lod.size() >= lev.vis_runs.size();
-  // ctr_pop: far mode changed since the last draw
-  const u8 far_now = (u8)((far_level ? 1 : 0) | (far_tfrag ? 2 : 0));
-  const bool far_flip = far_now != lev.pop_far;
-  lev.pop_far = far_now;
   const u32 frame32p = std::max<u32>((u32)rs.frame_idx, 1u);
   u32 late_groups = 0;  // (AI-assisted, streaming) drawn far: their near chunks not there yet
   u32 held_groups = 0;  // (AI-assisted, streaming) ... there now, but kept far while in view
@@ -11977,13 +11891,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         // ctr_pop: a version taken or given up away from its plane (bit 4: kept from it)
         const u8 v_old = (st & 1) ? ((st & 8) ? 1 : 0) : 2;
         const bool forced = v != v_nat;
-        if (forced && pop_on && !far_level) {
+        if (forced && pop_on) {
           m_pop_kept.push_back((u32)g);
         }
         if ((st & 2) && v_old != v && (forced || (st & 16)) && pop_on && !covered &&
             sphere_in_view(cam, lg.bsphere)) {
-          pop(far_flip  ? ctr_pop::kFar
-              : !forced ? ctr_pop::kLate
+          pop(!forced ? ctr_pop::kLate
               : gone     ? ctr_pop::kEvict
                          : ctr_pop::kUnit,
               lg.bsphere, forced ? "morph group far" : "morph group near", (u32)g);
@@ -12132,12 +12045,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                  std::sqrt(d2) / 4096.f, (sw * k) / 4096.f, lg.bsphere[3] / 4096.f,
                  keep_far ? 1 : 0);  // (titlemove: which group, why)
       }
-      if (forced && pop_on && !far_level) {
+      if (forced && pop_on) {
         m_pop_kept.push_back((u32)g);
       }
       if ((st & 2) && ((st & 1) != 0) != n && pop_on && sphere_in_view(cam, lg.bsphere)) {
-        pop(far_flip ? ctr_pop::kFar
-            : forced ? (gone ? ctr_pop::kEvict : held_now ? ctr_pop::kHold : ctr_pop::kUnit)
+        pop(forced ? (gone ? ctr_pop::kEvict : held_now ? ctr_pop::kHold : ctr_pop::kUnit)
                      : (st & 16) ? ctr_pop::kLate
                                  : ctr_pop::kLod,
             lg.bsphere, n ? "tie group near" : "tie group far", (u32)g);
@@ -12294,13 +12206,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       const bool moves = ramp || w + 2.f * b[3] * wl >= m_tf_still_w;
       // ctr_pop: as the tie morph groups (bit 6: kept from its depth's version)
       const bool forced = v != v_nat;
-      if (forced && pop_on && !far_tfrag) {
+      if (forced && pop_on) {
         m_pop_kept.push_back((u32)g | 0x80000000u);
       }
       if ((st & 9) != v && (forced || (st & 64)) && pop_on && !ramp &&
           rs.frame_idx > lev.reveal_frame + 1 && sphere_in_view(cam, b)) {
-        pop(far_flip  ? ctr_pop::kFar
-            : !forced ? ctr_pop::kLate
+        pop(!forced ? ctr_pop::kLate
             : gone     ? ctr_pop::kEvict
             : held_now ? ctr_pop::kHold
                        : ctr_pop::kUnit,
@@ -12662,7 +12573,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if (!sel_last && m_pop_why[ci] != 0xff && !lev.is_unit(ci)) {
         pop(vista_tier ? ctr_pop::kVista
                        : m_pop_why[ci] ? (ctr_pop::Cause)(m_pop_why[ci] - 1)
-                       : far_flip      ? ctr_pop::kFar
                                        : ctr_pop::kOther,
             ch.bsphere, "chunk in", (u32)ci, vista_tier || vista_chunk);
       }
@@ -12886,7 +12796,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     if (!(d2 > reach * reach)) {
       return false;
     }
-    if ((f & CtrLevelData::kClTier12) && !far_tfrag) {
+    if (f & CtrLevelData::kClTier12) {
       if (!(lod_dist > 0)) {
         return false;
       }
@@ -12901,7 +12811,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if ((st & 4) || !(st & kChunkDecided) || (hold_since && hold_since[ci])) {
         return false;
       }
-      if (!far_tfrag && (chunks[ci].lod_tier == 1 || chunks[ci].lod_tier == 2) && (st & 3) != 2) {
+      if ((chunks[ci].lod_tier == 1 || chunks[ci].lod_tier == 2) && (st & 3) != 2) {
         return false;
       }
     }
@@ -12996,7 +12906,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // versions of a cell share lod_center and see the same decisions: exactly one is drawn.
     u8& state = chunk_state[ci];
     bool lod_ok = true;
-    if (!far_tfrag && (ch.lod_tier == 1 || ch.lod_tier == 2)) {
+    if (ch.lod_tier == 1 || ch.lod_tier == 2) {
       // detailed version up close, coarse version further away
       const u8 last = state & 3;
       const float f = last == 1 ? 1.1f : (last == 2 ? 0.9f : 1.f);
@@ -13048,7 +12958,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // a managed chunk seen without its mesh within its distance: its vista copy stands in, and it
     // fades in over kArriveFrames once it comes (chunk_hold_since: the frame it was seen missing,
     // then its arrival frame | kArrived)
-    if (dorm && ch.lod_tier == 0 && !far_level) {
+    if (dorm && ch.lod_tier == 0) {
       u32& since = lev.chunk_hold_since[ci];
       if (!dist_ok) {
         since = 0;
@@ -13079,7 +12989,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
     }
     if (meshes[ci] < 0 && dist_ok && lod_ok && !(lev.has_vista && ch.lod_tier == 3) &&
-        (!(ch.lod_tier != 0 ? far_tfrag : far_level) || far_chunk(lev, ch)) &&
         !string_hides(ci, ch) && sphere_in_view(cam, ch.bsphere)) {
       g_holes.chunk_frames[std::min<u32>(ch.kind, 3)]++;
       g_holes.this_frame++;
@@ -13094,43 +13003,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
       // ctr_pop: the config would draw it here; tfrag beyond the draw distance with no copy
       if (pop_on && (dist_ok || dist_cfg) && ch.kind != c3l::CHUNK_KIND_SHRUB &&
-          (ch.lod_tier == 0 ? !far_level : ch.lod_tier != 3 && !far_tfrag && lod_ok)) {
+          (ch.lod_tier == 0 || (ch.lod_tier != 3 && lod_ok))) {
         note_hole(ci, ch, dist_ok);
-      } else if (pop_on && !dist_ok && is_tfrag(ch) && !far_tfrag && lod_ok &&
+      } else if (pop_on && !dist_ok && is_tfrag(ch) && lod_ok &&
                  !lev.vista_copy[ci] && sphere_in_view(cam, ch.bsphere) &&
                  fog_at(ch.bsphere, false) < 0.9f) {
         pst.hole_draw_frames++;
       }
       continue;
     }
-    // (AI-assisted, streammem) the tfrag tiers by far_tfrag, the rest by far_level
-    if (ch.lod_tier != 0 ? far_tfrag : far_level) {
-      if (!m_pop_why[ci]) {
-        m_pop_why[ci] = 1 + ctr_pop::kFar;  // (ctr_pop: far mode's rules decide it)
-      }
-      // only the level's low resolution version (or the coarse one), no tie but (AI-assisted) the
-      // landmarks (far_chunk)
-      if (!far_chunk(lev, ch)) {
-        continue;
-      }
-      // (AI-assisted) landmarks only within the LOD distance: a neighbouring level has no
-      // visibility data here, and its landmark ties are 57k-152k triangles (village2, lavatube).
-      // (AI-assisted, levellod) but out to draw_distance, as near mode draws them, while far mode
-      // is forced with the camera where near mode would be (its detail meshes not read back yet:
-      // a respawn, a cut) in a level without a vista tier (citadel: 375 of its 411 landmark
-      // chunks, nothing stands in for them beyond 200 m). Not when seen from a neighbour (Lava
-      // Tube's end from Citadel): the far-to-near pop stays rather than up to 152k more triangles
-      if (ch.lod_tier == 0 && lod_dist_cfg > 0) {
-        const float dx = ch.bsphere[0] - cx, dy = ch.bsphere[1] - cy, dz = ch.bsphere[2] - cz;
-        const float reach =
-            !lev.has_vista && far_inside && draw_dist > lod_dist_cfg ? draw_dist : lod_dist_cfg;
-        const float lim = reach + ch.bsphere[3];
-        if (dx * dx + dy * dy + dz * dz > lim * lim) {
-          vista_source(ci);
-          continue;
-        }
-      }
-    } else if (ch.lod_tier == 3) {
+    if (ch.lod_tier == 3) {
       // (AI-assisted) the low resolution tfrag in near mode: where a neighbour's string says
       // (neighbour_vis, chunks with visibility runs), else as vista outside the detailed areas.
       // (AI-assisted, levellod) a level with a vista tier draws it through its vista copies,
@@ -13182,20 +13064,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       m_lowres_near++;
     } else if (!lod_ok) {
       continue;
-    }
-    // (AI-assisted) lowres_vista: in far mode too, not over another loaded level's detailed tfrag
-    if (vista_chunk && far_tfrag) {
-      u8& oc = lev.outside_cache[ci];
-      if (!(oc & 4)) {
-        bool over = false;
-        for (const CtrLevelData* l : m_loaded) {
-          over = over || (l != &lev && !outside_detail(*l, ch.bsphere, kDetailMargin));
-        }
-        oc |= 4 | (over ? 8 : 0);
-      }
-      if (oc & 8) {
-        continue;
-      }
     }
     if (lev.has_vista && ch.lod_tier == 3) {
       // (AI-assisted) drawn through its copies in the vista tier (merged into large cells)
@@ -13268,7 +13136,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const bool vista = ch.kind == c3l::CHUNK_KIND_VISTA;
     pop(vista ? ctr_pop::kVista
               : m_pop_why[ci] ? (ctr_pop::Cause)(m_pop_why[ci] - 1)
-              : far_flip      ? ctr_pop::kFar
                               : ctr_pop::kOther,
         ch.bsphere, "chunk out", ci, vista || (lowres_vista && ch.lod_tier == 3));
   }
@@ -14305,10 +14172,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // distance per kind tfrag, tie, shrub; tie LOD switches near / far; groups drawn far for late
     // data, kept far once it came; time of day groups rewritten; near chunks taken since the last
     // draw)
-    lg::info("[pop] f={} {} cam={:.1f},{:.1f},{:.1f} vis={} far={} in={}/{}/{} out={}/{}/{} "
+    lg::info("[pop] f={} {} cam={:.1f},{:.1f},{:.1f} vis={} in={}/{}/{} out={}/{}/{} "
              "lod+={} lod-={} late={} held={} tod={} taken={} r0late={} black={}",
              rs.frame_idx, lev.name, cam.trans.x() / 4096.f, cam.trans.y() / 4096.f,
-             cam.trans.z() / 4096.f, m_visible.size(), far_level ? 1 : 0,
+             cam.trans.z() / 4096.f, m_visible.size(),
              g_pop.chunk_in[1], g_pop.chunk_in[2], g_pop.chunk_in[3], g_pop.chunk_out[1],
              g_pop.chunk_out[2], g_pop.chunk_out[3], g_pop.lod_up, g_pop.lod_down, late_groups,
              held_groups, pop_tod, g_pop.taken, ring0_late, g_screen_black ? 1 : 0);

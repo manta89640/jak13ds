@@ -71,8 +71,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.fog = parse_bool(v);
     } else if (key == "lod_distance") {
       s.lod_distance = f;
-    } else if (key == "far_level_distance") {
-      s.far_level_distance = f;
     } else if (key == "detail_scale") {
       s.detail_scale = std::clamp(f, 0.1f, 4.f);  // (AI-assisted, levellod: 0 drew everything far)
     } else if (key == "shrub_distance") {
@@ -397,7 +395,7 @@ std::string CtrSettings::summary() const {
     return r;
   };
   return fmt::format(
-      "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
+      "dist {:.0f}m lod {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
       "merc {} sprites {} "
       "pipeline {} ocean {} sky {} clouds {} distort {} envmap {} merc_gen_lod {} shadows {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "compact_textures {} sprite_alpha_discard {} "
@@ -407,7 +405,7 @@ std::string CtrSettings::summary() const {
       "fog_start {:.2f} overlap {} frame_pacing {} fps_cap {} ocean_texture_rate {} "
       "defer_flush {} render_watchdog {} stats_period {:.0f}s"
       "{}{}{}{}{}{}",
-      draw_distance, lod_distance, far_level_distance, detail_scale,
+      draw_distance, lod_distance, detail_scale,
       fmt::format("{:.0f}m ({})", shrub_distance, floor_text()),
       fmt::format("{:.2f}", shrub_scale),
       !(tie_distance_scale > 0) ? std::string("none") : fmt::format("{:.1f}", tie_distance_scale),
