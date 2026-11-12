@@ -704,40 +704,7 @@ void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix
  * 0: nothing to say */
 int ctr_gpu_micro_line(char* out, int size);
 
-/* ---------------- (AI-assisted) the ocean (config ocean = waves, CtrOcean) ----------------
- * Vertices in the static mesh layout (c3l::Vertex, its st unused), drawn by
- * platform/3ds/shaders/ctr_ocean.v.pica: texture coordinates from the position (rows below), the
- * color brightened on crests (position y), fog like ctr_gpu_draw_mesh. Two textures:
- *   rgb = tex(st0) * color * 2 * tex2(st1) * 2, then fog; alpha = tex.a * color.a * 2
- * (tex2 on texture unit 2: a gray around 0x80 is neutral). ctr_gpu_ocean_end after the ocean's
- * draws (texture unit 2 off, combiners as the other draws want them). */
-typedef struct {
-  ctr_mesh_matrix clip; /* (pos, 1) -> clip, prepared */
-  float tex[4][4];      /* s0, t0, s1, t1 = dot(row.xyz, pos) + row.w */
-  float crest[4];       /* color factor = 1 + pos.y * crest (rgb; alpha: 0) */
-} ctr_ocean_draw;
-/* Memory for one frame's vertices / indices (16-byte aligned), read by the GPU during this frame:
- * the immediate draws' buffer (one per frame in flight with the pipeline). NULL when full. */
-void* ctr_gpu_stream_alloc(int bytes);
-/* mesh >= 0: a range of a static mesh; else verts / indices from ctr_gpu_stream_alloc. */
-void ctr_gpu_ocean_draw(const ctr_draw_state* state, int tex2, const ctr_ocean_draw* d, int mesh,
-                        const void* verts, const uint16_t* indices, int first_index,
-                        int index_count);
 void ctr_gpu_ocean_end(void);
-
-/* (AI-assisted, j2water) Jak II's ocean with the sky reflection (the PS2 env map pass in the same
- * draw), platform/3ds/shaders/ctr_ocean_env.v.pica. Vertices in the static mesh layout:
- *   rgb = fog(tex(st0) * color * 2) + env(st2) * a, a = tex.a * color.a * 2 (clamped to 1)
- * with env on texture unit 2 (repeat, linear), st2 = dot(env row.xyz, d) / |d| + env row.w and
- * d = dir rows . (pos, 1) (the vertex relative to the camera). ctr_gpu_ocean_end after the draws. */
-typedef struct {
-  ctr_mesh_matrix clip; /* (pos, 1) -> clip, prepared */
-  float tex[2][4];      /* wave texture s, t = dot(row.xyz, pos) + row.w */
-  float dir[3][4];      /* d = dot(row.xyz, pos) + row.w */
-  float env[2][4];      /* env s, t (see above) */
-} ctr_ocean_env_draw;
-void ctr_gpu_ocean_env_draw(const ctr_draw_state* state, int env_tex, const ctr_ocean_env_draw* d,
-                            int mesh, int first_index, int index_count);
 
 /* (AI-assisted, j2water2) Jak II's envmapped ties (c3l v21): a level mesh draw (the static mesh
  * layout) with the envmap shine in the same draw, platform/3ds/shaders/ctr_etie.v.pica.

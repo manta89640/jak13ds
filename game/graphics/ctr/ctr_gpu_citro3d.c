@@ -30,11 +30,6 @@ extern const uint8_t ctr_clip_shbin[];
 extern const size_t ctr_clip_shbin_size;
 extern const uint8_t ctr_clip2_shbin[];
 extern const size_t ctr_clip2_shbin_size;
-extern const uint8_t ctr_ocean_shbin[];
-extern const size_t ctr_ocean_shbin_size;
-/* (AI-assisted, j2water) Jak II's ocean with the sky reflection (loaded by the Jak II build only) */
-extern const uint8_t ctr_ocean_env_shbin[];
-extern const size_t ctr_ocean_env_shbin_size;
 /* (AI-assisted) Envmapped ties in both games. */
 extern const uint8_t ctr_etie_shbin[];
 extern const size_t ctr_etie_shbin_size;
@@ -297,7 +292,6 @@ enum {
   PROG_SKIN_ENV,
   PROG_CLIP,
   PROG_CLIP2,
-  PROG_OCEAN,
   PROG_OCEAN_FULL, /* (AI-assisted) ctr_gpu_ocean_full_draw (ctr_ocean_full.v.pica) */
   PROG_OCEAN_FULL_CLIP, /* (AI-assisted) ctr_gpu_ocean_full_draw_clip (ctr_ocean_full_clip.v.pica) */
   PROG_MESH_FA, /* (AI-assisted) fog_alpha: level meshes with the fog in the color's alpha */
@@ -305,7 +299,6 @@ enum {
    * distance fog (ctr_mesh_opt_df / ctr_mesh_opt_df_fa.v.pica; set 2 only) */
   PROG_MESH_DF,
   PROG_MESH_DF_FA,
-  PROG_OCEAN_ENV, /* (AI-assisted, j2water) ctr_gpu_ocean_env_draw (ctr_ocean_env.v.pica) */
   PROG_ETIE,      /* (AI-assisted, j2water2) ctr_gpu_etie_draw (ctr_etie.v.pica) */
   PROG_MESH_WIND, /* ctr_gpu_draw_mesh_wind (ctr_mesh_wind.v.pica, set 1 only) */
   PROG_SKIN_MASK, /* PROG_SKIN for textures with an alpha mask (on unit 2) */
@@ -325,7 +318,7 @@ static inline int is_mesh_prog(int prog) {
 
 /* (AI-assisted) The vertex programs and their uniforms' places, one shbin per program. */
 typedef struct {
-  shaderProgram_s basic, mesh, mesh_fa, skin, env, clip, clip2, ocean, ocean_full, ocean_full_clip;
+  shaderProgram_s basic, mesh, mesh_fa, skin, env, clip, clip2, ocean_full, ocean_full_clip;
   shaderProgram_s mesh_df, mesh_df_fa; /* (AI-assisted) set 1: PROG_MESH_DF, PROG_MESH_DF_FA */
   int ok;      /* loaded */
   /* mesh, mesh_fa, skin, env, ocean_full and ocean_full_clip are the ctr_*_opt programs, whose
@@ -339,12 +332,7 @@ typedef struct {
   int uloc_skin_mfog; /* (AI-assisted, far-fog) the skin program's fog (ctr_skin_opt; -1: none) */
   int uloc_env_clip, uloc_env_rows[3], uloc_env_scales, uloc_env_fade;
   int uloc_clip_glpica, uloc_clip2_glpica;
-  int uloc_ocean_clip, uloc_ocean_tex, uloc_ocean_scales, uloc_ocean_fog0, uloc_ocean_fog1;
   int uloc_ocean_full_gs, uloc_ocean_full_clip_gs;
-  /* (AI-assisted, j2water) Jak II's ocean with the sky reflection (no vertexShader: not loaded) */
-  shaderProgram_s ocean_env;
-  int uloc_oenv_clip, uloc_oenv_tex, uloc_oenv_dir, uloc_oenv_env, uloc_oenv_scales;
-  int uloc_oenv_fog0, uloc_oenv_fog1;
   /* (AI-assisted, j2water2) Jak II's envmapped ties (no vertexShader: not loaded) */
   shaderProgram_s etie;
   int uloc_etie_clip, uloc_etie_cam, uloc_etie_nrm, uloc_etie_scales, uloc_etie_fog0,
@@ -390,9 +378,6 @@ static struct {
   int fog_tex_valid;
   DVLB_s* clip_dvlb; /* immediate draws in clip space (ctr_clip.v.pica) */
   DVLB_s* clip2_dvlb; /* the same with two texture coordinates (ctr_clip2.v.pica: clouds) */
-  /* (AI-assisted) the ocean with waves (ctr_ocean.v.pica, ctr_gpu_ocean_draw) */
-  DVLB_s* ocean_dvlb;
-  DVLB_s* ocean_env_dvlb; /* (AI-assisted, j2water) ctr_ocean_env.v.pica (Jak II) */
   DVLB_s* etie_dvlb;      /* (AI-assisted, j2water2) ctr_etie.v.pica (Jak II) */
   DVLB_s* wind_dvlb;      /* ctr_mesh_wind.v.pica */
   DVLB_s* morph_dvlb[2];  /* ctr_mesh_morph(_fa).v.pica */
@@ -850,7 +835,6 @@ static void use_program(int prog) {
                                 : prog == PROG_CLIP     ? &g.ps->clip
                                 : prog == PROG_CLIP_PZ  ? &g.ps->clip
                                 : prog == PROG_CLIP2    ? &g.ps->clip2
-                                : prog == PROG_OCEAN    ? &g.ps->ocean
                                 : prog == PROG_OCEAN_FULL ? &g.ps->ocean_full
                                 : prog == PROG_OCEAN_FULL_CLIP ? &g.ps->ocean_full_clip
                                 : prog == PROG_SKIN     ? &g.ps->skin
@@ -858,7 +842,6 @@ static void use_program(int prog) {
                                 : prog == PROG_MESH_FA  ? &g.ps->mesh_fa
                                 : prog == PROG_MESH_DF  ? &g.ps->mesh_df
                                 : prog == PROG_MESH_DF_FA ? &g.ps->mesh_df_fa
-                                : prog == PROG_OCEAN_ENV ? &g.ps->ocean_env
                                 : prog == PROG_ETIE ? &g.ps->etie
                                 : prog == PROG_MESH_WIND ? &g.ps->mesh_wind
                                 : prog == PROG_MESH_MORPH ? &g.ps->mesh_morph
@@ -904,27 +887,6 @@ static void use_program(int prog) {
                      prog == PROG_CLIP2 ? g.ps->uloc_clip2_glpica : g.ps->uloc_clip_glpica,
                      prog == PROG_CLIP_PZ ? &g.gl_to_pica_pz : &g.gl_to_pica);
     unif_vectors += 4;
-  } else if (prog == PROG_OCEAN) {
-    /* (AI-assisted) the static mesh layout (texcoord unused by the shader) */
-    C3D_BindProgram(&g.ps->ocean);
-    g.last_state_valid = 0;
-    AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);         /* position (+ pad) */
-    AttrInfo_AddLoader(attr, 1, GPU_SHORT, 2);         /* texcoord (unused) */
-    AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_ocean_scales, 1.0f / 255.0f, 1.0f / 255.0f,
-                  1.0f / 255.0f, 1.0f / 255.0f);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_ocean_fog0, g.fog0[0], g.fog0[1], g.fog0[2],
-                  g.fog0[3]);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_ocean_fog1, g.fog1[0], g.fog1[1], g.fog1[2],
-                  g.fog1[3]);
-    unif_vectors += 3;
-  } else if (prog == PROG_OCEAN_ENV) {
-    /* (AI-assisted, j2water) the static mesh layout (texcoord unused); the uniforms per draw */
-    C3D_BindProgram(&g.ps->ocean_env);
-    g.last_state_valid = 0;
-    AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);         /* position (+ pad) */
-    AttrInfo_AddLoader(attr, 1, GPU_SHORT, 2);         /* texcoord (unused) */
-    AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
   } else if (prog == PROG_ETIE || prog == PROG_ETIE_FA) {
     /* (AI-assisted, j2water2) the static mesh layout + the normals (attribute buffer 1) */
     C3D_BindProgram(prog == PROG_ETIE ? &g.ps->etie : &g.ps->etie_fa);
@@ -1141,26 +1103,9 @@ static void prog_set_ulocs(ProgSet* p, int have_fa) {
   p->uloc_env_fade = shaderInstanceGetUniformLocation(vs, "fade");
   p->uloc_clip_glpica = shaderInstanceGetUniformLocation(p->clip.vertexShader, "glpica");
   p->uloc_clip2_glpica = shaderInstanceGetUniformLocation(p->clip2.vertexShader, "glpica");
-  vs = p->ocean.vertexShader;
-  p->uloc_ocean_clip = shaderInstanceGetUniformLocation(vs, "clip");
-  p->uloc_ocean_tex = shaderInstanceGetUniformLocation(vs, "tex");
-  p->uloc_ocean_scales = shaderInstanceGetUniformLocation(vs, "oscales");
-  p->uloc_ocean_fog0 = shaderInstanceGetUniformLocation(vs, "fog0");
-  p->uloc_ocean_fog1 = shaderInstanceGetUniformLocation(vs, "fog1");
   p->uloc_ocean_full_gs = shaderInstanceGetUniformLocation(p->ocean_full.vertexShader, "gs");
   p->uloc_ocean_full_clip_gs =
       shaderInstanceGetUniformLocation(p->ocean_full_clip.vertexShader, "gs");
-  if (p->ocean_env.vertexShader) {
-    /* (AI-assisted, j2water) */
-    vs = p->ocean_env.vertexShader;
-    p->uloc_oenv_clip = shaderInstanceGetUniformLocation(vs, "clip");
-    p->uloc_oenv_tex = shaderInstanceGetUniformLocation(vs, "tex");
-    p->uloc_oenv_dir = shaderInstanceGetUniformLocation(vs, "dir");
-    p->uloc_oenv_env = shaderInstanceGetUniformLocation(vs, "env");
-    p->uloc_oenv_scales = shaderInstanceGetUniformLocation(vs, "oscales");
-    p->uloc_oenv_fog0 = shaderInstanceGetUniformLocation(vs, "fog0");
-    p->uloc_oenv_fog1 = shaderInstanceGetUniformLocation(vs, "fog1");
-  }
   if (p->etie.vertexShader) {
     /* (AI-assisted, j2water2) */
     vs = p->etie.vertexShader;
@@ -1200,11 +1145,11 @@ static void prog_set_free(ProgSet* p) {
     return;
   }
   shaderProgram_s* all[] = {&p->basic, &p->mesh, &p->skin, &p->env, &p->clip,
-                            &p->clip2, &p->ocean, &p->ocean_full, &p->ocean_full_clip};
+                            &p->clip2, &p->ocean_full, &p->ocean_full_clip};
   for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
     shaderProgramFree(all[i]);
   }
-  shaderProgram_s* maybe[] = {&p->mesh_fa,   &p->mesh_df,       &p->mesh_df_fa, &p->ocean_env,
+  shaderProgram_s* maybe[] = {&p->mesh_fa,   &p->mesh_df,       &p->mesh_df_fa,
                               &p->etie,      &p->mesh_wind,     &p->skin_mask,  &p->etie_fa,
                               &p->mesh_morph, &p->mesh_morph_fa, &p->tfrag_morph,
                               &p->tfrag_morph_fa};
@@ -1471,17 +1416,6 @@ int ctr_gpu_init(void) {
   g.clip2_dvlb = DVLB_ParseFile((u32*)ctr_clip2_shbin, (u32)ctr_clip2_shbin_size);
   shaderProgramInit(&g.ps->clip2);
   shaderProgramSetVsh(&g.ps->clip2, &g.clip2_dvlb->DVLE[0]);
-  g.ocean_dvlb = DVLB_ParseFile((u32*)ctr_ocean_shbin, (u32)ctr_ocean_shbin_size);
-  shaderProgramInit(&g.ps->ocean);
-  shaderProgramSetVsh(&g.ps->ocean, &g.ocean_dvlb->DVLE[0]);
-#if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
-  /* (AI-assisted, j2water) Jak II's ocean with the sky reflection (the Jak 1 build loads none) */
-  g.ocean_env_dvlb = DVLB_ParseFile((u32*)ctr_ocean_env_shbin, (u32)ctr_ocean_env_shbin_size);
-  if (g.ocean_env_dvlb) {
-    shaderProgramInit(&g.ps->ocean_env);
-    shaderProgramSetVsh(&g.ps->ocean_env, &g.ocean_env_dvlb->DVLE[0]);
-  }
-#endif
   /* (AI-assisted) Both games' converted ties can carry v21 reflection data. */
   g.etie_dvlb = DVLB_ParseFile((u32*)ctr_etie_shbin, (u32)ctr_etie_shbin_size);
   if (g.etie_dvlb) {
@@ -1593,8 +1527,7 @@ void ctr_gpu_exit(void) {
       g.opt_dvlb[i] = NULL;
     }
   }
-  DVLB_s* dvlbs[] = {g.dvlb,      g.clip_dvlb,  g.clip2_dvlb,   g.ocean_dvlb,
-                     g.ocean_env_dvlb, g.etie_dvlb,
+  DVLB_s* dvlbs[] = {g.dvlb,      g.clip_dvlb,  g.clip2_dvlb,   g.etie_dvlb,
                      g.wind_dvlb, g.skin_mask_dvlb, g.etie_fa_dvlb,
                      g.morph_dvlb[0], g.morph_dvlb[1], g.tmorph_dvlb[0], g.tmorph_dvlb[1]};
   for (size_t i = 0; i < sizeof(dvlbs) / sizeof(dvlbs[0]); i++) {
@@ -4971,7 +4904,7 @@ static void commit_texenv(int id, const C3D_TexEnv* env, int raw) {
 }
 
 /* mesh: 0 = immediate draws, 1 = level mesh, 2 = skinned mesh (tint = constant color stage).
- * (AI-assisted) 3 = the ocean (ctr_gpu_ocean_draw), 5 = level mesh with the fog amount in the vertex alpha (fog_alpha: its vertex
+ * (AI-assisted) 5 = level mesh with the fog amount in the vertex alpha (fog_alpha: its vertex
  * alpha is 0x80, the constant 0x80 stands in for it).
  * raw: written as raw commands (see "raw GPU commands"), else through citro3d. Both keep
  * citro3d's context right. */
@@ -4998,41 +4931,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   C3D_TexEnv e1;
   C3D_TexEnv* env1 = &e1;
   C3D_TexEnvInit(env1);
-  if (mesh == 3 && tint) {
-    /* (AI-assisted, j2water) Jak II's ocean with the sky reflection (ctr_gpu_ocean_env_draw):
-     * stage 1 the fog (as the level meshes'), stage 2 rgb = env (texture unit 2) * previous alpha
-     * + previous: the PS2's env map pass, added with the destination alpha as its weight */
-    if (g.fog_tex_valid) {
-      C3D_TexEnvSrc(env1, C3D_RGB, GPU_TEXTURE1, GPU_PREVIOUS, GPU_TEXTURE1);
-      C3D_TexEnvOpRgb(env1, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR,
-                      GPU_TEVOP_RGB_SRC_ALPHA);
-      C3D_TexEnvFunc(env1, C3D_RGB, GPU_INTERPOLATE);
-    }
-    C3D_TexEnv e2;
-    C3D_TexEnvInit(&e2);
-    C3D_TexEnvSrc(&e2, C3D_RGB, GPU_TEXTURE2, GPU_PREVIOUS, GPU_PREVIOUS);
-    C3D_TexEnvOpRgb(&e2, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA,
-                    GPU_TEVOP_RGB_SRC_COLOR);
-    C3D_TexEnvFunc(&e2, C3D_RGB, GPU_MULTIPLY_ADD);
-    commit_texenv(2, &e2, raw);
-    g.ocean_stage2 = 1;
-  } else if (mesh == 3) {
-    /* (AI-assisted) the ocean (ctr_gpu_ocean_draw): rgb times the shimmer layer (texture unit 2,
-     * 0x80 = neutral), then the fog in stage 2 (as the meshes' stage 1) */
-    C3D_TexEnvSrc(env1, C3D_RGB, GPU_PREVIOUS, GPU_TEXTURE2, 0);
-    C3D_TexEnvFunc(env1, C3D_RGB, GPU_MODULATE);
-    C3D_TexEnvScale(env1, C3D_RGB, GPU_TEVSCALE_2);
-    C3D_TexEnv e2;
-    C3D_TexEnvInit(&e2);
-    if (g.fog_tex_valid) {
-      C3D_TexEnvSrc(&e2, C3D_RGB, GPU_TEXTURE1, GPU_PREVIOUS, GPU_TEXTURE1);
-      C3D_TexEnvOpRgb(&e2, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR,
-                      GPU_TEVOP_RGB_SRC_ALPHA);
-      C3D_TexEnvFunc(&e2, C3D_RGB, GPU_INTERPOLATE);
-    }
-    commit_texenv(2, &e2, raw);
-    g.ocean_stage2 = 1;
-  } else if (mesh == 2) {
+  if (mesh == 2) {
     C3D_TexEnvSrc(env1, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, 0);
     C3D_TexEnvFunc(env1, C3D_RGB, GPU_MODULATE);
     C3D_TexEnvColor(env1, tint);
@@ -5218,11 +5117,11 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
    * stage 2 (the ocean's), its amount from texture unit 1 (ctr_skin_opt's texcoord1) */
   const int merc_fog = mesh == 2 && (st->tcc & CTR_TCC_FOG) && g.fog_tex_valid;
   /* unit 1 back to the fog ramp after an alpha mask, for the draws that read it */
-  const int need_ramp = mesh == 1 || mesh == 3 || mesh == 6 || (mesh == 7 && smask < 0) || merc_fog;
+  const int need_ramp = mesh == 1 || mesh == 6 || (mesh == 7 && smask < 0) || merc_fog;
   if (need_ramp && s_tex1_mask && g.fog_tex_valid) {
     tex1_bind(&g.fog_tex);
   }
-  if (s_tex2_mask && mesh != 3 && mesh != 6 && mesh != 7 && !(smask >= 0 && mesh == 2)) {
+  if (s_tex2_mask && mesh != 6 && mesh != 7 && !(smask >= 0 && mesh == 2)) {
     unit2_mask_release();
   }
   if (g.fog_tex_valid) {
@@ -5270,7 +5169,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     C3D_TexEnvFunc(&e2, C3D_RGB, GPU_INTERPOLATE);
     commit_texenv(2, &e2, raw);
     g.ocean_stage2 = 1;
-  } else if (mesh != 3 && mesh != 7 && !merc_fog && g.ocean_stage2) {
+  } else if (mesh != 7 && !merc_fog && g.ocean_stage2) {
     /* (AI-assisted, j1ocean) also after the PS2 ocean's stage 2 (ocean_stage2 = 2) */
     /* (AI-assisted) stage 2 back to pass-through after the ocean (the far ring between its
      * draws) or a merc draw with fog */
@@ -7245,27 +7144,12 @@ int ctr_gpu_micro_line(char* out, int size) {
   return l < size ? l : size - 1;
 }
 
-/* ---------------- (AI-assisted) the ocean (config ocean = waves) ---------------- */
-
 int ctr_gpu_has_stencil(void) {
   return 1;
 }
 
-void* ctr_gpu_stream_alloc(int bytes) {
-  if (!g.ready || !g.in_frame || bytes <= 0) {
-    return NULL;
-  }
-  const size_t b = ((size_t)bytes + 15) & ~(size_t)15;
-  if (g.vbuf_used + b > VBUF_BYTES) {
-    return NULL;
-  }
-  uint8_t* p = g.vbuf + g.vbuf_used; /* flushed with the frame's other immediate vertices */
-  g.vbuf_used += b;
-  return p;
-}
-
-/* the shimmer texture on unit 2 (citro3d sends it at the next update), bound again only when it
- * or its memory (pipeline copies) changed */
+/* texture unit 2 (citro3d sends it at the next update), bound again only when it or its memory
+ * (pipeline copies) changed */
 static const C3D_Tex* s_ocean_tex2;
 static const void* s_ocean_tex2_data;
 static u32 s_ocean_tex2_param;
@@ -7303,121 +7187,6 @@ static void ocean_bind_tex2_wrap(int handle, int clamp) {
   s_tex2_mask = NULL;
   g.cur.tex_binds++;
 }
-static void ocean_bind_tex2(int handle) {
-  ocean_bind_tex2_wrap(handle, 0);
-}
-
-void ctr_gpu_ocean_draw(const ctr_draw_state* state, int tex2, const ctr_ocean_draw* d, int mesh,
-                        const void* verts, const uint16_t* indices, int first_index,
-                        int index_count) {
-  if (!g.ready || !g.in_frame || index_count < 3) {
-    return;
-  }
-  u32 vpa, ipa;
-  const void* vva;
-  const uint16_t* iva;
-  const MeshSlot* ms = NULL;
-  if (mesh >= 0) {
-    if (mesh >= MAX_MESHES || g.meshes[mesh].used != 1) {
-      return;
-    }
-    ms = &g.meshes[mesh];
-    vpa = ms->verts_pa;
-    vva = ms->verts;
-    ipa = ms->indices_pa;
-    iva = ms->indices;
-  } else {
-    if (!verts || !indices) {
-      return;
-    }
-    vva = verts;
-    iva = indices;
-    vpa = osConvertVirtToPhys(verts);
-    ipa = osConvertVirtToPhys(indices);
-  }
-  ipa += 2u * (u32)first_index;
-  iva += first_index;
-  if (!cmd_room()) {
-    return;
-  }
-  use_program(PROG_OCEAN);
-  ocean_bind_tex2(tex2);
-  if (use_raw(state)) {
-    apply_state(state, 3, 1);
-    if (ms) {
-      raw_mesh_buffers(ms);
-    } else {
-      raw_vertex_buffer(vpa, 0x210, RAW_BUF_FLAGS1(16, 3, 0));
-    }
-    raw_sync();
-    /* the matrix and the 5 rows (texture coordinates, crest) as float24, two bursts */
-    u32 rows[15];
-    for (int i = 0; i < 5; i++) {
-      const float* r = i < 4 ? d->tex[i] : d->crest;
-      const float v[4] = {r[3], r[2], r[1], r[0]};
-      raw_pack_f24(v, rows + 3 * i);
-    }
-    u32* p = raw_unif(raw_ptr(), g.ps->uloc_ocean_clip, d->clip.f24, 12, 0);
-    p = raw_unif(p, g.ps->uloc_ocean_tex, rows, 15, 0);
-    raw_end(p);
-    raw_draw_elements(ipa, (u32)index_count);
-  } else {
-    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_ocean_clip, (const C3D_Mtx*)d->clip.m);
-    for (int i = 0; i < 5; i++) {
-      const float* r = i < 4 ? d->tex[i] : d->crest;
-      C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_ocean_tex + i, r[0], r[1], r[2], r[3]);
-    }
-    if (ms) {
-      c3d_mesh_buffers(ms, NULL, 0);
-    } else {
-      c3d_vertex_buffer(vpa, vva, 16, 3, 0x210);
-    }
-    apply_state(state, 3, 0);
-    C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, iva);
-  }
-  g.cur.draws++;
-  g.cur.triangles += index_count / 3;
-}
-
-/* (AI-assisted, j2water) Jak II's ocean with the sky reflection (see ctr_gpu.h). Through citro3d
- * (a few draws per frame): the program's uniforms with every draw. */
-void ctr_gpu_ocean_env_draw(const ctr_draw_state* state, int env_tex, const ctr_ocean_env_draw* d,
-                            int mesh, int first_index, int index_count) {
-  if (!g.ready || !g.in_frame || index_count <= 0 || !g.ps->ocean_env.vertexShader ||
-      mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 || env_tex < 0 ||
-      env_tex >= MAX_TEXTURES || g.textures[env_tex].used != 1) {
-    return;
-  }
-  const MeshSlot* ms = &g.meshes[mesh];
-  if (!cmd_room()) {
-    return;
-  }
-  use_program(PROG_OCEAN_ENV);
-  ocean_bind_tex2(env_tex);
-  const ProgSet* p = g.ps;
-  C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, p->uloc_oenv_clip, (const C3D_Mtx*)d->clip.m);
-  for (int i = 0; i < 2; i++) {
-    const float* r = d->tex[i];
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, p->uloc_oenv_tex + i, r[0], r[1], r[2], r[3]);
-    r = d->env[i];
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, p->uloc_oenv_env + i, r[0], r[1], r[2], r[3]);
-  }
-  for (int i = 0; i < 3; i++) {
-    const float* r = d->dir[i];
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, p->uloc_oenv_dir + i, r[0], r[1], r[2], r[3]);
-  }
-  C3D_FVUnifSet(GPU_VERTEX_SHADER, p->uloc_oenv_scales, 1.0f / 255.0f, 1.0f / 255.0f,
-                1.0f / 255.0f, 1.0f / 255.0f);
-  C3D_FVUnifSet(GPU_VERTEX_SHADER, p->uloc_oenv_fog0, g.fog0[0], g.fog0[1], g.fog0[2], g.fog0[3]);
-  C3D_FVUnifSet(GPU_VERTEX_SHADER, p->uloc_oenv_fog1, g.fog1[0], g.fog1[1], g.fog1[2], g.fog1[3]);
-  raw_note_unif();
-  c3d_mesh_buffers(ms, NULL, 0);
-  apply_state_tint(state, 3, 1, 0);
-  C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, ms->indices + first_index);
-  g.cur.draws++;
-  g.cur.triangles += index_count / 3;
-}
-
 /* (AI-assisted, j2water2) Jak II's envmapped ties (see ctr_gpu.h). Through citro3d (their draws
  * are a few per frame): the uniforms with every draw, two attribute buffers (the mesh's vertices,
  * the normals). The envmap on texture unit 2, clamped and linear (process_envmap_draw_mode). */
@@ -8249,12 +8018,6 @@ void ctr_gpu_set_mesh_fog(const float fog0_in[4], const float fog1[4], uint8_t r
   g.last_mesh_valid = 0;
   if (is_mesh_prog(g.cur_prog)) {
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_fog1, g.fog1[0], g.fog1[1], g.fog1[2], g.fog1[3]);
-    raw_note_unif();
-  } else if (g.cur_prog == PROG_OCEAN) {
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_ocean_fog0, g.fog0[0], g.fog0[1], g.fog0[2],
-                  g.fog0[3]);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_ocean_fog1, g.fog1[0], g.fog1[1], g.fog1[2],
-                  g.fog1[3]);
     raw_note_unif();
   }
   fog_ramp_color(r, gr, b);
