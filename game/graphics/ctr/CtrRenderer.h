@@ -102,17 +102,9 @@ class CtrDirectBucketRenderer : public CtrBucketRenderer {
   void set_sky(class CtrSky* sky) { m_sky = sky; }
 
  private:
-  // (AI-assisted) sky_last: the sky packet, drawn by the GPU code's sky hook (ctr_gpu_set_sky_hook)
-  static void deferred_sky(void* self);
-  // the bucket's packets as last read (m_kept_ok: complete), and whether they drew
-  bool same_as_kept(DmaFollower& dma, const CtrRenderState& rs) const;
-  std::vector<u8> m_kept_bytes;
-  bool m_kept_ok = false, m_kept_drew = false;
   std::unique_ptr<CtrDirect> m_direct;
   class CtrSky* m_sky = nullptr;
   bool m_drew = false;
-  u8 m_deferred[128];
-  CtrRenderState* m_deferred_rs = nullptr;
 };
 
 class CtrRenderer {
@@ -140,7 +132,6 @@ class CtrRenderer {
     int frames = 0;
     double cmd_kb = 0;
     double cmd_kb_peak = 0;  // (AI-assisted, j2-mem2) the most in one frame
-    double dedup_kb = 0;  // (AI-assisted) command words cmd_dedup left out
     int dropped = 0;
     int tex_binds = 0;
     int draws = 0;
@@ -148,11 +139,10 @@ class CtrRenderer {
     // (AI-assisted) see ctr_gpu_stats: waiting for the GPU in C3D_FrameBegin, the GPU time of the
     // frames measured by the steady pacing fence, triangles, the vertex buffer's busiest frame
     double gpu_wait_ms = 0;
-    int queue_drains = 0;  // (AI-assisted, gpu-home) frame_overlap2 = on: full GX queue drained
     double gpu_busy_ms = 0;
     int gpu_busy_frames = 0;
     double gpu_active_ms = 0;  // (AI-assisted) from each frame's command list on
-    int color_clears_skipped = 0;  // (AI-assisted) skip_clear
+    int color_clears_skipped = 0;  // (AI-assisted) Jak II menu screen copy frames
     double triangles = 0;
     unsigned int vbuf_peak = 0, vbuf_size = 0;
     int vbuf_dropped = 0;
@@ -169,10 +159,9 @@ class CtrRenderer {
   void dispatch_buckets_jak1(DmaFollower dma);
   // (AI-assisted) Jak II: buckets from the start of the chain (no default registers call)
   void dispatch_buckets_jak2(DmaFollower dma);
-  // (AI-assisted) the bucket loop of both: the sky hook from bucket sky_hook_bucket on,
-  // vif_interrupt_callback(bucket + callback_offset); false: a bucket
-  // didn't end at the next one
-  bool run_buckets(DmaFollower& dma, size_t sky_hook_bucket, int callback_offset);
+  // (AI-assisted) the bucket loop of both: vif_interrupt_callback(bucket + callback_offset); false:
+  // a bucket didn't end at the next one
+  bool run_buckets(DmaFollower& dma, int callback_offset);
   // (AI-assisted) Jak II's bucket table (CtrRendererJak2.cpp)
   void init_buckets_jak2();
   // (AI-assisted) the DMA tag of a bucket in a chain (Jak 1: after the default registers call)
@@ -199,23 +188,6 @@ class CtrRenderer {
   void profile_frame(double gpu_draw_ms);
   bool m_menu_page_done = false;  // CtrVram::prewarm_page of the start menu's page
   bool profile_skips(const std::string& name) const;
-  // (AI-assisted) gpu_profile = ab: the A/B windows (kAbSwitches in CtrRenderer.cpp)
-  void ab_frame(float gpu_busy_ms, int gpu_busy_frames, int triangles, int draws);
-  struct AbStats {
-    double busy[2] = {0, 0};  // summed GPU busy ms per frame, switch off / on
-    double tris[2] = {0, 0}, draws[2] = {0, 0};
-    int frames[2] = {0, 0}, windows[2] = {0, 0};
-  };
-  struct AbState {
-    bool init = false;
-    std::vector<bool> config;  // each switch's config.ini value (restored when stopping)
-    std::vector<AbStats> stats;
-    size_t window = 0;         // switch * 2 + (on ? 1 : 0), in a cycle (see ab_frame)
-    int cycle = 0;
-    double window_start = 0;
-    int window_frames = 0;
-    std::string level;
-  } m_ab;
  public:
   /*! (AI-assisted) The levels the game wants (game thread, render thread idle): for gpu_profile. */
   void note_levels(const std::vector<std::string>& levels);
@@ -234,9 +206,6 @@ class CtrRenderer {
   std::string m_profile_level;            // the active level (note_levels)
   double m_profile_arm_ms = 0;            // when its measurement may start
   std::vector<std::string> m_profiled;    // levels measured already
-  bool m_pipeline_off = false;       // (AI-assisted) switched off after a frame dropped draws
-  int m_pipeline_calm = 0;           // (AI-assisted, j2gaps) frames since then that fit in a half
-  int m_pipeline_retry_frames = 450;  // calm frames before it goes on again (x2 per overflow)
   // (AI-assisted, j2intro) both games (Jak 1: title3), draw_pmode_fade: the fade's alpha last shown (0: black); a screen
   // coming out of black kept black while a level just shown (or after a cut) misses something in
   // view (hold_black): since when, the most missing, the frames

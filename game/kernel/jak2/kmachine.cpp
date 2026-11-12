@@ -776,8 +776,8 @@ void InitMachine_PCPort() {
   });
 #endif
   // config.ini shadows: full draws Jak II's shadow volumes (CtrShadowJak2) at the PS2's
-  // distances, only with the stencil buffer (not depth16 = on); off: the game doesn't make them
-  // either (drawable.gc, TARGET_3DS: no shadow-execute-all). Other builds: always.
+  // distances; off: the game doesn't make them either (drawable.gc, TARGET_3DS: no
+  // shadow-execute-all). Other builds: always.
   {
     bool volumes = true;
 #ifdef __3DS__
@@ -786,9 +786,6 @@ void InitMachine_PCPort() {
       const std::string sh(v);
       volumes = !(sh == "blob" || sh == "off" || sh == "0" || sh == "no" || sh == "false" ||
                   sh == "none");
-    }
-    if (volumes && ctr_config_bool("depth16", 0)) {
-      volumes = false;
     }
 #endif
     intern_from_c("*pc-3ds-shadow-volumes?*")->value() =

@@ -7,7 +7,6 @@
 
 void run_vram_tests();
 void run_citadel_tests();
-void run_cpu_bench_tests();  // (AI-assisted, cpubench)
 
 namespace {
 void test_resize() {
@@ -405,7 +404,6 @@ void test_tfrag_versions() {
 int main() {
   try {
     lg::initialize();
-    run_cpu_bench_tests();
     test_resize();
     test_vista_seams();
     test_atlas_order(true);

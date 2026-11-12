@@ -50,8 +50,7 @@
  *             folder's screenshots; for reference pictures to compare the 3DS renderer with). The
  *             3DS renderer: NAME.bmp (3DS) / NAME.png (--ctr-gfx) in its screenshot folder
  *             (config.ini screenshots = N / --ctr-dump).
- *   set KEY VALUE  (AI-assisted) the 3DS renderer: switch a gpu_profile = ab key (or fog) on/off
- *             from here on, e.g. "set fog_alpha on" (A/B pictures of one view)
+ *   set KEY VALUE  (AI-assisted) the 3DS renderer's diagnostics (settings are fixed at boot)
  *   call FN ARGS...  (AI-assisted) call the GOAL function in symbol FN with up to 8 arguments:
  *             an integer, 'SYM (the symbol), $SYM (its value), "TEXT" (a new string, no spaces)
  *             or fN (a float), and log the result, e.g. "call close-specific-task! 112 1" or
@@ -160,8 +159,8 @@ void set_shot_hook(ShotHook hook);
 using NamedShotHook = void (*)(const char* name);
 void set_named_shot_hook(NamedShotHook hook);
 
-//! (AI-assisted) Called for "set KEY VALUE" (the 3DS renderer: a gpu_profile = ab switch or fog
-//! changed mid-run, for A/B screenshots of one view). Returns false for an unknown key.
+//! (AI-assisted) Called for "set KEY VALUE" (the 3DS renderer's diagnostics). Returns false for an
+//! unknown key.
 using SetHook = bool (*)(const char* key, const char* value);
 void set_set_hook(SetHook hook);
 

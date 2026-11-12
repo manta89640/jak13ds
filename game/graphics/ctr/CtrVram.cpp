@@ -1508,7 +1508,7 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   e.tex.h = gh;
   e.tex.max_alpha = max_alpha;
   // (AI-assisted) the smallest 3DS format that holds it (sprites, HUD, font)
-  e.tex.handle = ctr_gpu_tex_create_compact(gw, gh, (const uint8_t*)data.data(), 0);
+  e.tex.handle = ctr_gpu_tex_create_compact(gw, gh, (const uint8_t*)data.data());
   // Allocation pressure is temporary: no failed handle is kept, the lookups try again, as often
   // as keeps the decodes that end here near 1% of the render thread (1 ms per 32 texels)
   if (e.tex.handle < 0) {

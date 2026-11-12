@@ -100,9 +100,8 @@ struct SoftState {
   std::vector<uint8_t> color;  // RGBA8, top row first
   std::vector<float> depth;
   // (AI-assisted) the stencil part of the 3DS's D24S8 depth buffer (CTR_STATE_STENCIL_*), cleared
-  // with the depth at frame begin; none with config.ini depth16 (ctr_gpu_has_stencil)
+  // with the depth at frame begin
   std::vector<uint8_t> stencil;
-  int depth16 = 0;
   std::vector<SoftTex> textures;
   std::vector<SoftMesh> meshes;
   std::vector<SoftPool> pools;
@@ -115,8 +114,6 @@ struct SoftState {
   std::chrono::steady_clock::time_point next_vblank;
   bool vblank_started = false;
 } g_soft;
-// (AI-assisted) ctr_gpu_stream_alloc: the frame's vertices, until the next frame begins
-static std::vector<std::vector<uint8_t>> s_stream;
 
 // env CTR_GPU_LIFE=1 (2: every event): the GPU reads RAM one to two frames after a draw is built
 namespace life {
@@ -273,50 +270,6 @@ struct SoftRt {
 };
 std::vector<SoftRt> s_rts;
 
-// (AI-assisted) env CTR_SOFT_EARLY_PROBE: what an exact early depth test would drop of the early
-// depth draws' fragments: one depth per 32x32 block, the farthest of its pixels, updated between
-// draws, cleared at the frame begin and after a render to texture ("[softearly]" per 60 frames).
-// 1: with the band order (ctr_gpu_early_depth_active), 2: without it, 3: both, 60 frames each
-struct EarlyProbe {
-  static constexpr int kBX = (kW + 31) / 32, kBY = (kH + 31) / 32;
-  float block_min[kBX * kBY] = {};
-  bool dirty[kBX * kBY] = {};
-  bool any_dirty = false;
-  double px = 0, zfail = 0, rej = 0, frames = 0;
-} s_early;
-int early_probe_mode() {
-  static const int mode = getenv("CTR_SOFT_EARLY_PROBE") ? atoi(getenv("CTR_SOFT_EARLY_PROBE")) : 0;
-  return mode;
-}
-bool early_probe_bands() {
-  const int m = early_probe_mode();
-  return m == 1 || (m == 3 && (g_soft.frame / 60) % 2 == 0);
-}
-void early_probe_clear() {
-  std::fill(std::begin(s_early.block_min), std::end(s_early.block_min), 0.f);
-  std::fill(std::begin(s_early.dirty), std::end(s_early.dirty), false);
-  s_early.any_dirty = false;
-}
-void early_probe_draw() {
-  if (!early_probe_mode() || !s_early.any_dirty) {
-    return;
-  }
-  for (int b = 0; b < EarlyProbe::kBX * EarlyProbe::kBY; b++) {
-    if (!s_early.dirty[b]) {
-      continue;
-    }
-    const int bx = b % EarlyProbe::kBX, by = b / EarlyProbe::kBX;
-    float m = 1e30f;
-    for (int y = by * 32; y < std::min(kH, by * 32 + 32); y++) {
-      for (int x = bx * 32; x < std::min(kW, bx * 32 + 32); x++) {
-        m = std::min(m, g_soft.depth[x + y * kW]);
-      }
-    }
-    s_early.block_min[b] = m;
-    s_early.dirty[b] = false;
-  }
-  s_early.any_dirty = false;
-}
 
 // ---- (AI-assisted) snow-gpu-audit: per-bucket draw/fill statistics (env CTR_SOFT_STATS=N) ----
 namespace softstats {
@@ -647,7 +600,6 @@ void tb_prog(int instr, int bufs) {
   tb_bufs = bufs;
 }
 void draw(const ctr_draw_state& st) {
-  early_probe_draw();
   if (!enabled()) return;
   tb_draw_serial++;
   rec_flush();
@@ -832,20 +784,8 @@ void sample(const SoftTex& tex, const ctr_draw_state& st, float s, float t, floa
   }
 }
 
-// (AI-assisted) sky_last / depth_far, as ctr_gpu_citro3d.c
-ctr_gpu_hook_fn s_sky_hook = nullptr;
-void* s_sky_hook_arg = nullptr;
-bool s_depth_far = false;
+// (AI-assisted) Jak II's menu: the color kept at the frame begin, as ctr_gpu_citro3d.c
 bool s_skip_color_clear = false;
-bool keeps_sky(const ctr_draw_state* st) {
-  return st->blend == CTR_BLEND_OFF && st->zwrite &&
-         !(st->flags & ~(CTR_STATE_EARLY_DEPTH | CTR_STATE_PROCTEX));
-}
-void sky_hook(const ctr_draw_state* st) {
-  if (s_sky_hook && !s_target.rt && (!st || !keeps_sky(st))) {
-    ctr_gpu_run_sky_hook();
-  }
-}
 
 // (AI-assisted, far-fog) the fog, as the 3DS backend draws it (it had none here: host frames showed
 // every level without its fog). Level meshes and the ocean: the larger of the game fog and the
@@ -859,10 +799,8 @@ int s_env_tex = -1;  // (AI-assisted, j1ocean) the sky reflection's texture (oce
 // the sky reflection weight's depth fade (ocean_full_draw, ctr_gpu_ocean_full_draw_env): its
 // lowest value (0, or 0.5 for the near ocean; -1: none) and the pixel's
 float s_env_fade_lo = -1.f, s_env_fade = 1.f;
-bool s_nofog = false;
 float s_mfog_hvdf_w = 255.f, s_mfog_lo = 0.f, s_mfog_hi = 0.f;
 float s_mhaze_k = 0.f, s_mhaze_c = 0.f;  // (AI-assisted, mercsprite) ctr_gpu_set_merc_haze
-int s_shader_opt = 1;
 bool fog_on() {
   static const bool off = getenv("CTR_SOFT_NO_FOG") != nullptr;
   return !off;
@@ -900,8 +838,7 @@ int soft_tex_res(int t) {
   return a >= 0 && a < (int)g_soft.textures.size() && g_soft.textures[a].used ? a : t;
 }
 
-// (AI-assisted, j2water) Jak II's ocean with the sky reflection (ctr_gpu_ocean_env_draw): the env
-// map and this pixel's coordinates (raster_triangle), added after the fog weighted by the alpha
+// the envmapped ties' env map and this pixel's coordinates (raster_triangle)
 struct SoftEnv {
   int tex = -1;
   float s = 0, t = 0;
@@ -1021,9 +958,6 @@ void shade_pixel(const ctr_draw_state& st,
   // color in GS units (0x80 = 1.0 for vertex color / alpha)
   float r = col[0], g = col[1], b = col[2], a = col[3];
   float tex_a = 255.f;  // (AI-assisted, j1ocean) the texture's alpha (the sky reflection's weight)
-  if (s_depth_far) {
-    z = 0.f;  // (AI-assisted) ctr_gpu_set_depth_far
-  }
   static const bool force_white = getenv("CTR_SOFT_WHITE") != nullptr;
   if (force_white) {
     r = g = b = 128.f;
@@ -1091,17 +1025,6 @@ void shade_pixel(const ctr_draw_state& st,
     g = std::min(g, 255.f) + ec[1] * w;
     b = std::min(b, 255.f) + ec[2] * w;
   }
-  if (!s_env.etie && s_env.tex >= 0 && s_env.tex < (int)g_soft.textures.size() &&
-      g_soft.textures[s_env.tex].used) {
-    // (AI-assisted, j2water) + env * alpha (0x80 = 1, at most 1), texture unit 2 repeats
-    ctr_draw_state es{};
-    float ec[4];
-    sample(g_soft.textures[s_env.tex], es, s_env.s, s_env.t, ec);
-    const float w = std::clamp(a / 128.f, 0.f, 1.f);
-    r = std::min(r, 255.f) + ec[0] * w;
-    g = std::min(g, 255.f) + ec[1] * w;
-    b = std::min(b, 255.f) + ec[2] * w;
-  }
   if (ss_on) {
     // gpumodel: texture units read by this fragment
     const bool u1 = stex >= 0 && stex < (int)g_soft.textures.size() && g_soft.textures[stex].used;
@@ -1114,7 +1037,6 @@ void shade_pixel(const ctr_draw_state& st,
     softstats::tb_frag++;
     softstats::cur->px++;
     if (!s_target.rt) softstats::od[px + py * kW]++;
-    if (st.flags & CTR_STATE_PROCTEX) softstats::cur->px_proc++;
     if ((st.blend == CTR_BLEND_ALPHA || st.blend == CTR_BLEND_ADD ||
          st.blend == CTR_BLEND_OVER_CLEAR) && a < 2.f) {
       softstats::cur->px_invis++;
@@ -1132,17 +1054,12 @@ void shade_pixel(const ctr_draw_state& st,
   if (ss_on) softstats::cur->px_atest++;
   int idx = px + py * s_target.stride;
   // (AI-assisted) the stencil test and operations, as ctr_gpu_citro3d.c sets them
-  uint8_t* sten = g_soft.depth16 || !s_target.stencil ? nullptr : &s_target.stencil[idx];
+  uint8_t* sten = !s_target.stencil ? nullptr : &s_target.stencil[idx];
   if (sten && (st.flags & CTR_STATE_STENCIL_OUT) && *sten == 1) {
     return;
   }
   if (sten && (st.flags & CTR_STATE_STENCIL_CLEAR) && *sten == 0) {
     return;
-  }
-  if (early_probe_mode() && !s_target.rt && (st.flags & CTR_STATE_EARLY_DEPTH)) {
-    s_early.px++;
-    s_early.zfail += z < s_target.depth[idx];
-    s_early.rej += z < s_early.block_min[px / 32 + (py / 32) * EarlyProbe::kBX];
   }
   if (!test(st.ztest, z, s_target.depth[idx])) {
     return;
@@ -1195,10 +1112,6 @@ void shade_pixel(const ctr_draw_state& st,
   }
   if (st.zwrite) {
     s_target.depth[idx] = z;
-    if (early_probe_mode() && !s_target.rt) {
-      s_early.dirty[px / 32 + (py / 32) * EarlyProbe::kBX] = true;
-      s_early.any_dirty = true;
-    }
   }
   if (st.flags & CTR_STATE_NO_COLOR) {
     return;
@@ -1513,8 +1426,6 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t g, uint8_t b) {
   memcpy(s_anim_slot_tex, s_anim_slot_next, sizeof(s_anim_slot_tex));  // (AI-assisted)
   s_anim_drawn_last = s_anim_drawn;
   s_anim_drawn = 0;
-  s_sky_hook = nullptr;
-  s_nofog = false;  // (AI-assisted, far-fog) as ctr_gpu_set_mesh_nofog says
   g_soft.cur = ctr_gpu_stats{};
   g_soft.cur.color_clear_skipped = s_skip_color_clear;
   for (int i = 0; i < kW * kH && !s_skip_color_clear; i++) {
@@ -1525,8 +1436,6 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t g, uint8_t b) {
   }
   std::fill(g_soft.depth.begin(), g_soft.depth.end(), 0.f);
   std::fill(g_soft.stencil.begin(), g_soft.stencil.end(), 0);
-  s_stream.clear();
-  early_probe_clear();
   if (life::on()) {
     life::s_frame++;
     life_deletes(false);
@@ -1588,16 +1497,7 @@ void ctr_gpu_frame_end(void) {
     }
   }
   ctr_gpu_rt_end();  // (AI-assisted) impostors: a render to texture left open
-  ctr_gpu_run_sky_hook();
   cull_probe_frame();
-  if (early_probe_mode() && ++s_early.frames >= 60) {
-    const double n = s_early.frames;
-    lg::info("[softearly] band order {}: early depth draws' fragments {:.0f} per frame, {:.0f} "
-             "fail the depth test, {:.0f} ({:.1f}%) an exact 32x32 early test drops",
-             early_probe_bands() ? "on" : "off", s_early.px / n, s_early.zfail / n,
-             s_early.rej / n, s_early.px > 0 ? 100.0 * s_early.rej / s_early.px : 0.0);
-    s_early.px = s_early.zfail = s_early.rej = s_early.frames = 0;
-  }
   softstats::rec_flush();  // gpumodel: the frame's last draw
   g_soft.frame++;
   if (softstats::enabled()) {
@@ -1857,7 +1757,6 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state*,
                               int,
                               int,
                               int index_count_env) {
-  sky_hook(nullptr);
   softstats::prog(3);
   // (AI-assisted) ctr_gpu_citro3d.c uploads the env program's matrix, bones and fade every draw
   if (softstats::enabled()) softstats::cur->unif += 4 + 3 * std::min(palette_count_env, 24) + 1;
@@ -1889,7 +1788,6 @@ void ctr_gpu_draw_clip_pz(const ctr_draw_state* state, const ctr_clip_vertex* ve
   ctr_gpu_draw_clip(state, gl.data(), count);
 }
 void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count) {
-  sky_hook(state);
   softstats::prog(4);
   // (AI-assisted) snow-gpu-audit: clipped against near/far like the GPU (the sky reaches behind
   // the camera: dropping those triangles undercounted its fill)
@@ -2014,7 +1912,6 @@ void clip_draw_triangle(const ctr_draw_state& st, const ctr_clip_vertex* const t
 
 int ctr_gpu_clip_reserve(int max_verts, int max_indices, ctr_clip_vertex** verts,
                          uint16_t** indices) {
-  sky_hook(nullptr);
   if (g_clip_open || max_verts <= 0 || max_verts > 65536 || max_indices <= 0) {
     return 0;
   }
@@ -2121,7 +2018,6 @@ int ctr_gpu_ocean_full_reserve(int max_verts,
                           int max_indices,
                           ctr_ocean_full_vertex** verts,
                           uint16_t** indices) {
-  sky_hook(nullptr);
   if (g_ocean_full_open || max_verts <= 0 || max_indices <= 0) {
     return 0;
   }
@@ -2193,7 +2089,6 @@ void ocean_full_draw(const ctr_draw_state* state,
     }
   }
   if (!out.empty()) {
-    sky_hook(state);
     softstats::prog(0);
     g_soft.cur.draws++;
     if (state) softstats::draw(*state);
@@ -2258,7 +2153,6 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state,
                         uint32_t const1,
                         const ctr_clip_vertex2* verts,
                         int count) {
-  sky_hook(state);
   softstats::prog(5);
   for (int layer = 0; layer < 2; layer++) {
     const uint32_t c = layer ? const1 : const0;
@@ -2307,16 +2201,6 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state,
 static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], const SoftVerts& verts,
                            const uint16_t* indices, int first_index, int index_count);
 
-int ctr_gpu_copy_screen_part(float x0, float x1) {
-  // (AI-assisted) the whole screen as well (no tiles here); counted like ctr_gpu_citro3d.c's rows
-  const auto clampf = [](float v) { return std::clamp(v, -1.f, 1.f); };
-  const int p0 = std::clamp((int)((clampf(x0) + 1.f) * 0.5f * 399.f) - 1, 0, 399);
-  const int p1 = std::max(p0, std::clamp((int)((clampf(x1) + 1.f) * 0.5f * 399.f) + 2, 0, 399));
-  const int h = ctr_gpu_copy_screen();
-  if (softstats::enabled()) softstats::cur->copy_rows += (p1 >> 3) - (p0 >> 3) + 1 - 50;
-  return h;
-}
-
 static int s_screen_copy = -1;  // (AI-assisted) ctr_gpu_copy_screen's texture
 static int s_screen_copy_pinned = 0;
 
@@ -2336,7 +2220,6 @@ int ctr_gpu_copy_screen(void) {
   if (s_screen_copy_pinned == 2) {
     return -1;
   }
-  sky_hook(nullptr);
   if (softstats::enabled()) softstats::cur->copy_rows += 50;
   int& handle = s_screen_copy;
   if (handle < 0 || handle >= (int)g_soft.textures.size() || !g_soft.textures[handle].used ||
@@ -2489,7 +2372,6 @@ void ctr_gpu_rt_end(void) {
   s_target.color = g_soft.color.data();
   s_target.depth = g_soft.depth.data();
   s_target.stencil = g_soft.stencil.data();
-  early_probe_clear();  // (AI-assisted) as the 3DS clears the early depth data after it
 }
 
 void ctr_gpu_rt_delete(int tex) {
@@ -2604,7 +2486,6 @@ int ctr_gpu_mesh_peek(int mesh, const void** verts, int* vertex_count, const uin
 }
 
 void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int count) {
-  sky_hook(state);
   softstats::prog(0);
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
@@ -2630,7 +2511,6 @@ void ctr_gpu_draw_quads_again(const ctr_draw_state* state) {
 void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, int quad_count) {
   s_lastq_verts = verts;
   s_lastq_count = quad_count;
-  sky_hook(state);
   softstats::prog(0);
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
@@ -2649,7 +2529,6 @@ void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, in
 
 // (AI-assisted) triangle k: vertices k, k + 1, k + 2 (the joins between strips have no area)
 void ctr_gpu_draw_strip(const ctr_draw_state* state, const ctr_vertex* verts, int count) {
-  sky_hook(state);
   softstats::prog(0);
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
@@ -2982,7 +2861,6 @@ void ctr_gpu_mesh_delete(int mesh) {
 // (AI-assisted) cull_ties (ctr_gpu_set_cull_flip)
 static int g_soft_cull_flip = 0;
 static int g_soft_cull_enable = 0;
-static int g_soft_fog_alpha = 0;  // (AI-assisted) fog_alpha: only the program choice (statistics)
 
 static int g_soft_cur_mesh = -1;  // (AI-assisted, perfv2) CTR_SOFT_DRAW_PX
 void ctr_gpu_draw_mesh(const ctr_draw_state* state,
@@ -2990,10 +2868,8 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
                        int mesh,
                        int first_index,
                        int index_count) {
-  sky_hook(state);
   g_soft_cur_mesh = mesh;
-  // (AI-assisted) fog_alpha: the 3DS backend's second mesh program (9) for CTR_TCC_ALPHA80 draws
-  softstats::prog(g_soft_fog_alpha && state && (state->tcc & CTR_TCC_ALPHA80) ? 9 : 1);
+  softstats::prog(1);
   if (!soft_mesh_ok(mesh, true)) {
     return;
   }
@@ -3110,7 +2986,7 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
                                 !state->clamp_t);
   // (AI-assisted) c3l v15 atlas draws: texture coordinates in 1/32768
   const float st_scale = state && (state->tcc & CTR_TCC_ST_ATLAS) ? 1.f / 32768.f : 1.f / 1024.f;
-  const bool fogged = fog_on() && !s_nofog;  // (AI-assisted, far-fog)
+  const bool fogged = fog_on();
   for (int i = first_index; i + 2 < first_index + index_count; i += 3) {
     ctr_vertex tri[3];
     float fog[3] = {0.f, 0.f, 0.f};
@@ -3227,164 +3103,9 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
   }
 }
 
-// (AI-assisted) the ocean with waves: no second texture layer here. The stencil buffer (its marks,
-// the shadow volumes) as on the 3DS: none with config.ini depth16.
-
+// the stencil buffer (the shadow volumes) as on the 3DS
 int ctr_gpu_has_stencil(void) {
-  return !g_soft.depth16;
-}
-
-void* ctr_gpu_stream_alloc(int bytes) {
-  if (bytes <= 0) {
-    return nullptr;
-  }
-  s_stream.emplace_back((size_t)bytes);
-  return s_stream.back().data();
-}
-
-void ctr_gpu_ocean_draw(const ctr_draw_state* state,
-                        int,
-                        const ctr_ocean_draw* d,
-                        int mesh,
-                        const void* verts,
-                        const uint16_t* indices,
-                        int first_index,
-                        int index_count) {
-  sky_hook(state);
-  softstats::prog(8);
-  const uint8_t* vbase = (const uint8_t*)verts;
-  const uint16_t* ibase = indices;
-  size_t col_off = 0;
-  if (mesh >= 0) {
-    if (!soft_mesh_ok(mesh, true)) {
-      return;
-    }
-    vbase = g_soft.meshes[mesh].verts.data();
-    ibase = g_soft.meshes[mesh].indices.data();
-    col_off = g_soft.meshes[mesh].col_off;
-  }
-  if (!vbase || !ibase) {
-    return;
-  }
-  const SoftVerts sv = soft_verts(vbase, col_off);
-  const float* clip = d->clip.m;  // row-major (the soft prepare keeps the GL matrix)
-  g_soft.cur.draws++;
-  if (state) softstats::draw(*state);
-  softstats::tb_prog(24, 1);
-  softstats::tb_verts(ibase + first_index, index_count);
-  for (int i = first_index; i + 2 < first_index + index_count; i += 3) {
-    ctr_vertex tri[3];
-    float fog[3] = {0.f, 0.f, 0.f};  // (AI-assisted, far-fog) the ocean's fog stage
-    bool ok = true;
-    for (int k = 0; k < 3; k++) {
-      const uint8_t* src = sv.p(ibase[i + k]);
-      const uint8_t* col = sv.c(ibase[i + k]);
-      int16_t pos[3];
-      memcpy(pos, src, 6);
-      const float in[3] = {(float)pos[0], (float)pos[1], (float)pos[2]};
-      float c[4];
-      for (int r = 0; r < 4; r++) {
-        c[r] = clip[4 * r] * in[0] + clip[4 * r + 1] * in[1] + clip[4 * r + 2] * in[2] +
-               clip[4 * r + 3];
-      }
-      if (c[3] < 1e-3f) {
-        ok = false;
-        break;
-      }
-      tri[k].x = c[0] / c[3];
-      tri[k].y = c[1] / c[3];
-      tri[k].z = (1.f + c[2] / c[3]) * 0.5f;
-      fog[k] = fog_on() ? mesh_fog(c[3]) : 0.f;
-      tri[k].s = d->tex[0][0] * in[0] + d->tex[0][1] * in[1] + d->tex[0][2] * in[2] + d->tex[0][3];
-      tri[k].t = d->tex[1][0] * in[0] + d->tex[1][1] * in[1] + d->tex[1][2] * in[2] + d->tex[1][3];
-      const float f = 1.f + d->crest[0] * 255.f * in[1];
-      auto ch = [&](uint8_t v) { return (uint8_t)std::clamp(v * f, 0.f, 255.f); };
-      tri[k].r = ch(col[0]);
-      tri[k].g = ch(col[1]);
-      tri[k].b = ch(col[2]);
-      tri[k].a = col[3];
-    }
-    if (!ok || (tri[0].z < 0 && tri[1].z < 0 && tri[2].z < 0) ||
-        (tri[0].z > 1 && tri[1].z > 1 && tri[2].z > 1)) {
-      softstats::tb_drop(ok ? softstats::TF_OFF : softstats::TF_NEAR, -1.f);
-      continue;
-    }
-    raster_triangle(*state, tri, true, fog);
-    g_soft.cur.triangles++;
-    softstats::cur->tris++;
-  }
-}
-
-// (AI-assisted, j2water) Jak II's ocean with the sky reflection (see ctr_gpu.h): affine env map
-// coordinates per triangle, as the 3DS interpolates them
-void ctr_gpu_ocean_env_draw(const ctr_draw_state* state,
-                            int env_tex,
-                            const ctr_ocean_env_draw* d,
-                            int mesh,
-                            int first_index,
-                            int index_count) {
-  sky_hook(state);
-  softstats::prog(10);
-  if (!soft_mesh_ok(mesh, true)) {
-    return;
-  }
-  const uint8_t* vbase = g_soft.meshes[mesh].verts.data();
-  const uint16_t* ibase = g_soft.meshes[mesh].indices.data();
-  const SoftVerts sv = soft_verts(vbase, g_soft.meshes[mesh].col_off);
-  const float* clip = d->clip.m;
-  g_soft.cur.draws++;
-  if (state) softstats::draw(*state);
-  softstats::tb_prog(9, 1);  // gpumodel
-  softstats::tb_verts(ibase + first_index, index_count);
-  auto row = [](const float* r, const float* in) {
-    return r[0] * in[0] + r[1] * in[1] + r[2] * in[2] + r[3];
-  };
-  for (int i = first_index; i + 2 < first_index + index_count; i += 3) {
-    ctr_vertex tri[3];
-    float fog[3] = {0.f, 0.f, 0.f};
-    bool ok = true;
-    for (int k = 0; k < 3; k++) {
-      const uint8_t* src = sv.p(ibase[i + k]);
-      const uint8_t* col = sv.c(ibase[i + k]);
-      int16_t pos[3];
-      memcpy(pos, src, 6);
-      const float in[3] = {(float)pos[0], (float)pos[1], (float)pos[2]};
-      float c[4];
-      for (int r = 0; r < 4; r++) {
-        c[r] = clip[4 * r] * in[0] + clip[4 * r + 1] * in[1] + clip[4 * r + 2] * in[2] +
-               clip[4 * r + 3];
-      }
-      if (c[3] < 1e-3f) {
-        ok = false;
-        break;
-      }
-      tri[k].x = c[0] / c[3];
-      tri[k].y = c[1] / c[3];
-      tri[k].z = (1.f + c[2] / c[3]) * 0.5f;
-      fog[k] = fog_on() ? mesh_fog(c[3]) : 0.f;
-      tri[k].s = row(d->tex[0], in);
-      tri[k].t = row(d->tex[1], in);
-      const float dv[3] = {row(d->dir[0], in), row(d->dir[1], in), row(d->dir[2], in)};
-      const float inv = 1.f / std::sqrt(std::max(dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2], 1e-12f));
-      s_env.vs[k] = (d->env[0][0] * dv[0] + d->env[0][1] * dv[1] + d->env[0][2] * dv[2]) * inv +
-                    d->env[0][3];
-      s_env.vt[k] = (d->env[1][0] * dv[0] + d->env[1][1] * dv[1] + d->env[1][2] * dv[2]) * inv +
-                    d->env[1][3];
-      tri[k].r = col[0];
-      tri[k].g = col[1];
-      tri[k].b = col[2];
-      tri[k].a = col[3];
-    }
-    if (!ok || (tri[0].z < 0 && tri[1].z < 0 && tri[2].z < 0) ||
-        (tri[0].z > 1 && tri[1].z > 1 && tri[2].z > 1)) {
-      continue;
-    }
-    s_env.tex = env_tex;
-    raster_triangle(*state, tri, true, fog);
-    s_env.tex = -1;
-    g_soft.cur.triangles++;
-    softstats::cur->tris++;
-  }
+  return 1;
 }
 
 void ctr_gpu_ocean_end(void) {}
@@ -3401,7 +3122,6 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state,
                        int first_index,
                        int index_count) {
   s_tie_draw++;
-  sky_hook(state);
   softstats::prog(11);
   if (!soft_mesh_ok(mesh, true) || !state ||
       normals_mesh < 0 || normals_mesh >= (int)g_soft.meshes.size() ||
@@ -3418,7 +3138,7 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state,
   softstats::draw(*state);
   softstats::tb_prog(30, g_soft.meshes[mesh].col_off ? 3 : 2);
   softstats::tb_verts(ibase + first_index, index_count);
-  const bool fogged = fog_on() && !s_nofog;
+  const bool fogged = fog_on();
   auto row = [](const float* r, const float* in) {
     return r[0] * in[0] + r[1] * in[1] + r[2] * in[2] + r[3];
   };
@@ -3522,7 +3242,6 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
                             const float* rows, int row_count, uint32_t, int mesh, int slots_mesh,
                             int slots_offset, int first_index, int index_count) {
   s_tie_draw++;
-  sky_hook(state);
   if (!soft_mesh_ok(mesh, true) ||
       slots_mesh < 0 || slots_mesh >= (int)g_soft.meshes.size() ||
       !g_soft.meshes[slots_mesh].used) {
@@ -3560,7 +3279,6 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
                              const float* rows, const uint8_t* list, int list_n, uint32_t,
                              int mesh, int morph_offset, int first_index, int index_count) {
   s_tie_draw++;
-  sky_hook(state);
   if (!soft_mesh_ok(mesh, true) ||
       morph_offset < 0 || (size_t)morph_offset > g_soft.meshes[mesh].verts.size()) {
     return;
@@ -3607,7 +3325,6 @@ int ctr_gpu_morph_ready(void) {
 void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                               const float* unif, uint32_t, int mesh, int tail_offset,
                               int first_index, int index_count) {
-  sky_hook(state);
   if (!soft_mesh_ok(mesh, true) || !unif ||
       tail_offset < 0 || (size_t)tail_offset > g_soft.meshes[mesh].verts.size()) {
     return;
@@ -3707,7 +3424,6 @@ void ctr_gpu_mesh_flush(int mesh, int offset, int size) {
     ctr_gpu_flush_range(g_soft.meshes[mesh].verts.data() + offset, (unsigned int)size);
   }
 }
-void ctr_gpu_set_micro_mask(unsigned int) {}
 
 void* ctr_gpu_mesh_colors_inplace(int mesh) {
   if (!soft_mesh_ok(mesh, false) ||
@@ -3742,7 +3458,6 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
                           int mesh,
                           int first_index,
                           int index_count) {
-  sky_hook(state);
   // (AI-assisted) the uniforms ctr_gpu_citro3d.c uploads: what changed since the last skin draw,
   // everything after a program switch
   if (softstats::enabled()) {
@@ -3893,9 +3608,8 @@ void ctr_gpu_set_merc_haze(float k, float c) {
   s_mhaze_c = c;
 }
 
-// (AI-assisted, far-fog) as the 3DS: only shader_opt's skin program has the fog
 int ctr_gpu_merc_fog_ready(void) {
-  return s_shader_opt;
+  return 1;
 }
 
 void ctr_gpu_request_screenshot(const char* path) {
@@ -3913,23 +3627,6 @@ void ctr_gpu_set_mesh_fog(const float* fog0, const float* fog1, uint8_t r, uint8
   s_fog_rgb[0] = r;
   s_fog_rgb[1] = g;
   s_fog_rgb[2] = b;
-}
-void ctr_gpu_set_mesh_nofog(int on) {  // (AI-assisted) fog_stage_skip: no fog stage
-  s_nofog = on != 0;
-}
-// (AI-assisted) fog_alpha, tex1_gating: no fog and one texture unit here
-void ctr_gpu_set_fog_alpha(int on) {
-  g_soft_fog_alpha = on;
-}
-void ctr_gpu_set_tex1_gating(int) {}
-void ctr_gpu_set_shader_opt(int on) {  // (AI-assisted) the vertex math is the same here
-  s_shader_opt = on ? 1 : 0;              // (far-fog: but merc fog needs it, as on the 3DS)
-}
-int ctr_gpu_shader_opt_ready(void) {
-  return 1;
-}
-int ctr_gpu_fog_alpha_ready(void) {
-  return 1;
 }
 // (AI-assisted) cull_ties: back faces of CTR_TCC_CULL_BACK draws (counter-clockwise front faces
 // on screen, x right / y up; flip: the other way)
@@ -3949,18 +3646,6 @@ int ctr_gpu_rgba4_as_rgba8(void) {
 }
 
 void ctr_gpu_set_vram_textures(int) {}
-void ctr_gpu_set_color16(int) {}
-void ctr_gpu_set_early_depth(int) {}
-void ctr_gpu_set_early_depth_params(int, int, unsigned int) {}  // (AI-assisted) no early test
-int ctr_gpu_early_depth_selftest() {
-  return 0;
-}
-int ctr_gpu_early_depth_active() {
-  return early_probe_bands();
-}
-const char* ctr_gpu_early_depth_status() {
-  return "not run (host)";
-}
 void ctr_gpu_submit_now() {}
 int ctr_gpu_top_histogram(unsigned int counts[256]) {
   memset(counts, 0, 256 * sizeof(counts[0]));
@@ -3968,18 +3653,6 @@ int ctr_gpu_top_histogram(unsigned int counts[256]) {
     counts[g_soft.color[i + 2]]++;
   }
   return 1;
-}
-void ctr_gpu_set_tex_cache_clear(int) {}  // (AI-assisted) no texture cache
-void ctr_gpu_set_mip_bias(float) {}         // (AI-assisted) the soft textures have no mips
-void ctr_gpu_set_skin_rows_f24(int) {}
-// (AI-assisted) no float24 uniforms here: the draws never get the words
-int ctr_gpu_skin_rows_f24_on(void) {
-  return 0;
-}
-void ctr_gpu_pack_skin_rows_f24(const float*, int, uint32_t*) {}
-void ctr_gpu_set_skin_clip_f24(int) {}  // (AI-assisted)      // (AI-assisted) no uniform formats here
-void ctr_gpu_set_framebuffer(int depth16) {
-  g_soft.depth16 = depth16 ? 1 : 0;  // (AI-assisted) no stencil, like the 3DS's D16 buffer
 }
 int ctr_gpu_describe_target(char*, int) {
   return 0;
@@ -3995,7 +3668,6 @@ int ctr_gpu_hwprof_end(ctr_gpu_hwprof* out) {
   return 1;
 }
 void ctr_gpu_set_steady_pacing(int) {}
-void ctr_gpu_set_top_block32(int) {}
 unsigned int ctr_gpu_release_now(void) {
   return 0;
 }
@@ -4012,26 +3684,16 @@ void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* drop
   *floor = 0;
 }
 void ctr_gpu_want_detailed_stats(void) {}
-void ctr_gpu_set_proctex(int) {}
-void ctr_gpu_set_merc_one_bone(int) {}  // (AI-assisted, onebone) the soft GPU draws merc its way
-void ctr_gpu_set_index_u8(int) {}       // (AI-assisted, idx8) the soft GPU's indices are its own
-void ctr_gpu_set_vram_vertices(int) {}  // (AI-assisted, vramvtx) no VRAM on the host
 void ctr_gpu_set_compact_textures(int) {}
-int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int /*flags*/) {
+int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba) {
   return ctr_gpu_tex_create(w, h, rgba);
-}
-int ctr_gpu_tex_radial(int) {
-  return 0;
 }
 void ctr_gpu_set_overlap(int) {}
 void ctr_gpu_set_raw_cmds(int) {}
-void ctr_gpu_set_cmd_dedup(int, int) {}  // (AI-assisted) no command lists here
-void ctr_gpu_set_cmd_dump(int) {}  // (AI-assisted)
 // (AI-assisted, gpu-rt) a pass's level draws, one by one
 void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n) {
   for (int i = 0; i < n; i++) {
     const ctr_mesh_call& c = calls[i];
-    ctr_gpu_set_mesh_nofog(c.nofog);
     if (c.morph_rows) {
       ctr_gpu_draw_mesh_morph(c.state, c.matrix, c.morph_rows, c.morph_list, c.morph_list_n,
                               c.morph_id, c.mesh, c.morph_offset, c.first_index, c.index_count);
@@ -4052,10 +3714,8 @@ void ctr_gpu_phase(int) {}
 int ctr_gpu_breakdown_line(char*, int, const char*) {
   return 0;
 }
-void ctr_gpu_cmd_dump_next(void) {}
 void ctr_gpu_set_asm_tex(int) {}
 void ctr_gpu_set_defer_flush(int) {}
-void ctr_gpu_set_shader_basic(int) {}
 int ctr_gpu_asm_tex(void) {
   return 1;
 }
@@ -4068,22 +3728,6 @@ unsigned int ctr_gpu_cmd_buffer_kb() {
 
 int ctr_gpu_set_pipeline(int) {
   return 0;
-}
-void ctr_gpu_set_frame_overlap2(int) {}  // (AI-assisted) no GPU queue here
-// (AI-assisted) sky_last / skip_clear
-void ctr_gpu_set_sky_hook(ctr_gpu_hook_fn fn, void* arg) {
-  s_sky_hook = fn;
-  s_sky_hook_arg = arg;
-}
-void ctr_gpu_run_sky_hook(void) {
-  const ctr_gpu_hook_fn fn = s_sky_hook;
-  if (fn) {
-    s_sky_hook = nullptr;
-    fn(s_sky_hook_arg);
-  }
-}
-void ctr_gpu_set_depth_far(int on) {
-  s_depth_far = on != 0;
 }
 void ctr_gpu_set_skip_color_clear(int on) {
   s_skip_color_clear = on != 0;

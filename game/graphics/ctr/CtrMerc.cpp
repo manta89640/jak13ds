@@ -1485,7 +1485,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // words for skin_rows_f24, made once per palette (not at every upload: the shine pass uploads
   // a palette again)
   u32 palette_id = 0;
-  const bool rows_f24 = ctr_gpu_skin_rows_f24_on() != 0;
+  const bool rows_f24 = false;  // skin_rows_f24 is gone: the GPU layer sends float32 rows
   uint32_t palette_f24[9 * CTR_MAX_PALETTE];
   bool palette_f24_made = false;
   // not HUD models: their rows are changed after they are made

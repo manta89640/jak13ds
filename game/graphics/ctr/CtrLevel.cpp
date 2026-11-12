@@ -1306,7 +1306,7 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
       }
       if (mesh >= 0) {
         MeshBuild mb(mesh);  // (AI-assisted, streammem)
-        const bool split = ctr_settings().color_stream;
+        const bool split = false;  // one interleaved stream (color_stream is gone)
         if (split) {
           ctr_gpu_mesh_split_colors(mesh);
         }
@@ -6045,7 +6045,6 @@ void build_draw_order(CtrLevelData* out) {
   out->ordered_draws.clear();
   out->early_draws.clear();
   out->draw_states.reserve(out->draws.size());
-  out->opaque_alpha_applied = ctr_settings().opaque_alpha;
   for (auto& d : out->draws) {
     DrawMode mode;
     mode.as_int() = d.mode;
@@ -6081,8 +6080,8 @@ void build_draw_order(CtrLevelData* out) {
       st.flags |= CTR_STATE_EARLY_DEPTH;
     }
     // (AI-assisted) c3l v15: the alpha test / blending the converter took out, back with
-    // config opaque_alpha = off
-    set_opaque_alpha(&st, d, ctr_settings().opaque_alpha, min_alpha);
+    // the converter's dropped alpha tests / blending back (texture animation can change alpha)
+    set_opaque_alpha(&st, d, false, min_alpha);
     out->draw_states.push_back(st);
   }
   // sort keys: texture first (a texture change clears the GPU's texture cache), then the rest of
@@ -7310,7 +7309,7 @@ bool CtrLevels::load_file(const fs::path& path,
     }
     if (mesh >= 0) {
       MeshBuild mb(mesh);  // (AI-assisted, streammem)
-      const bool split = ctr_settings().color_stream;
+      const bool split = false;  // one interleaved stream (color_stream is gone)
       if (split) {
         ctr_gpu_mesh_split_colors(mesh);
       }
@@ -9621,7 +9620,7 @@ void CtrLevels::run_stream_job(const Job& job, Done* d, c3l::Reader::Buffers* bu
         break;  // (its piece back below)
       }
       live = mesh;
-      const bool split = ctr_settings().color_stream;
+      const bool split = false;  // one interleaved stream (color_stream is gone)
       if (split) {
         ctr_gpu_mesh_split_colors(mesh);
       }
@@ -10900,7 +10899,6 @@ void CtrTfragRenderer::draw_jak2_late(const CtrRenderState& rs) {
   }
   m_late_calls.clear();
   draw_env_calls(m_env_late);  // (AI-assisted, j2water2) the blended envmapped ties
-  ctr_gpu_set_mesh_nofog(0);
   ctr_gpu_cull_reset();
 }
 
@@ -11095,7 +11093,6 @@ void CtrTfragRenderer::draw_wind_calls(const CtrLevelData& lev) {
     return a.state->tex != b.state->tex ? a.state->tex < b.state->tex : a.mesh < b.mesh;
   });
   for (const auto& c : m_wind_calls) {
-    ctr_gpu_set_mesh_nofog(c.nofog);
     ctr_gpu_draw_mesh_wind(c.state, c.matrix, m_wind_rows.data() + 4 * c.row_first,
                            (int)c.row_count, c.rows_id, c.mesh, lev.wind_mesh, c.slots_offset,
                            c.first, c.count);
@@ -11625,9 +11622,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     lev.outside_gen = m_levels->set_generation();
     lev.outside_cache.assign(lev.chunks.size(), 0);
   }
-  // (AI-assisted) fog_stage_skip
-  const bool fog_skip = settings.fog_stage_skip;
-  const bool early_depth = ctr_gpu_early_depth_active() != 0;  // (AI-assisted) the band order
+  const bool fog_skip = false;  // the fog stage is never skipped (fog_stage_skip is gone)
+  const bool early_depth = false;  // the early depth test is gone: no band order
   const float pzw = std::abs(cam.perspective[2][3]);
 #ifndef __3DS__
   ctr_gpu_soft_view_depth(pzw * 4096.f);
@@ -11653,16 +11649,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       ctr_haze_note_vista(rs.frame_idx);  // (merc's haze: CtrHaze.h)
     }
     ctr_gpu_set_mesh_fog(fog0, fog1, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
-  }
-  // (AI-assisted) config opaque_alpha (gpu_profile = ab switches it): the v15 draws' alpha tests /
-  // blending back, or out again
-  if (lev.opaque_alpha_applied != settings.opaque_alpha) {
-    lev.opaque_alpha_applied = settings.opaque_alpha;
-    for (size_t di = 0; di < lev.draws.size() && di < lev.draw_states.size(); di++) {
-      const auto& d = lev.draws[di];
-      set_opaque_alpha(&lev.draw_states[di], d, settings.opaque_alpha,
-                       d.texture < lev.tex_min_alpha.size() ? lev.tex_min_alpha[d.texture] : 255);
-    }
   }
   // this level's textures: VRAM first if the camera is in it (see ctr_gpu_pool_create)
   set_tex_priority(lev.tex_pools, far_level ? 1 : 2);
@@ -14035,7 +14021,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                          (int)count, vc.nofog ? 1 : 0, nullptr, nullptr, 0, 0, 0, nullptr, 0});
     };
 #else
-    ctr_gpu_set_mesh_nofog(vc.nofog);  // (AI-assisted) fog_stage_skip
     auto submit = [&](u32 first, u32 count) {
       if (wind) {
         wind_submit(di, slot, vc, first, count);
@@ -14440,7 +14425,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
 #else
   ctr_gpu_soft_bucket((m_name.substr(0, 2) + "/shrubfade").c_str());
   for (const auto& c : m_fade_calls) {
-    ctr_gpu_set_mesh_nofog(c.nofog);
     ctr_gpu_draw_mesh_prepared(c.state, c.matrix, c.mesh, c.first_index, c.index_count);
   }
 #endif
@@ -14466,7 +14450,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   phase(kPhLists);
   flush_calls(0);  // (AI-assisted, gpu-rt) the main pass's
   draw_env_calls(m_env_calls);  // (AI-assisted, j2water2) (none left in Jak II's case)
-  ctr_gpu_set_mesh_nofog(0);
   ctr_gpu_cull_reset();  // (AI-assisted) cull_ties
   phase(kPhFlush);
   if (lev.tod) {

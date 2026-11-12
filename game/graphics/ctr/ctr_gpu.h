@@ -76,12 +76,9 @@ typedef struct {
 
 /* (AI-assisted) ctr_draw_state flags: what a draw allows the 3DS GPU to do differently */
 enum {
-  /* opaque, depth tested GEQUAL and written, never discarded by the alpha test (its texture's
-   * alpha passes): may use the early depth test (ctr_gpu_set_early_depth) */
+  /* opaque, depth tested GEQUAL and written, never discarded by the alpha test (the level
+   * renderer's draw lists; the GPU layer ignores it) */
   CTR_STATE_EARLY_DEPTH = 1,
-  /* the texture is radial (ctr_gpu_tex_radial) and the texture coordinates go from -1 to 1 across
-   * it (center 0): drawn with the procedural texture unit instead of reading texels */
-  CTR_STATE_PROCTEX = 2,
   /* (AI-assisted) the stencil buffer (only when ctr_gpu_has_stencil): STENCIL_SET marks the pixels
    * the draw writes (where it passes the depth test), STENCIL_OUT draws only where none is marked.
    * The marks are cleared with the depth buffer at the frame start. The ocean's near grid marks,
@@ -108,7 +105,7 @@ enum { CTR_TCC_CULL_BACK = 2 };
  * decided: merc draws with config cull_merc), with its winding (flip) */
 enum { CTR_TCC_CULL_OWN = 8 };
 /* (AI-assisted) ctr_draw_state::tcc bit of level mesh draws: every vertex the draw uses has alpha
- * 0x80, so with ctr_gpu_set_fog_alpha the mesh shader may put the fog amount in the color's alpha
+ * 0x80, so the alpha mask programs (c3l v23) may put the fog amount in the color's alpha
  * (the texture combiner then takes the constant 0x80 for the vertex alpha). CtrLevel sets it at
  * load from the chunk's vertices. */
 enum { CTR_TCC_ALPHA80 = 4 };
@@ -123,19 +120,6 @@ enum { CTR_TCC_FOG = 32 };
  * levels blended (the GS's TEX1 MMIN 5, whatever config.ini mipmaps says); MIP_MAX1: only levels
  * 0 and 1 (TEX1 MXL 1, the near ocean's; also its sky reflection's fade) */
 enum { CTR_TCC_TRILINEAR = 64, CTR_TCC_MIP_MAX1 = 128 };
-/* (AI-assisted) config.ini fog_alpha (CTR_TCC_ALPHA80 draws: fog in the vertex alpha, no fog ramp
- * texture) and tex1_gating (texture unit 1 enabled only for draws whose combiner reads it), each
- * frame (gpu_profile = ab switches them). ctr_gpu_fog_alpha_ready: the program for it is loaded
- * (ctr_mesh_old_fa, or shader_opt's ctr_mesh_opt_fa). */
-void ctr_gpu_set_fog_alpha(int on);
-/* (AI-assisted) config.ini shader_opt (each frame after ctr_gpu_frame_begin; gpu_profile = ab
- * switches it): the shorter ctr_*_opt.v.pica programs for level meshes, merc and the PS2 ocean
- * (fewer instructions per vertex, fog rows folded into the mesh matrix, texcoord1 packed into
- * texcoord0's output register). ctr_gpu_shader_opt_ready: they loaded. */
-void ctr_gpu_set_shader_opt(int on);
-int ctr_gpu_shader_opt_ready(void);
-void ctr_gpu_set_tex1_gating(int on);
-int ctr_gpu_fog_alpha_ready(void);
 void ctr_gpu_set_cull(int enable, int flip);
 /* The PICA's user clip plane at the near plane (z >= -w), for every draw: CtrClipTest's boot
  * self-test turns it on (default) where the GPU's own clipping loses big triangles reaching behind
@@ -144,7 +128,7 @@ void ctr_gpu_set_cull(int enable, int flip);
 void ctr_gpu_set_near_clip_default(int on);
 void ctr_gpu_set_near_clip(int mode);
 void ctr_gpu_cull_reset(void);
-/* (AI-assisted) 1 if the depth buffer has a stencil part (not config.ini depth16) */
+/* (AI-assisted) 1 if the depth buffer has a stencil part (always: D24S8) */
 int ctr_gpu_has_stencil(void);
 
 /* Lifetime. ctr_gpu_init returns 0 on success. */
@@ -184,14 +168,9 @@ void ctr_gpu_anim_slot_set(int slot, int tex);
 uint64_t ctr_gpu_anim_slots_drawn(void);
 /* (AI-assisted) The same as ctr_gpu_tex_create (GS alpha: 0x80 = 1.0), stored in the smallest
  * 3DS format that keeps it (config.ini compact_textures): gray -> L8 / LA8, opaque -> RGB565,
- * on/off alpha -> RGBA5551, else RGBA8 (as ctr_gpu_tex_create; (AI-assisted) not RGBA4: soft
- * colored glows banded), and
- * moved to a reserved part of VRAM when there's room (vram_textures). flags: CTR_TEX_CHECK_RADIAL
- * also checks whether it is a radial gradient (glows: see CTR_STATE_PROCTEX). */
-enum { CTR_TEX_CHECK_RADIAL = 1 };
-int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int flags);
-/* 1 if the texture can be drawn with CTR_STATE_PROCTEX (radial, and config.ini proctex_glows). */
-int ctr_gpu_tex_radial(int handle);
+ * on/off alpha -> RGBA5551, else RGBA8 (as ctr_gpu_tex_create), and moved to a reserved part of
+ * VRAM when there's room (vram_textures). */
+int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba);
 
 /* Draw a triangle list. */
 void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int count);
@@ -250,11 +229,6 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
  * ctr_gpu_screen_uv: the texture coordinates of the screen point at ctr_gpu coordinates (x, y)
  * (like ctr_vertex: x, y in [-1, 1], y up). Use it with tcc = 0 (the copy's alpha is meaningless). */
 int ctr_gpu_copy_screen(void);
-/* (AI-assisted) config distort_copy = rows: copies only the screen columns x0..x1 (ctr_gpu x, -1
- * left .. 1 right; the color buffer's tile rows are 8 screen columns each) with a texel of margin
- * for the filter, and makes the texture in VRAM if there is room then. Texels outside that range
- * keep what an earlier copy left: only read the screen in x0..x1. */
-int ctr_gpu_copy_screen_part(float x0, float x1);
 /* (AI-assisted, j2gaps) frees the screen copy's texture (the next copy makes it again): Jak II's
  * menu keeps a copy of the game's last frame only while the menu shows it */
 void ctr_gpu_screen_copy_release(void);
@@ -276,7 +250,7 @@ void ctr_gpu_screen_copy_pin(int level);
  * the tile x..x+w, y..y+h of it: their clip / ctr coordinates [-1, 1] cover the tile as they
  * cover the screen (x: tile left to right, y: bottom to top); x a multiple of 16, w + (x & 15)
  * <= max_tile_w; the tile is NOT cleared (draw over all of it first: alpha 0 for empty texels,
- * depth 0 with ztest ALWAYS). No early depth test and no sky hook in between (both resume after).
+ * depth 0 with ztest ALWAYS).
  * Another ctr_gpu_rt_begin may follow (the next tile) without an end in between.
  * ctr_gpu_rt_end: the screen again. Only inside a frame. ctr_gpu_rt_uv: the texture coordinates
  * (ctr_vertex s, t) of logical point (lx, ly) of the texture (pixel edges at integers). */
@@ -414,55 +388,14 @@ void ctr_gpu_set_vram_textures(int on);
 /* Mip levels: 0 = off (always the first level), 1 = nearest level (default), 2 = blend two levels
  * (trilinear, slower) (config.ini mipmaps). */
 void ctr_gpu_set_mip_mode(int mode);
-/* (AI-assisted) 3DS hardware features (config.ini). color16: a 16-bit (RGB565) color buffer and
- * top screen, set before ctr_gpu_init. early_depth: the early depth test for draws with
- * CTR_STATE_EARLY_DEPTH. proctex: radial textures drawn with the procedural texture unit.
- * compact: ctr_gpu_tex_create_compact picks small formats (off: RGBA8 like ctr_gpu_tex_create). */
-void ctr_gpu_set_color16(int on);
-void ctr_gpu_set_early_depth(int on);
-/* (AI-assisted) config.ini early_depth modes (used once the self-test passed): sky = the sky's draws
- * (sky_last: depth 0, after the opaque geometry) use the early depth test too; func = the early
- * test's function (GPU_EARLYDEPTHFUNC: 0 >=, 1 >, 2 <=, 3 <; the depth test stays >=); clear =
- * the early depth data's clear value (GPUREG_EARLYDEPTH_DATA, 24 bits; every early depth clear
- * uses it). Defaults 0, 0, 0 = the old state. Any time. */
-void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear);
-/* (AI-assisted) the early depth test checked on this console (ctr_gpu_early.c). ctr_gpu_init runs
- * it when early depth was asked for before it (ctr_gpu_set_early_depth, _params); then this
- * returns that result. Until it passes the early test stays off. 1: passed. */
-int ctr_gpu_early_depth_selftest(void);
+/* (AI-assisted) config.ini compact_textures: ctr_gpu_tex_create_compact picks small formats (off:
+ * RGBA8 like ctr_gpu_tex_create). */
 /* For the shadow self-test (CtrShadow.cpp). ctr_gpu_submit_now: in a frame, what is built so
  * far goes to the GPU as a command list of its own. ctr_gpu_top_histogram: outside a frame, once
  * the GPU has drawn all it was sent, the top screen's pixels by their blue value; 0: can't be
  * read */
 void ctr_gpu_submit_now(void);
 int ctr_gpu_top_histogram(unsigned int counts[256]);
-/* (AI-assisted) the early test in use (asked for and the self-test passed) */
-int ctr_gpu_early_depth_active(void);
-/* (AI-assisted) the self-test's result, one line ("" before it ran) */
-const char* ctr_gpu_early_depth_status(void);
-/* (AI-assisted) config.ini tex_cache_clear: 0 always (each texture unit 0 bind clears the GPU's
- * texture cache, as citro3d does), 1 uploads (a bind that keeps a level pool texture and only
- * changes its sampling settings doesn't clear it unless a pool was filled or moved since the last
- * clear; every switch to another texture and the first bind of a frame clear). Any time. */
-void ctr_gpu_set_tex_cache_clear(int mode);
-/* (AI-assisted) config.ini mip_bias: the LOD bias of mipmapped textures (levels, + = a smaller
- * level sooner: blurrier, fewer texels read), -4..4 in 1/256 steps. 0 = none. Any time. */
-void ctr_gpu_set_mip_bias(float bias);
-/* (AI-assisted) config.ini skin_rows_f24: merc bone rows uploaded as float24 (3 words per vector,
- * rounded to nearest; the GPU computes in float24 anyway) instead of float32 (4 words): 216
- * instead of 288 data words per 24-bone palette. Raw draws only. Any time. */
-void ctr_gpu_set_skin_rows_f24(int on);
-/* (AI-assisted) config.ini skin_clip_f24: each merc model's clip matrix (12 instead of 16 words)
- * and lights (21 instead of 28) as float24 too. Not bit-identical (rounded to nearest where the GPU
- * converts f32 its own way): edge pixels of models can flip. Each frame. */
-void ctr_gpu_set_skin_clip_f24(int on);
-/* (AI-assisted) the top render target, set before ctr_gpu_init (config.ini): depth16 = a 16-bit
- * depth buffer instead of 24-bit + stencil. */
-void ctr_gpu_set_framebuffer(int depth16);
-/* config.ini top_block32 (off = 0, auto = 1, on = 2), set before ctr_gpu_init. auto: when the
- * early depth self-test passes only in 32x32 block mode, the top target becomes 256x416 in that
- * mode; on: that target always (early depth still only if its self-test passed) */
-void ctr_gpu_set_top_block32(int mode);
 /* (AI-assisted) one line about the top render target (size, formats, VRAM addresses and banks)
  * for the log; returns its length (0 before ctr_gpu_init) */
 int ctr_gpu_describe_target(char* out, int size);
@@ -502,13 +435,6 @@ void ctr_gpu_note_release(unsigned int release);
  * (no vblank to spare), floor: the latency it doesn't go below for now (a frame was late there) */
 void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* dropped,
                           double* buffer_wait_ms, unsigned int* just_in_time, int* floor);
-void ctr_gpu_set_proctex(int on);
-/* (AI-assisted, onebone) config.ini merc_one_bone: one-bone palettes' draws with ctr_skin_opt1 */
-void ctr_gpu_set_merc_one_bone(int on);
-/* (AI-assisted, idx8) config.ini index_u8: quad batches of up to 64 quads with u8 indices */
-void ctr_gpu_set_index_u8(int on);
-/* (AI-assisted, vramvtx) config.ini vram_vertices: static meshes' vertices copied into VRAM */
-void ctr_gpu_set_vram_vertices(int on);
 void ctr_gpu_set_compact_textures(int on);
 /* (AI-assisted) Overlap: hand the draws so far to the GPU in the middle of a frame (after a
  * renderer bucket, when enough draws piled up), so the GPU draws them while the CPU builds the
@@ -517,10 +443,6 @@ void ctr_gpu_set_overlap(int on);
 /* (AI-assisted) config.ini raw_cmds: the draws write their GPU commands themselves instead of
  * through citro3d (much less CPU per draw, fewer command words). Can change at any time. */
 void ctr_gpu_set_raw_cmds(int on);
-/* (AI-assisted) config.ini cmd_dedup (on: register writes that give a register the value it has
- * are left out: texture unit 0's type) and cmd_dedup_draw (the raw draws' PRIMITIVE_CONFIG mode
- * and VERTEX_OFFSET writes too). Each frame (gpu_profile = ab switches them). */
-void ctr_gpu_set_cmd_dedup(int on, int draw);
 /* (AI-assisted, gpu-rt) config.ini gpu_breakdown (profiling, off): every 4th frame (pipeline on) each
  * part of the frame goes to the GPU alone and is waited for, timed from its submission to its GSP
  * event (P3D, PSC, PPF): the phases below. ctr_gpu_phase: the commands built from now on belong to
@@ -544,20 +466,11 @@ enum {
 void ctr_gpu_set_gpu_breakdown(int on);
 void ctr_gpu_phase(int phase);
 int ctr_gpu_breakdown_line(char* out, int size, const char* label);
-/* (AI-assisted) config.ini cmd_dump: write a frame's GPU command list every 20 s (diagnostic,
- * platform/3ds/tools/cmd_report.py) */
-void ctr_gpu_set_cmd_dump(int on);
-/* (AI-assisted) the next finished frame's command list too (pad script "set cmd_dump on") */
-void ctr_gpu_cmd_dump_next(void);
 /* (AI-assisted) hardware hang bisect (config.ini asm_tex, CtrSettings.h). asm_tex 0: the old per
  * texel texture tiling loops (no LDM/STM, no 64-bit stores). */
 void ctr_gpu_set_asm_tex(int on);
 /* (AI-assisted) config.ini defer_flush (hang bisect): 0 = every cache flush right away */
 void ctr_gpu_set_defer_flush(int on);
-/* (AI-assisted) config.ini shader_basic: 1 the 7 instruction ctr_basic (default), 0 the Oct 2
- * ctr_basic_old; before ctr_gpu_init. Level meshes and merc use the Oct 2 ctr_mesh_old /
- * ctr_skin_old / ctr_skin_env_old, or with shader_opt the ctr_*_opt programs. */
-void ctr_gpu_set_shader_basic(int basic);
 int ctr_gpu_asm_tex(void);
 /* (AI-assisted) where the render thread is (a static string) and its frame count; logged once
  * per second for the first 60 s by a watchdog thread (ctr_gpu_diag_start: config.ini
@@ -574,29 +487,9 @@ void ctr_gpu_submit_partial(void);
  * citro3d's whole buffer */
 unsigned int ctr_gpu_cmd_buffer_kb(void);
 int ctr_gpu_set_pipeline(int on);
-/* (AI-assisted) config.ini sky_last. ctr_gpu_set_sky_hook: fn(arg) is called once, right before
- * the first draw of this frame that needs what is behind it on screen: blending, no depth write,
- * stencil or no-color draws, a screen copy, a clip / ocean reservation (only opaque depth-writing
- * draws let it wait), or at ctr_gpu_run_sky_hook / the frame end, whichever comes first. The
- * renderer draws the sky there (after the opaque level and models). fn = NULL: none. The frame
- * begin drops a hook still set. */
-typedef void (*ctr_gpu_hook_fn)(void* arg);
-void ctr_gpu_set_sky_hook(ctr_gpu_hook_fn fn, void* arg);
-void ctr_gpu_run_sky_hook(void);
-/* (AI-assisted) draws from now on get fragment depth 0 (the farthest: the cleared depth) instead
- * of their own (the depth map's scale 0, offset 0): with ztest GEQUAL they draw only where nothing
- * has drawn yet (the sky after the opaque geometry) */
-void ctr_gpu_set_depth_far(int on);
-/* (AI-assisted) config.ini skip_clear: the next frame begin clears only the depth buffer (the
- * renderer knows every pixel's color gets drawn: the opaque sky roof covers the screen) */
+/* (AI-assisted) the next frame begin clears only the depth buffer (Jak II's menu copies the last
+ * frame's color before anything is drawn) */
 void ctr_gpu_set_skip_color_clear(int on);
-/* (AI-assisted) config.ini frame_overlap2 (with the pipeline): 0 off = the frame end waits for
- * the GPU, then hands the frame's command list over with a cache flush (the old way); 1 clean =
- * the list is cleaned from the CPU cache before that wait and handed over without the flush (the
- * GPU's idle gap between two frames is shorter); 2 on = no wait at the frame end: the list is
- * queued behind the frame the GPU is drawing (the next frame begin waits for the frame before
- * that instead, whose buffers it reuses). 2 needs frame_pacing = steady (else 1). Any time. */
-void ctr_gpu_set_frame_overlap2(int mode);
 /* 1 when running in an emulator (Azahar / Citra: svcGetSystemInfo 0x20000). */
 int ctr_gpu_is_emulator(void);
 
@@ -709,16 +602,12 @@ void ctr_gpu_mesh_flush(int mesh, int offset, int size);
  * heap ranges are what matter): queued, not flushed now. In a frame (between ctr_gpu_frame_begin
  * and ctr_gpu_frame_end) every queued range is flushed before the next part of the command list
  * goes to the GPU (a partial submit, a screen copy or the frame end), touching and near ranges of
- * the linear heap merged into one GSP request each (gpu_micro: up to 64 KB apart); outside a frame
+ * the linear heap that overlap merged into one GSP request each; outside a frame
  * at once. One GSP request costs tens of microseconds of the calling thread (~62 us in Azahar):
  * call this for every dirty range (e.g. each chunk's rewritten vertices) and let the merging do the
  * rest, rather than flushing yourself. ctr_gpu_mesh_flush is this for a part of a mesh's
  * vertices. Any thread may call it outside a frame; in a frame, the render thread. */
 void ctr_gpu_flush_range(const void* addr, unsigned int size);
-/* (AI-assisted, micro-mg) a test (pad script "set gpu_micro_mask N"): gpu_micro's changes as the
- * bits of N (0 = all off, 1023 = all on; ctr_gpu_citro3d.c MICRO_*) from the next frame on, for
- * old / new measurements of one view in one run */
-void ctr_gpu_set_micro_mask(unsigned int mask);
 
 /* bones: palette_count 3x4 row-major matrices, (pos, 1) -> camera space (x, y, z).
  * clip: row-major 4x4 from (camera x, y, z, 1) to OpenGL-style clip space.
@@ -727,16 +616,10 @@ void ctr_gpu_set_micro_mask(unsigned int mask);
  * ambient. Vertices are c3l::MercVertex (24 bytes, with a normal).
  * (AI-assisted) bones_id: a number new for every palette the caller makes (never reused for other
  * contents while it may still be the last one drawn), so draws compare it instead of the bones; 0:
- * unknown, uploaded at every draw. bones_f24: NULL, or the bones as ctr_gpu_pack_skin_rows_f24
- * made them (used with skin_rows_f24 instead of converting them again). */
+ * unknown, uploaded at every draw. bones_f24: unused (the rows go as float32). */
 void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], const float* bones,
                           int palette_count, const uint32_t* bones_f24, uint32_t bones_id,
                           const float lights[28], int mesh, int first_index, int index_count);
-/* (AI-assisted) skin_rows_f24 is on (the draws take bones_f24), and the float24 words of a palette
- * for them: 9 words per bone, row by row (row r of bone b at out[3 * (r * palette_count + b)]),
- * palette_count <= CTR_MAX_PALETTE. */
-int ctr_gpu_skin_rows_f24_on(void);
-void ctr_gpu_pack_skin_rows_f24(const float* bones, int palette_count, uint32_t* out);
 /* (AI-assisted, far-fog) the fog of the next CTR_TCC_FOG skinned draws, as merc2.vert computes it
  * from the merc camera (Merc2 low memory: hvdf_offset.w, fog min and max): amount =
  * (255 - clamp(hvdf_w - clip w, fog_min, fog_max)) / 255, mixed towards (r, g, b) (the frame's fog
@@ -770,15 +653,10 @@ typedef struct {
   uint32_t fog_gen; /* (AI-assisted) the fog f24[12..17] were made with (0: not made) */
 } ctr_mesh_matrix;
 void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out);
-/* (AI-assisted) config.ini fog_stage_skip: the next ctr_gpu_draw_mesh(_prepared) draws are entirely
- * in front of where both fogs start: their combiner stage passes the color through instead of
- * mixing in the fog ramp, and (raw draws) texture unit 1, the ramp, is off for them (its cache is
- * kept). on: 1. Reset at each frame begin. */
-void ctr_gpu_set_mesh_nofog(int on);
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                                 int mesh, int first_index, int index_count);
 /* (AI-assisted, gpu-rt) the level renderer hands a pass's draws over in one list (in drawing order;
- * nofog as ctr_gpu_set_mesh_nofog for that draw): drawn one by one */
+ * nofog: unused, 0): drawn one by one */
 typedef struct {
   const ctr_draw_state* state;
   const ctr_mesh_matrix* matrix;
@@ -828,44 +706,11 @@ int ctr_gpu_morph_ready(void);
 void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                               const float* unif, uint32_t unif_id, int mesh, int tail_offset,
                               int first_index, int index_count);
-/* (AI-assisted, micro-gpu) the gpu_micro statistics line since the last call ([ctr] gpu micro ...);
+/* (AI-assisted) the cache flush statistics line since the last call ([ctr] gpu flushes ...);
  * 0: nothing to say */
 int ctr_gpu_micro_line(char* out, int size);
 
-/* ---------------- (AI-assisted) the ocean (config ocean = waves, CtrOcean) ----------------
- * Vertices in the static mesh layout (c3l::Vertex, its st unused), drawn by
- * platform/3ds/shaders/ctr_ocean.v.pica: texture coordinates from the position (rows below), the
- * color brightened on crests (position y), fog like ctr_gpu_draw_mesh. Two textures:
- *   rgb = tex(st0) * color * 2 * tex2(st1) * 2, then fog; alpha = tex.a * color.a * 2
- * (tex2 on texture unit 2: a gray around 0x80 is neutral). ctr_gpu_ocean_end after the ocean's
- * draws (texture unit 2 off, combiners as the other draws want them). */
-typedef struct {
-  ctr_mesh_matrix clip; /* (pos, 1) -> clip, prepared */
-  float tex[4][4];      /* s0, t0, s1, t1 = dot(row.xyz, pos) + row.w */
-  float crest[4];       /* color factor = 1 + pos.y * crest (rgb; alpha: 0) */
-} ctr_ocean_draw;
-/* Memory for one frame's vertices / indices (16-byte aligned), read by the GPU during this frame:
- * the immediate draws' buffer (one per frame in flight with the pipeline). NULL when full. */
-void* ctr_gpu_stream_alloc(int bytes);
-/* mesh >= 0: a range of a static mesh; else verts / indices from ctr_gpu_stream_alloc. */
-void ctr_gpu_ocean_draw(const ctr_draw_state* state, int tex2, const ctr_ocean_draw* d, int mesh,
-                        const void* verts, const uint16_t* indices, int first_index,
-                        int index_count);
 void ctr_gpu_ocean_end(void);
-
-/* (AI-assisted, j2water) Jak II's ocean with the sky reflection (the PS2 env map pass in the same
- * draw), platform/3ds/shaders/ctr_ocean_env.v.pica. Vertices in the static mesh layout:
- *   rgb = fog(tex(st0) * color * 2) + env(st2) * a, a = tex.a * color.a * 2 (clamped to 1)
- * with env on texture unit 2 (repeat, linear), st2 = dot(env row.xyz, d) / |d| + env row.w and
- * d = dir rows . (pos, 1) (the vertex relative to the camera). ctr_gpu_ocean_end after the draws. */
-typedef struct {
-  ctr_mesh_matrix clip; /* (pos, 1) -> clip, prepared */
-  float tex[2][4];      /* wave texture s, t = dot(row.xyz, pos) + row.w */
-  float dir[3][4];      /* d = dot(row.xyz, pos) + row.w */
-  float env[2][4];      /* env s, t (see above) */
-} ctr_ocean_env_draw;
-void ctr_gpu_ocean_env_draw(const ctr_draw_state* state, int env_tex, const ctr_ocean_env_draw* d,
-                            int mesh, int first_index, int index_count);
 
 /* (AI-assisted, j2water2) Jak II's envmapped ties (c3l v21): a level mesh draw (the static mesh
  * layout) with the envmap shine in the same draw, platform/3ds/shaders/ctr_etie.v.pica.
@@ -907,8 +752,8 @@ typedef struct {
   unsigned int tex_bytes;
   float gpu_ms;     /* GPU time of the frame: command processing (C3D_GetProcessingTime) */
   float draw_ms;    /* and drawing (C3D_GetDrawingTime) */
-  int cmd_splits;   /* command buffer flushes in the middle of the frame */
-  int dropped_draws; /* draws skipped because the command buffer was full */
+  int cmd_splits;   /* command buffer full: flushed and waited for in the middle of the frame */
+  int dropped_draws; /* draws skipped: no command room (the HOME Menu, a GPU that didn't finish) */
   int tex_binds;     /* texture changes (each clears the GPU's texture cache) */
   unsigned int cmd_bytes; /* GPU commands of the frame */
   unsigned int linear_free; /* free linear memory (meshes, textures, vertex ring), bytes */
@@ -919,20 +764,13 @@ typedef struct {
   unsigned int pool_vram_bytes; /* of which also in VRAM (the copy the GPU reads) */
   int pools, pools_in_vram;
   /* (AI-assisted) ctr_gpu_tex_create_compact textures: how many, their bytes, how many of them
-   * are in the reserved VRAM, radial ones; draws with the early depth test / procedural texture */
+   * are in the reserved VRAM */
   int compact_textures;
   unsigned int compact_bytes;
   int compact_in_vram;
-  int radial_textures;
-  int early_depth_draws;
-  int proctex_draws;
-  int nofog_draws;   /* (AI-assisted) level draws without the fog stage (fog_stage_skip) */
-  int color_clear_skipped; /* (AI-assisted) skip_clear: this frame cleared only the depth */
-  int tex_clears_skipped;  /* (AI-assisted) tex_cache_clear = uploads: binds without the clear */
-  int unit1_toggles; /* (AI-assisted) texture unit 1 switched off or on (fog_stage_skip,
-                      * tex1_gating) */
-  int fog_alpha_draws; /* (AI-assisted) level draws with the fog in the vertex alpha (fog_alpha) */
-  unsigned int cmd_dedup_words; /* (AI-assisted) command words cmd_dedup(_draw) left out */
+  int color_clear_skipped; /* (AI-assisted) this frame cleared only the depth */
+  int unit1_toggles; /* (AI-assisted) texture unit 1 switched on again */
+  int fog_alpha_draws; /* (AI-assisted) level draws with the fog in the vertex alpha (alpha masks) */
   /* (AI-assisted) vertex program switches, of them with a shader code upload (another shbin), and
    * uniform vectors written at the switches */
   int prog_switches, prog_uploads, prog_unif_vectors;
@@ -941,8 +779,6 @@ typedef struct {
    * frames it finished since the last frame end (gpu_busy_frames of them; 0 without frame_pacing =
    * steady, whose fence marks a frame done): done(N) - max(first work handed over(N), done(N-1)) */
   float gpu_wait_ms;
-  /* (AI-assisted, gpu-home) frame_overlap2 = on: a full running GX queue drained (in gpu_wait_ms) */
-  int queue_drains;
   float gpu_busy_ms;
   int gpu_busy_frames;
   /* (AI-assisted) the same frames from the moment their command list was handed to the GPU
@@ -954,7 +790,7 @@ typedef struct {
   int vbuf_dropped;       /* draws dropped: the vertex buffer was full */
   int dead_draws;         /* level draws skipped: their mesh is not there (deleted or not made) */
   /* (AI-assisted) filled only in the frame after ctr_gpu_want_detailed_stats (it scans all texture
-   * slots and probes the linear heap): textures, tex_bytes, compact_*, radial_textures,
+   * slots and probes the linear heap): textures, tex_bytes, compact_*,
    * linear_free, vram_free and linear_largest (the largest block linearAlloc can give) */
   int detailed;
   unsigned int linear_largest;

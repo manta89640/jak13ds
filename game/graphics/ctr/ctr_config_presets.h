@@ -30,27 +30,19 @@ typedef struct {
  * Particles come from the particles line (stage_sd.sh --preset safe writes particles = reduced). */
 static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"overlap", "off"},
-    {"shader_opt", "off"},       {"frame_overlap2", "off"},    {"skin_rows_f24", "off"},
-    {"skin_clip_f24", "off"},    {"cmd_dedup", "off"},         {"cmd_dedup_draw", "off"},
-    {"fog_alpha", "off"},        {"tex1_gating", "off"},       {"cull_merc", "off"},
-    {"sky_last", "off"},         {"tex_cache_clear", "always"},
-    {"c3l_read_buffer", "0"},    {"fog_stage_skip", "off"},
-    {"ocean_tex_half", "off"},   {"opaque_alpha", "off"},
-    {"skip_clear", "off"},       {"early_depth", "off"},
-    {"tie_lod", "off"},          {"gpu_micro", "off"},         {"merc_fog", "off"},
+    {"cull_merc", "off"},
+    {"c3l_read_buffer", "0"},
+    {"ocean_tex_half", "off"},
+    {"tie_lod", "off"},          {"merc_fog", "off"},
     {"streaming", "off"}, /* (AI-assisted, streaming) */
-    /* (AI-assisted, fidelity2) the full texture and shine detail */
-    {"mip_bias", "0"},
     /* the Nov 11 options, on by default */
-    {"vram_vertices", "off"}, {"index_u8", "off"},
-    {"merc_one_bone", "off"}, {"vfp_vector", "off"},    {"anim_lod_far", "off"},
+    {"vfp_vector", "off"},    {"anim_lod_far", "off"},
     {"merc_lod_scale", "1"},  {"shadow_count", "0"},
 };
-/* bench: normal plus the GPU benchmark at boot (~20-60 s, data/log/bench.txt; (AI-assisted,
- * cpubench) the CPU one before it, data/log/cpu_bench.txt), the A/B GPU
- * profile, the GSP perf log and the GPU counters (3ds-sdcard-oct12d config-bench.ini) */
+/* bench: normal plus the GPU benchmark at boot (~20-60 s, data/log/bench.txt), the GSP perf log
+ * and the GPU counters (3ds-sdcard-oct12d config-bench.ini) */
 static const ctr_cfg_kv ctr_cfg_preset_bench[] = {
-    {"pica_bench", "on"}, {"cpu_bench", "on"}, {"gpu_profile", "ab"}, {"gpu_perflog", "on"},
+    {"pica_bench", "on"}, {"gpu_perflog", "on"},
     {"gpu_counters", "on"}, {"overlap", "off"},
 };
 /* full: every civilian, particle and shadow (slower: under 30 fps in busy places) */
@@ -110,7 +102,6 @@ static const ctr_cfg_alias ctr_cfg_aliases[] = {
  * in CtrSettings.h). The callers' own fallbacks only matter without this table. */
 static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"sound", "on"},
-    {"gpu_micro", "on"}, {"gpu_micro_ident", "off"}, /* micro-gpu */
     {"sound_core", "auto"}, /* 1 (the system core, with a share of it) */
 #if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
     /* (AI-assisted) Jak II's kernel starts the IOP from the "DVD" without -fakeiso */
@@ -148,7 +139,6 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"vfp_vector", "on"},    /* (AI-assisted, vfpvec) bone matrices as VFP short vectors */
     {"ocean", "full"},
     {"shadows", "full"},
-    {"depth16", "off"},
     {"text_scale", "1"},
     {"text_min_height", "9"},
 };
@@ -184,6 +174,13 @@ static const char* const ctr_cfg_removed[] = {
     "max_sprites", "sprite_max_size", "sprite_min_alpha", "particle_fill",
     "proctex_glows", "shadow_casters", "tod_pulse_step",
     "button_art",
+    /* renderer strip: removed with their code */
+    "frame_overlap2", "skin_clip_f24", "skin_rows_f24", "fog_stage_skip", "tex1_gating",
+    "fog_alpha", "gpu_micro", "cmd_dedup_draw", "cmd_dedup", "sky_last", "skip_clear",
+    "tex_cache_clear", "opaque_alpha", "distort_copy", "mip_bias", "merc_one_bone", "index_u8",
+    "vram_vertices", "shader_basic", "shader_opt", "color_stream", "color16", "depth16",
+    "top_block32", "early_depth_clear", "early_depth_func", "early_depth", "vram_probe",
+    "gpu_micro_ident", "cmd_dump", "cpu_bench",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

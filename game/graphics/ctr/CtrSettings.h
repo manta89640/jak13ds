@@ -64,39 +64,18 @@ struct CtrSettings {
   // config merc_lod_scale (also read by kmachine.cpp for the game's own LOD distances).
   // (AI-assisted) default 1 (the PS2's distances; was 0.5)
   float merc_lod_scale = 1.f;
-  // (AI-assisted) config distort_copy = rows | full. rows: the distorter's screen copy covers only
-  // the 8-pixel columns of tile rows its sprites read, the copy texture goes to VRAM when there is
-  // room, and distort sprites under 8 pixels are left out (no copy at all when none is left).
-  // full: every frame with distort sprites copies the whole screen into linear memory (as before)
-  bool distort_copy_rows = true;
   // config shadows = full | off (on = full). full: the game's shadow volumes (Jak, enemies,
   // objects; the game runs shadow-execute-all, CtrShadow draws them with the stencil buffer).
-  // full needs the stencil buffer: with depth16 it is off (the game applies the same rule).
   enum class ShadowMode { Off, Full };
   ShadowMode shadows = ShadowMode::Full;
-  bool shadows_full_wanted = false;  // full in config.ini, off because of depth16 (for the log)
   // the sky (time of day sky texture, clouds); off: the screen is cleared to the fog color
   bool sky = true;
   // (AI-assisted) the clouds over the sky (one added pass over the sky's part of the screen)
   bool clouds = true;
-  // (AI-assisted) the sky drawn after the opaque level and models (before the first draw that
-  // needs what's behind it), only where they left the cleared depth: its pixels behind them are
-  // dropped by the depth test (before blending and writing; with the early depth test, before
-  // texturing). Same picture
-  bool sky_last = true;
-  // (AI-assisted) frames whose opaque sky roof covers the whole screen (looking up) clear only the
-  // depth buffer, not the color. Same picture
-  bool skip_clear = true;
   // GPU starts on each part of a frame while the CPU builds the rest (off: at the frame end)
   bool overlap = true;
   // CPU builds frame N+1 while the GPU draws frame N
   bool pipeline = true;
-  // (AI-assisted) config frame_overlap2 = off | clean | on (with the pipeline; ctr_gpu.h
-  // ctr_gpu_set_frame_overlap2): 0 the old frame end (preset safe); 1 (clean) the frame's command
-  // list cleaned from the CPU cache before waiting for the GPU, handed over without the GSP's
-  // flush; 2 (on, default) the list queued behind the frame the GPU is drawing, no wait at the
-  // frame end
-  int frame_overlap2 = 2;
   // (AI-assisted) frame rate cap: 30 (default: the target, steady frame times) or 60
   int fps_cap = 30;
   // (AI-assisted) frame_pacing: steady (default) shows each frame a fixed time after the game
@@ -112,21 +91,9 @@ struct CtrSettings {
   // Mip levels of the level textures (c3l v8): 0 off, 1 nearest level (default: one texel fetch),
   // 2 trilinear (blends two levels, as the PC).
   int mipmaps = 1;
-  // (AI-assisted) the LOD bias of mipmapped level / model textures (+0.5, +1: the next smaller
-  // level sooner, blurrier, fewer texels read); 0 = none. (AI-assisted, fidelity2) +0.25 by default
-  // (+0.5 looked too blurry to the user in Azahar; safe preset: 0)
-  float mip_bias = 0.0f;  // (AI-assisted) Oct 29: 0 (the user's pick from A/B shots: 0.25 looked softer up close)
-  // (AI-assisted) merc bone rows uploaded as float24 instead of float32 (a quarter fewer uniform
-  // words; the GPU computes in float24 either way). On: Jak and Daxter identical in Azahar, the
-  // float24 uniform path (raw_unif, raw_pack_f24) already draws the level meshes on hardware
-  bool skin_rows_f24 = true;
   // Measure what each renderer costs the GPU: every few seconds one of them is left out for a
   // moment and the GPU time without it is logged ([ctr] gpu profile). The picture flickers.
   bool gpu_profile = false;
-  // (AI-assisted) gpu_profile = ab: instead, the switches of the A/B table (CtrRenderer.cpp
-  // kAbSwitches) are turned on and off in turns, in windows of ~1.5 s, and the GPU busy time of each setting is
-  // logged per level ([ctr] gpu ab). Nothing vanishes for good; the picture changes slightly.
-  bool gpu_profile_ab = false;
   // (AI-assisted) the GPU's own counters (busy % of each pipeline stage, memory traffic) over 10 s
   // of each level, logged once per level ([ctr] gpu profile <level>: hw busy ...); nothing is left
   // out of the picture. Read through the GSP service (no extra system calls). (AI-assisted) Off by
@@ -148,48 +115,7 @@ struct CtrSettings {
   // in gk.log and data/log/bench.txt, platform/3ds/tools/bench_report.py). Its last tests use
   // shaders never run on hardware: a hang there names the test in bench.txt. Hardware only.
   bool pica_bench = false;
-  // (AI-assisted, cpubench) the CPU microbenchmark at boot, before pica_bench (a few s; `[cpu]`
-  // lines in gk.log and data/log/cpu_bench.txt; CtrCpuBench.h). Azahar's times say nothing (one
-  // tick per instruction): console only.
-  bool cpu_bench = false;
-  // (AI-assisted, onebone) merc draws whose palette has one bone with ctr_skin_opt1 (5 blend
-  // instructions per vertex instead of 11; rounding-level differences). Off until pica_bench
-  // B3.skin_opt1 and a console say so (needs shader_opt's program set)
-  bool merc_one_bone = true;
-  // (AI-assisted, idx8) quad batches (sprites, HUD, text) of up to 64 quads with u8 indices
-  // instead of u16: half the index reads. Off until gpu_profile = ab prices it on a console
-  bool index_u8 = true;
-  // (AI-assisted, vramvtx) merc models' vertices copied into VRAM (8 meshes a frame, while 1.5 MB
-  // stays free for the texture pools, which take it back when they find no room): the GPU fetches
-  // them without the FCRAM traffic the CPUs share. Off until a console's gpu_profile counters /
-  // render times with it on and off say so
-  bool vram_vertices = true;
   // (AI-assisted) 3DS hardware features (docs/3ds-port/config_ini.md):
-  // 16-bit (RGB565) color buffer and top screen: half the memory traffic of every pixel drawn,
-  // blended and cleared. Off by default: without dithering, faint blended layers (waterfall mist,
-  // smoke) add less than one color step each and vanish, and gradients band.
-  bool color16 = false;
-  // the GPU's early depth test for opaque level draws, drawn front to back in distance bands.
-  // (AI-assisted) Used only if the boot self-test (ctr_gpu_early.c) shows it changes no pixel on
-  // this console: it once left large screen blocks where the level never drew on a New 3DS.
-  bool early_depth = true;
-  // (AI-assisted) early_depth = sky: the early depth test only
-  // for the sky, drawn last (sky_last forced on) at depth 0: its fragments behind what the opaque
-  // draws covered are dropped before texturing. With on and sky_last the sky uses it too
-  bool early_depth_sky = false;
-  // (AI-assisted) early_depth_func = ge | gt | le | lt: the early test's function (the normal
-  // depth test stays >=); early_depth_clear = the early depth data's clear value (0 = far, max =
-  // 0xFFFFFF, or a number). pica_bench B8.*.c3 shows which pair passes everything after a clear
-  int early_depth_func = 0;
-  unsigned int early_depth_clear = 0;
-  // top_block32 = auto | off | on. auto: if the early depth self-test passes only in 32x32 block
-  // mode, the top render target becomes 256x416 in that mode (the screen shows 240x400 of it).
-  // on: that target always (a test; early depth still needs its self-test)
-  int top_block32 = 0;  // off: on hardware, game frames lose blocks with block32 early depth
-  // (AI-assisted) 16-bit depth buffer instead of 24-bit + stencil: half the depth traffic, but
-  // 256x coarser depth (z-fighting far away) and no stencil (shadows = full becomes off). Off by
-  // default.
-  bool depth16 = false;
   // sprite and HUD textures in the smallest 3DS format that holds them (8 / 16 bits per texel),
   // and in reserved VRAM (with vram_textures)
   bool compact_textures = true;
@@ -207,10 +133,6 @@ struct CtrSettings {
   // (geometry 0) are drawn with it within their PS2 distance, else with the far one (geometry 3).
   // off: the far versions only (as before v17)
   bool tie_lod = true;
-  // level meshes: 16-byte vertices in one attribute buffer (off), or 12-byte records and the colors
-  // in a buffer of their own (on: time of day rewrites touch 4 bytes per vertex, the GPU reads two
-  // streams)
-  bool color_stream = false;
   // (AI-assisted, streaming) c3l v19 levels: the near versions of the tie LOD groups (near chunks)
   // are read from the file around the camera on the loader thread, into a stream arena of
   // stream_kb KB of linear memory (taken at the first such level, kept), and freed far away; a group
@@ -253,33 +175,6 @@ struct CtrSettings {
   // (AI-assisted) meters: far scenery (lowres_vista, the vista tier) is drawn up to here (the
   // PS2's far clip plane, math-camera f: 10 km)
   float vista_distance = 10000.f;
-  // (AI-assisted) level chunks entirely in front of where both fogs start are drawn without the
-  // fog stage (texture combiner pass-through, texture unit 1 off). On (preset safe: off)
-  bool fog_stage_skip = true;
-  // (AI-assisted) fog_alpha: level draws whose vertex alpha is 0x80 (~99.5%) get the fog amount in
-  // the vertex color's alpha (ctr_mesh_old_fa / ctr_mesh_opt_fa) and mix in the fog color as a
-  // combiner constant: no fog ramp texture lookups, one vertex output less. The rest keep the
-  // ramp. tex1_gating: texture unit 1 (the ramp) enabled only for draws whose combiner reads it
-  // (raw draws switch the unit's enable bit, no texture cache clear; merc, sprites, sky, HUD and
-  // shadows never read it). Both on (preset safe: off).
-  bool fog_alpha = true;
-  bool tex1_gating = true;
-  // (AI-assisted) shader_opt: the shorter vertex programs (platform/3ds/shaders/ctr_*_opt.v.pica:
-  // level meshes 21 -> 10 instructions and 4 -> 3 output registers, merc 53 -> 33, merc shine
-  // 56 -> 33, PS2 ocean 14 -> 9 and 12 -> 6). Same picture in Azahar. On (the user's decision,
-  // Oct 12: "we will keep the optimised shaders on"); pica_bench B3.mesh_opt / B3.skin_opt price
-  // it. Off (preset safe): the Oct 2 programs (ctr_mesh_old, ctr_skin_old, ...)
-  bool shader_opt = true;
-  // (AI-assisted) cmd_dedup: register writes that would give a register the value it already has
-  // are left out of the command list (texture unit 0's type at a texture change). The same
-  // registers, the same picture; on. cmd_dedup_draw: the raw draws' PRIMITIVE_CONFIG mode and
-  // VERTEX_OFFSET writes too (4 of their ~30 words; citro3d writes them before every draw)
-  bool cmd_dedup = true;
-  bool cmd_dedup_draw = true;
-  // (AI-assisted) skin_clip_f24: each merc model's clip matrix and lights as float24 uniforms like
-  // the bone rows (skin_rows_f24): 11 words less per model. Not bit-identical (rounding): off until
-  // priced (pica_bench B2.unif_f24 vs B2.unif_f32, the same line as skin_rows_f24)
-  bool skin_clip_f24 = true;
   // (AI-assisted) back faces of closed tie surfaces (c3l v13 draws marked by the converter) are
   // culled. cull_flip: the other screen winding (if the PICA's turns out mirrored). On: no face
   // went missing in Azahar at Sandover, Snowy's fort and start, Fire Canyon (2026-10-11)
@@ -304,19 +199,6 @@ struct CtrSettings {
   bool gpu_breakdown = false;
   // ocean_tex_half: no effect since the flat / waves ocean was removed (kept for a hardware A/B)
   bool ocean_tex_half = true;
-  // (AI-assisted) c3l v15 opaque alpha: the alpha tests / blending ctr_level_converter took out of
-  // level draws whose texture alpha is 1.0 in every texel of every mip level and whose vertex alpha
-  // is >= 0x80 (kDrawAlphaTestDropped / kDrawBlendDropped: they can't change a pixel) stay out; off
-  // puts them back. Each frame (gpu_profile = ab). Older files: no such draws
-  bool opaque_alpha = true;
-  // (AI-assisted) cmd_dump: a frame's GPU command list to data/log/cmd_NN.bin every 20 s
-  // (platform/3ds/tools/cmd_report.py); diagnostic, off
-  bool cmd_dump = false;
-  // (AI-assisted) tex_cache_clear = always | uploads (default): always clears the GPU's texture
-  // cache at every texture bind (citro3d's way, ~300 per frame); uploads skips it only for binds
-  // that keep a level pool texture and change its sampling settings (switches between level pool
-  // textures skipped it too until the minecart red patches, see bind_texture)
-  bool tex_cache_uploads = true;
   // (AI-assisted) hardware hang bisect switches (Oct 3 optimisations; off = the Oct 2 behaviour):
   // asm_tex: the 4x2 group / LDM-STM texture tiling, 64-bit PSMCT32 uploads and SIMD sky loops
   // (off: the old per texel loops); asm_mem: ctr_mem.S memcpy/memmove/memset (off: byte/word C
@@ -326,10 +208,6 @@ struct CtrSettings {
   // (AI-assisted) defer_flush: the render thread's cache flushes held until the frame is submitted
   // (e165bc719); off: each one right away, as on Oct 2
   bool defer_flush = true;
-  // (AI-assisted) shader_basic new | old: the 7 instruction ctr_basic (hardware proven) or the
-  // Oct 2 one (ctr_basic_old). (The Oct 3 ctr_mesh / ctr_skin, which hung the real GPU, and their
-  // switches new_shaders / shader_mesh / shader_skin were removed on Oct 16.)
-  int shader_basic = 1;
   bool asm_mem = true;
   bool fast_clock = true;
   // running in an emulator (Azahar / Citra), for the auto defaults above
@@ -350,9 +228,6 @@ inline const CtrSettings& ctr_settings() {
   const CtrSettings* s = ctr_settings_detail::g_settings;
   return __builtin_expect(s != nullptr, 1) ? *s : ctr_settings_detail::first_use();
 }
-/*! (AI-assisted) The same, changeable: only for gpu_profile = ab (render thread, between frames;
- * the switches it changes are read by the renderers each frame). */
-CtrSettings& ctr_settings_ab();
 
 namespace ctr_gfx {
 /*! One line describing the renderer settings, for status displays. */

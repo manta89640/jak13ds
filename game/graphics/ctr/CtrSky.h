@@ -38,9 +38,6 @@ class CtrSky {
   /*! (AI-assisted) sky_last: the sky's draws depth tested (GEQUAL; the renderer sets
    * ctr_gpu_set_depth_far around them), drawn after the opaque level and models */
   void set_depth_tested(bool on) { m_depth_tested = on; }
-  /*! (AI-assisted) skip_clear: this packet's opaque roof (drawn with the last complete sky
-   * texture) covers the whole screen, so no pixel keeps the frame's clear color */
-  bool roof_covers_screen(const u8* packet, const CtrRenderState& rs) const;
 
  private:
   static constexpr int kSize[2] = {32, 64};  // sky, clouds

@@ -13,7 +13,6 @@ target_sources(og3ds_runtime PRIVATE
   ${OG_ROOT}/game/graphics/ctr/CtrOceanVuMid.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrOceanVuNear.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrSettings.cpp
-  ${OG_ROOT}/game/graphics/ctr/CtrCpuBench.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrClipTest.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrShadow.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrKeiraRig.cpp
@@ -57,11 +56,10 @@ target_link_libraries(og3ds_runtime og3ds_unpack)
 find_program(PICASSO picasso HINTS ${DEVKITPRO}/tools/bin ${CTRULIB}/../tools/bin REQUIRED)
 
 set(OG3DS_SHADER_CS "")
-foreach(shader ctr_basic ctr_clip ctr_clip2 ctr_ocean ctr_ocean_full ctr_ocean_full_clip
-    ctr_basic_old ctr_mesh_old ctr_skin_old ctr_skin_env_old ctr_bench_sep
-    ctr_mesh_old_fa ctr_mesh_opt ctr_mesh_opt_fa ctr_skin_opt ctr_skin_env_opt
+foreach(shader ctr_basic ctr_clip ctr_clip2 ctr_bench_sep
+    ctr_mesh_opt ctr_mesh_opt_fa ctr_skin_opt ctr_skin_env_opt
     ctr_ocean_full_opt ctr_ocean_full_clip_opt ctr_mesh_opt_df ctr_mesh_opt_df_fa
-    ctr_ocean_env ctr_etie ctr_mesh_wind ctr_skin_opt_mask ctr_skin_old_mask ctr_etie_fa
+    ctr_etie ctr_mesh_wind ctr_skin_opt_mask ctr_etie_fa
     ctr_mesh_morph ctr_mesh_morph_fa ctr_tfrag_morph ctr_tfrag_morph_fa ctr_skin_opt1)
   set(src ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}.v.pica)
   set(bin ${CMAKE_CURRENT_BINARY_DIR}/${shader}.shbin)
@@ -99,8 +97,6 @@ list(APPEND OG3DS_SHADER_CS ${CMAKE_CURRENT_BINARY_DIR}/ctr_bench_shbin.c)
 target_sources(og3ds_port PRIVATE
   ${OG_ROOT}/game/graphics/ctr/ctr_gpu_citro3d.c
   ${OG_ROOT}/game/graphics/ctr/ctr_gpu_bench.c
-  ${OG_ROOT}/game/graphics/ctr/ctr_gpu_early.c
-  ${OG_ROOT}/game/graphics/ctr/ctr_gpu_vprobe.c
   ${OG3DS_SHADER_CS}
 )
 target_include_directories(og3ds_port PRIVATE ${OG_ROOT})
