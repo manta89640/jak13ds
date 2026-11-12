@@ -1281,8 +1281,6 @@ class CtrLevels {
   std::atomic<u64> m_load_left{0};
   // what a level load, a repair or the stream arena still lack after the last pass's freeing
   u64 m_need_deficit = 0;
-  // the stream arena's segment a near chunk needed now had no linear memory for, and its frame
-  u64 m_stream_claim = 0, m_stream_claim_frame = 0;
   // the passes in a row short of room, the last shortage line
   u32 m_need_short = 0;
   double m_need_log_ms = 0;
