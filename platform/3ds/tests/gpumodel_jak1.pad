@@ -1,55 +1,58 @@
 # gpu_model route, Jak 1: Sandover hut, beach, jungle at noon; at each checkpoint
-# a hold, then four camera turns with a hold after each (docs/3ds-port/gpu_model.md).
+# a hold, then four camera turns with a hold after each (docs/3ds-port/gpu_model.md); first
+# 20 s of the title flyover over Sandover.
+0 log gpumodel view title load
 0 wait *target* target-title-wait
-10 continue village1-hut
-11 wait *target* target-continue
-12 wait *target* target-stance
-13 tod 12
-14 log gpumodel view village1-hut d0
-164 rx=40
-209 -
-210 log gpumodel view village1-hut d1
-329 rx=40
-374 -
-375 log gpumodel view village1-hut d2
-494 rx=40
-539 -
-540 log gpumodel view village1-hut d3
-659 rx=40
-704 -
-705 log gpumodel view village1-hut d4
-854 continue beach-start
-855 wait *target* target-continue
-856 wait *target* target-stance
-857 tod 12
-858 log gpumodel view beach-start d0
-1008 rx=40
-1053 -
-1054 log gpumodel view beach-start d1
-1173 rx=40
-1218 -
-1219 log gpumodel view beach-start d2
-1338 rx=40
-1383 -
-1384 log gpumodel view beach-start d3
-1503 rx=40
-1548 -
-1549 log gpumodel view beach-start d4
-1698 continue jungle-start
-1699 wait *target* target-continue
-1700 wait *target* target-stance
-1701 tod 12
-1702 log gpumodel view jungle-start d0
-1852 rx=40
-1897 -
-1898 log gpumodel view jungle-start d1
-2017 rx=40
-2062 -
-2063 log gpumodel view jungle-start d2
-2182 rx=40
-2227 -
-2228 log gpumodel view jungle-start d3
-2347 rx=40
-2392 -
-2393 log gpumodel view jungle-start d4
-2542 log gpumodel route end
+1 log gpumodel view title flyover
+600 continue village1-hut
+601 wait *target* target-continue
+602 wait *target* target-stance
+603 tod 12
+604 log gpumodel view village1-hut d0
+754 rx=40
+799 -
+800 log gpumodel view village1-hut d1
+919 rx=40
+964 -
+965 log gpumodel view village1-hut d2
+1084 rx=40
+1129 -
+1130 log gpumodel view village1-hut d3
+1249 rx=40
+1294 -
+1295 log gpumodel view village1-hut d4
+1444 continue beach-start
+1445 wait *target* target-continue
+1446 wait *target* target-stance
+1447 tod 12
+1448 log gpumodel view beach-start d0
+1598 rx=40
+1643 -
+1644 log gpumodel view beach-start d1
+1763 rx=40
+1808 -
+1809 log gpumodel view beach-start d2
+1928 rx=40
+1973 -
+1974 log gpumodel view beach-start d3
+2093 rx=40
+2138 -
+2139 log gpumodel view beach-start d4
+2288 continue jungle-start
+2289 wait *target* target-continue
+2290 wait *target* target-stance
+2291 tod 12
+2292 log gpumodel view jungle-start d0
+2442 rx=40
+2487 -
+2488 log gpumodel view jungle-start d1
+2607 rx=40
+2652 -
+2653 log gpumodel view jungle-start d2
+2772 rx=40
+2817 -
+2818 log gpumodel view jungle-start d3
+2937 rx=40
+2982 -
+2983 log gpumodel view jungle-start d4
+3132 log gpumodel route end
