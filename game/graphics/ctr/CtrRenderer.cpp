@@ -1537,13 +1537,12 @@ void ctr_send_chain(const void* data, u32 offset) {
     unsigned int dropped;
     double buf_wait;
     unsigned int just_in_time;
-    int floor;
-    ctr_gpu_pacing_stats(hist, &latency, &dropped, &buf_wait, &just_in_time, &floor);
+    ctr_gpu_pacing_stats(hist, &latency, &dropped, &buf_wait, &just_in_time);
     if (latency >= 0) {
       lg::info("[ctr] pacing: frames on screen for 1/2/3/4/5+ vblanks: {}/{}/{}/{}/{}, latency {} "
-               "vblanks (not below {} for now), {} frames done just in time, {} skipped, {:.0f} "
-               "ms waiting for a screen buffer",
-               hist[0], hist[1], hist[2], hist[3], hist[4], latency, floor, just_in_time, dropped,
+               "vblanks, {} frames done just in time, {} skipped, {:.0f} ms waiting for a screen "
+               "buffer",
+               hist[0], hist[1], hist[2], hist[3], hist[4], latency, just_in_time, dropped,
                buf_wait);
     }
     const double last = g_ee.last_send;

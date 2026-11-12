@@ -427,9 +427,9 @@ void ctr_gpu_note_release(unsigned int release);
 /* (AI-assisted) since the last call: frames shown for 1, 2, 3, 4, 5+ vblanks, the presentation
  * latency in vblanks (-1: steady pacing off), frames skipped and the render thread's total wait
  * for a free screen buffer; just_in_time: frames the GPU finished in the vblank before their own
- * (no vblank to spare), floor: the latency it doesn't go below for now (a frame was late there) */
+ * (no vblank to spare) */
 void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* dropped,
-                          double* buffer_wait_ms, unsigned int* just_in_time, int* floor);
+                          double* buffer_wait_ms, unsigned int* just_in_time);
 void ctr_gpu_set_compact_textures(int on);
 /* (AI-assisted) Overlap: hand the draws so far to the GPU in the middle of a frame (after a
  * renderer bucket, when enough draws piled up), so the GPU draws them while the CPU builds the

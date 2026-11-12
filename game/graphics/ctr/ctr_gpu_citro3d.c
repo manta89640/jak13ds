@@ -1601,14 +1601,15 @@ int ctr_gpu_set_pipeline(int on) {
  * average was ~30 fps: choppy. Here each frame is transferred to one of our own screen buffers
  * right after its draws (in the GPU queue, so the render target is free for the next frame), a
  * texture copy after it writes the frame's number to a fence, and the vblank callback shows the
- * frame at release + L vblanks (release: the vblank the game thread handed it over at). Frames
- * then stay on screen exactly as long as the game time they cover. L goes up by one when a frame
- * misses its vblank and back down after a long run of frames with time to spare. */
-/* frames in flight at latency L (2 vblanks per frame): L / 2 waiting, one being transferred, one
- * requested, one on screen. 4 buffers were too few at L = 6: the render thread waited for a free
- * one, which made frames late, which raised L (frames on screen for 5+ vblanks on hardware). */
+ * frame at release + PRESENT_LATENCY vblanks (release: the vblank the game thread handed it over
+ * at). Frames then stay on screen exactly as long as the game time they cover. */
+/* The latency is fixed: 4 vblanks, two frames after the release (the game thread on frame N + 2,
+ * the render thread on N + 1, the GPU on N). The latency controller this replaces stayed at 4 in
+ * every hardware window; a latency changes when a frame is shown, never how many are made. */
+#define PRESENT_LATENCY 4
+/* frames in flight (2 vblanks per frame): 2 waiting, one being transferred, one requested, one on
+ * screen */
 #define PRESENT_BUFS 6
-#define PRESENT_MAX_LATENCY 4
 #define PRESENT_Q 8
 static struct {
   int on;
@@ -1636,16 +1637,11 @@ static struct {
   volatile int requested, shown, flip;
   volatile u32 last_shown;
   volatile u32 hist[5];                   /* frames on screen for 1, 2, 3, 4, 5+ vblanks */
-  volatile u32 late, dropped;
-  volatile int min_slack;                 /* vblanks to spare of the frames since the last check */
+  volatile u32 dropped;
   /* (AI-assisted) frames first seen done in the vblank before their own (no vblank to spare):
-   * a running count; jit_window / jit_stats: where the window and the stats started */
+   * a running count, and where the stats started */
   volatile u32 just_in_time;
-  u32 jit_window, jit_stats;
-  int floor;          /* (AI-assisted) the latency doesn't go below this for floor_windows more */
-  int floor_windows;  /* windows (a late frame was at floor - 1) */
-  int latency;
-  u32 frames_since_change;
+  u32 jit_stats;
   double buf_wait_ms; /* the render thread waiting for a free screen buffer */
 } s_pres;
 
@@ -2167,28 +2163,15 @@ static void pres_vblank(void* unused) {
       break; /* the GPU isn't done with it */
     }
     const s32 slack = (s32)(target - (v + 1));
-    /* (AI-assisted) The vblanks a frame had to spare: its slack when it is first seen done. It
-     * used to be lowered to 0 when the frame was shown, which every frame on time is, so the
-     * latency could only go up (it stayed at 4 for whole sessions on hardware). */
+    /* (AI-assisted) the vblanks a frame had to spare when it is first seen done */
     if (!s_pres.q[qi].seen) {
       s_pres.q[qi].seen = 1;
       if (slack == 0) {
         s_pres.just_in_time++;
       }
-      if (slack >= 0 && slack < s_pres.min_slack) {
-        s_pres.min_slack = slack;
-      }
     }
     if (slack > 0) {
       break; /* too early: its vblank comes later */
-    }
-    if (slack < 0 && slack >= -2) {
-      /* missed its vblank by one or two: the latency is too short. A frame later than that is a
-       * stall (a level load, a save), which more latency wouldn't have hidden. */
-      s_pres.late++;
-      s_pres.min_slack = -1;
-    } else if (slack < 0) {
-      s_pres.min_slack = -1;
     }
     if (pick >= 0) {
       s_pres.buf_state[pick] = 0; /* a newer frame is due too: skip this one */
@@ -2320,9 +2303,6 @@ static int pres_init(void) {
   s_pres.mode = (u32)fmt | BIT(6) /* 2D */ | (1u << 8) /* in FCRAM */;
   s_pres.requested = s_pres.shown = -1;
   s_pres.q_head = s_pres.q_tail = 0;
-  s_pres.latency = 3;
-  s_pres.floor = 2;
-  s_pres.min_slack = 99;
   s_pres.vblanks = C3D_FrameCounter(0);
   s_pres.on = 1;
   /* replaces citro3d's vblank counter (C3D_FrameCounter isn't used with this on) */
@@ -2395,36 +2375,9 @@ static void pres_queue_frame(void) {
     cache_flush_now(id, 16);
     GX_TextureCopy(id, 0, s_pres.fence, 0, 16, 8 /* raw copy */);
   }
-  /* the latency: up after a late frame. (AI-assisted) Down after a window of 150 frames (~5 s)
-   * without a late frame and with at most 2 that had no vblank to spare, but for ~30 s not below
-   * the latency that made a frame late (the floor): stepping down into a scene that needs the
-   * latency would make a late frame (a stutter) every window */
-  s_pres.frames_since_change++;
-  if (s_pres.late) {
-    s_pres.late = 0;
-    if (s_pres.latency < PRESENT_MAX_LATENCY) {
-      s_pres.latency++;
-    }
-    s_pres.floor = s_pres.latency;
-    s_pres.floor_windows = 6;
-    s_pres.frames_since_change = 0;
-    s_pres.jit_window = s_pres.just_in_time;
-    s_pres.min_slack = 99;
-  } else if (s_pres.frames_since_change >= 150) {
-    const u32 jit = s_pres.just_in_time - s_pres.jit_window;
-    if (s_pres.floor_windows > 0 && --s_pres.floor_windows == 0) {
-      s_pres.floor = 2;
-    }
-    if (jit <= 2 && s_pres.latency > 2 && s_pres.latency > s_pres.floor) {
-      s_pres.latency--;
-    }
-    s_pres.frames_since_change = 0;
-    s_pres.jit_window = s_pres.just_in_time;
-    s_pres.min_slack = 99;
-  }
   const u32 t = s_pres.q_tail;
   s_pres.q[t % PRESENT_Q].id = g.frame_no;
-  s_pres.q[t % PRESENT_Q].target = s_pres.cur_release + (u32)s_pres.latency;
+  s_pres.q[t % PRESENT_Q].target = s_pres.cur_release + PRESENT_LATENCY;
   s_pres.q[t % PRESENT_Q].buf = b;
   s_pres.q[t % PRESENT_Q].seen = 0;
   __dsb();
@@ -2432,20 +2385,19 @@ static void pres_queue_frame(void) {
 }
 
 void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* dropped,
-                          double* buffer_wait_ms, unsigned int* just_in_time, int* floor) {
+                          double* buffer_wait_ms, unsigned int* just_in_time) {
   *buffer_wait_ms = s_pres.buf_wait_ms;
   s_pres.buf_wait_ms = 0;
   for (int i = 0; i < 5; i++) {
     hist[i] = s_pres.hist[i];
     s_pres.hist[i] = 0;
   }
-  *latency = s_pres.on ? s_pres.latency : -1;
+  *latency = s_pres.on ? PRESENT_LATENCY : -1;
   *dropped = s_pres.dropped;
   s_pres.dropped = 0;
   const u32 jit = s_pres.just_in_time;
   *just_in_time = jit - s_pres.jit_stats;
   s_pres.jit_stats = jit;
-  *floor = s_pres.floor;
 }
 
 

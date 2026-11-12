@@ -3672,7 +3672,7 @@ unsigned int ctr_gpu_release_now(void) {
 }
 void ctr_gpu_note_release(unsigned int) {}
 void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* dropped,
-                          double* buffer_wait_ms, unsigned int* just_in_time, int* floor) {
+                          double* buffer_wait_ms, unsigned int* just_in_time) {
   *buffer_wait_ms = 0;
   for (int i = 0; i < 5; i++) {
     hist[i] = 0;
@@ -3680,7 +3680,6 @@ void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* drop
   *latency = -1;
   *dropped = 0;
   *just_in_time = 0;
-  *floor = 0;
 }
 void ctr_gpu_want_detailed_stats(void) {}
 void ctr_gpu_set_compact_textures(int) {}
