@@ -49,7 +49,14 @@ PRIOR = {
     "px_blend": 0.5 * CYCLE_NS,    # blending: the color buffer read
     "tex_kb16": 1024 / 1.0 * CYCLE_NS,  # texture bytes missed by a 16-tile cache, ~1 B/cycle from FCRAM / VRAM
     "copy_rows": 2000 * CYCLE_NS,  # the distort screen copy, per 8-pixel band of the 400 (240 x 8 RGBA8)
+    "vcost": 0.0,                  # ns of vertex work by the pica_bench rule (vertex_ns), per bucket
 }
+
+
+def vertex_ns(instr, bufs):
+    """pica_bench (hw-nov12e B3 / B4 / B5): ns per index shaded: the setup floor of 48.6 ns (+14 per
+    extra attribute buffer), else 17.1 + 14 per buffer + 2.1 per instruction (mesh 52.1, skin 100.4)"""
+    return max(48.6 + 14.0 * (bufs - 1), 17.1 + 14.0 * bufs + 2.1 * instr)
 FEATURES = list(PRIOR)
 # the hardware stats windows carry these (render ms/frame + gpumodel hw lines); host equivalents
 HW_FEATURES = {"tris": "tri_in", "draws": "draws", "binds": "binds"}
@@ -58,7 +65,7 @@ HW_FEATURES = {"tris": "tri_in", "draws": "draws", "binds": "binds"}
 GROUPS = {
     "frame": ["frame", "copy_rows"],
     "commands": ["draws", "binds", "stchg", "progsw", "unif"],
-    "vertex": ["vmiss", "vinstr", "vbufs"],
+    "vertex": ["vmiss", "vinstr", "vbufs", "vcost"],
     "triangles": ["tri_in", "tri_setup"],
     "fill": ["px", "px_tex", "px_u2", "px_z", "px_blend", "tex_kb16"],
 }
@@ -413,7 +420,11 @@ def read_host(path):
             continue
         m = re.match(r"\[gpumodel\] b (\S+) (.*)", line.strip())
         if m:
-            cur["buckets"][m.group(1)] = {k: float(v) for k, v in re.findall(r"(\w+)=([\d.]+)", m.group(2))}
+            b = {k: float(v) for k, v in re.findall(r"(\w+)=([\d.]+)", m.group(2))}
+            vm = b.get("vmiss", 0.0)
+            if vm > 0:
+                b["vcost"] = vm * vertex_ns(b.get("vinstr", 0.0) / vm, max(b.get("vbufs", vm) / vm, 1.0))
+            cur["buckets"][m.group(1)] = b
             continue
         if line.strip() == "[gpumodel] end":
             wins.append(cur)
@@ -463,6 +474,11 @@ def effective_costs(a):
     group scales (gpu_model_calib.json)"""
     costs = load_costs(a.costs)
     src = "bench costs " + a.costs if a.costs else "prior costs"
+    p3d = json.load(open(a.calib)).get("p3d") if not a.costs and a.calib and os.path.exists(a.calib) else None
+    if p3d:
+        # the console's own costs (pica_bench): the GPU's 3D time (P3D), every index shaded
+        return ({k: p3d["costs_ns"].get(k, 0.0) for k in FEATURES},
+                "pica_bench costs (" + p3d["source"] + "): P3D ms")
     if not a.costs and a.calib and os.path.exists(a.calib):
         sc = json.load(open(a.calib)).get("phys", {}).get("scales", {})
         for g, fs in GROUPS.items():

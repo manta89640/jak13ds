@@ -4328,7 +4328,8 @@ static const u32 kRawArrays[22] = {
 };
 
 /* an indexed triangle list: index_pa = physical address of the first u16 index */
-static void raw_draw_elements(u32 index_pa, u32 count) {
+/* strip: the indices are a triangle strip (CTR_STATE_STRIP level draws), as C3D_DrawElements */
+static void raw_draw_elements_prim(u32 index_pa, u32 count, int strip) {
   u32* p = raw_ptr();
   {
     for (int i = 0; i < 24; i += 4) { /* (4 words per ldm / stm) */
@@ -4339,10 +4340,43 @@ static void raw_draw_elements(u32 index_pa, u32 count) {
     }
     p[4] = (index_pa - RAW_BUF_BASE) | BIT(31); /* u16 indices */
     p[6] = count;
+    if (strip) {
+      p[0] = GPU_TRIANGLE_STRIP;
+      p[10] = 0; /* (no triangle element mode: the geometry stage registers stay 0) */
+      p[12] = 0;
+    }
     p += 24;
   }
   raw_end(raw_vc_clear(p));
   __C3D_Context.flags |= C3DiF_DrawUsed;
+}
+static void raw_draw_elements(u32 index_pa, u32 count) {
+  raw_draw_elements_prim(index_pa, count, 0);
+}
+/* A level mesh draw's triangles for the statistics: a list's, or a strip's with area (not its
+ * stitches): counted once per range and kept (the ranges repeat from frame to frame). */
+static struct {
+  u32 pa, count, tris;
+} s_strip_tris[2048];
+static u32 mesh_draw_tris(const ctr_draw_state* state, const MeshSlot* ms, int first_index,
+                          int index_count) {
+  if (!(state->flags & CTR_STATE_STRIP)) {
+    return (u32)index_count / 3;
+  }
+  const u32 pa = ms->indices_pa + 2u * (u32)first_index;
+  const u32 h = (((pa >> 1) * 0x9E3779B1u) ^ ((u32)index_count * 0x85EBCA6Bu)) >> 21;
+  if (s_strip_tris[h].pa == pa && s_strip_tris[h].count == (u32)index_count) {
+    return s_strip_tris[h].tris;
+  }
+  const u16* ix = ms->indices + first_index;
+  u32 n = 0;
+  for (int i = 0; i + 2 < index_count; i++) {
+    n += ix[i] != ix[i + 1] && ix[i + 1] != ix[i + 2] && ix[i] != ix[i + 2];
+  }
+  s_strip_tris[h].pa = pa;
+  s_strip_tris[h].count = (u32)index_count;
+  s_strip_tris[h].tris = n;
+  return n;
 }
 
 /* prim: GPU_TRIANGLES or (AI-assisted) GPU_TRIANGLE_STRIP (ctr_gpu_draw_strip), as C3D_DrawArrays */
@@ -6287,6 +6321,7 @@ void ctr_gpu_mesh_delete(int mesh) {
   }
   ctr_linear_lock();
   if (g.meshes[mesh].used == 1) {
+    memset(s_strip_tris, 0, sizeof(s_strip_tris));
     g.meshes[mesh].used = 2;
     g.pending_mesh_delete[g.pending_mesh_delete_count++] = mesh;
   }
@@ -6353,6 +6388,7 @@ void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out) {
   static uint32_t s_next_id;
   out->id = ++s_next_id ? s_next_id : ++s_next_id; /* never 0 */
   out->fog_gen = 0;
+  out->lut_gen = 0; /* (the fog table row is made at the first draw: the memory may hold another matrix's) */
 }
 
 /* (AI-assisted) shader_opt (ctr_mesh_opt.v.pica): the fog rows clip[4], clip[5] of a matrix (C3D_Mtx
@@ -6519,11 +6555,12 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
     }
     PR_ADD(PR_MESH_MTX, t);
     t = PR_T();
-    raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
+    raw_draw_elements_prim(ms->indices_pa + 2u * (u32)first_index, (u32)index_count,
+                           (state->flags & CTR_STATE_STRIP) != 0);
     PR_ADD(PR_MESH_DRAW, t);
   }
   g.cur.draws++;
-  g.cur.triangles += index_count / 3;
+  g.cur.triangles += mesh_draw_tris(state, ms, first_index, index_count);
   PR_ADD(PR_MESH, pr0);
 }
 
@@ -6600,9 +6637,10 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
     g.wind_rows_id = rows_id;
     raw_unif_xyzw(g.ps->uloc_wind, rows, row_count);
   }
-  raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
+  raw_draw_elements_prim(ms->indices_pa + 2u * (u32)first_index, (u32)index_count,
+                           (state->flags & CTR_STATE_STRIP) != 0);
   g.cur.draws++;
-  g.cur.triangles += index_count / 3;
+  g.cur.triangles += mesh_draw_tris(state, ms, first_index, index_count);
 }
 
 int ctr_gpu_wind_ready(void) {
@@ -6678,10 +6716,11 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
       }
     }
     raw_end(p);
-    raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
+    raw_draw_elements_prim(ms->indices_pa + 2u * (u32)first_index, (u32)index_count,
+                           (state->flags & CTR_STATE_STRIP) != 0);
   }
   g.cur.draws++;
-  g.cur.triangles += index_count / 3;
+  g.cur.triangles += mesh_draw_tris(state, ms, first_index, index_count);
 }
 
 int ctr_gpu_morph_ready(void) {
@@ -6742,10 +6781,11 @@ void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix
       }
       raw_end(raw_unif(raw_ptr(), g.ps->uloc_tband, v, 8, 1));
     }
-    raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
+    raw_draw_elements_prim(ms->indices_pa + 2u * (u32)first_index, (u32)index_count,
+                           (state->flags & CTR_STATE_STRIP) != 0);
   }
   g.cur.draws++;
-  g.cur.triangles += index_count / 3;
+  g.cur.triangles += mesh_draw_tris(state, ms, first_index, index_count);
 }
 
 /* (AI-assisted) the cache flush statistics line since the last call */
@@ -6892,9 +6932,10 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state, int env_tex, const ctr_etie_
     raw_unif_xyzw(p->uloc_etie_fog0, g.fog0, 1);
     raw_unif_xyzw(p->uloc_etie_fog1, g.fog1, 1);
   }
-  raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
+  raw_draw_elements_prim(ms->indices_pa + 2u * (u32)first_index, (u32)index_count,
+                           (state->flags & CTR_STATE_STRIP) != 0);
   g.cur.draws++;
-  g.cur.triangles += index_count / 3;
+  g.cur.triangles += mesh_draw_tris(state, ms, first_index, index_count);
 }
 
 int ctr_gpu_etie_ready(void) {

@@ -307,7 +307,7 @@ struct B {
   double nopix = 0;  // level mesh triangles on screen without a pixel
   double sub = 0;  // (AI-assisted) level mesh triangles submitted (what the 3DS GPU's vertex stage
                    // gets: before clipping and back face culling; tris counts the drawn ones)
-  // gpumodel: post-vertex cache misses (16 entries, cleared per draw) and x program length,
+  // gpumodel: vertices shaded (every index: no post-vertex cache) and x program length,
   // triangles submitted / reaching setup, textured fragments, fragments reading a second unit
   double vmiss = 0, vmiss_instr = 0, tri_in = 0, tri_setup = 0, px_tex = 0, px_u2 = 0;
 };
@@ -430,14 +430,22 @@ void tb_drop(int fate, float w) {
     tb_bucket()->fate[tb_band(w)][fate]++;
   }
 }
+// the next indexed draw is a strip of this many indices (soft_strip_list; drawn as its list)
+int tb_strip_n = 0;
 // gpumodel: a draw's vertex work (n indices, miss vertices shaded)
 void gm_verts(B* b, int n, int miss) {
+  int tris = n / 3;
+  if (tb_strip_n) {
+    n = miss = tb_strip_n;
+    tris = std::max(tb_strip_n - 2, 0);
+    tb_strip_n = 0;
+  }
   b->vmiss += miss;
   b->vmiss_instr += (double)miss * tb_instr;
-  b->tri_in += n / 3;
+  b->tri_in += tris;
   rec.idx += n;
   rec.vmiss += miss;
-  rec.tri_in += n / 3;
+  rec.tri_in += tris;
   rec.instr = tb_instr;
   rec.bufs = tb_bufs;
 }
@@ -483,23 +491,9 @@ void tb_verts(const uint16_t* idx, int n) {
   b->idx += n;
   b->verts += u;
   b->vinstr += (double)u * tb_instr;
-  b->vbufs += (double)u * tb_bufs;
-  // gpumodel: the GPU's post-vertex cache (16 entries, FIFO, cleared at every draw)
-  uint16_t fifo[16];
-  int used = 0, at = 0, miss = 0;
-  for (int i = 0; i < n; i++) {
-    bool hit = false;
-    for (int k = 0; k < used && !hit; k++) {
-      hit = fifo[k] == idx[i];
-    }
-    if (!hit) {
-      miss++;
-      fifo[at] = idx[i];
-      at = (at + 1) & 15;
-      used = std::min(used + 1, 16);
-    }
-  }
-  gm_verts(b, n, miss);
+  b->vbufs += (double)(tb_strip_n ? tb_strip_n : n) * tb_bufs;  // (per index shaded)
+  // gpumodel: every index is shaded (pica_bench B4: the hardware reuses none across a list)
+  gm_verts(b, n, n);
 }
 void tb_level_cache(int mesh, const float clip[16], const uint16_t* idx, int n) {
   if (!enabled() || n <= 0) {
@@ -2193,6 +2187,8 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state,
 void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out) {
   memcpy(out->m, clip, sizeof(out->m));
   out->id = 0;
+  out->fog_gen = 0;
+  out->lut_gen = 0;
 }
 
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state,
@@ -2989,8 +2985,37 @@ static void near_clip_probe(const float clip[16],
 }
 
 // (AI-assisted) the triangles of ctr_gpu_draw_mesh / ctr_gpu_draw_mesh_stream
+// A level strip draw (CTR_STATE_STRIP) as the triangle list it stands for: the triangles without
+// area left out, the odd ones turned. The statistics count the strip's own indices.
+static const uint16_t* soft_strip_list(const ctr_draw_state* state, const uint16_t* indices,
+                                       int* first_index, int* index_count) {
+  if (!state || !(state->flags & CTR_STATE_STRIP)) {
+    return indices;
+  }
+  static std::vector<uint16_t> list;
+  list.clear();
+  const uint16_t* s = indices + *first_index;
+  const int n = *index_count;
+  for (int i = 0; i + 2 < n; i++) {
+    uint16_t a = s[i], b = s[i + 1];
+    const uint16_t c = s[i + 2];
+    if (a == b || b == c || a == c) {
+      continue;
+    }
+    if (i & 1) {
+      std::swap(a, b);
+    }
+    list.insert(list.end(), {a, b, c});
+  }
+  softstats::tb_strip_n = softstats::enabled() && !list.empty() ? n : 0;
+  *first_index = 0;
+  *index_count = (int)list.size();
+  return list.data();
+}
+
 static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], const SoftVerts& verts,
                            const uint16_t* indices, int first_index, int index_count) {
+  indices = soft_strip_list(state, indices, &first_index, &index_count);
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
   if (softstats::enabled()) softstats::cur->sub += index_count / 3;  // (AI-assisted)
@@ -3160,6 +3185,7 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state,
   g_soft.cur.draws++;
   softstats::draw(*state);
   softstats::tb_prog(30, g_soft.meshes[mesh].col_off ? 3 : 2);
+  ibase = soft_strip_list(state, ibase, &first_index, &index_count);
   softstats::tb_verts(ibase + first_index, index_count);
   const bool fogged = fog_on();
   auto row = [](const float* r, const float* in) {

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -138,7 +139,28 @@ void Reader::reset_stats() {
   sd_reads = 0;
 }
 
+// One spare set of block buffers, made at the first open (boot): a reader whose own buffer
+// can't be allocated (full heap) borrows it for one read.
+namespace {
+constexpr uint32_t kSpareBlock = 64 * 1024;
+struct Spare {
+  std::mutex lock;
+  uint8_t* cbuf = nullptr;
+  uint8_t* cache = nullptr;
+  uint8_t* hbuf = nullptr;
+  uint32_t uses = 0;
+} g_spare;
+void spare_init() {
+  if (!g_spare.cbuf) {
+    g_spare.cbuf = (uint8_t*)malloc(kSpareBlock);
+    g_spare.cache = (uint8_t*)malloc(kSpareBlock);
+    g_spare.hbuf = (uint8_t*)malloc(kSpareBlock / 8 + 2);
+  }
+}
+}  // namespace
+
 bool Reader::open(FILE* fp, const char* path) {
+  spare_init();
   m_fp = fp;
   // one fread per block, straight from the card (newlib's 1 KB buffer would split each one)
   setvbuf(m_fp, nullptr, _IONBF, 0);
@@ -256,6 +278,7 @@ bool Reader::load_block(uint32_t block, uint8_t* dst) {
   }
   if (!src) {
     if (!m_cbuf && !(m_cbuf = (uint8_t*)malloc(m_hdr.block_size))) {
+      m_no_memory = true;
       return false;
     }
     if (!read_at(m_offsets[block], m_cbuf, in_len)) {
@@ -265,6 +288,7 @@ bool Reader::load_block(uint32_t block, uint8_t* dst) {
   }
   if (m_hdr.codec == CODEC_ZSTD_ADPCM && !m_hbuf &&
       !(m_hbuf = (uint8_t*)malloc(m_hdr.block_size / 8 + 2))) {
+    m_no_memory = true;
     return false;
   }
   const uint64_t t0 = now_us();
@@ -294,6 +318,43 @@ bool Reader::load_block(uint32_t block, uint8_t* dst) {
 }
 
 int64_t Reader::read(uint32_t offset, void* dst_v, uint32_t len) {
+  m_no_memory = false;
+  int64_t n = read_once(offset, dst_v, len);
+  if (n >= 0 || !m_no_memory || m_hdr.block_size > kSpareBlock || !g_spare.cbuf ||
+      !g_spare.cache || !g_spare.hbuf) {
+    return n;
+  }
+  // a buffer of this reader found no memory: the read again with the spare ones
+  std::lock_guard<std::mutex> hold(g_spare.lock);
+  const bool bc = !m_cbuf, bk = !m_cache, bh = !m_hbuf;
+  if (bc) {
+    m_cbuf = g_spare.cbuf;
+  }
+  if (bk) {
+    m_cache = g_spare.cache;
+    m_cache_block = -1;
+  }
+  if (bh) {
+    m_hbuf = g_spare.hbuf;
+  }
+  n = read_once(offset, dst_v, len);
+  if (bc) {
+    m_cbuf = nullptr;
+  }
+  if (bk) {
+    m_cache = nullptr;
+    m_cache_block = -1;
+  }
+  if (bh) {
+    m_hbuf = nullptr;
+  }
+  if (g_spare.uses++ == 0) {
+    printf("[io] compressed read: no heap for a block buffer, the spare one used\n");
+  }
+  return n;
+}
+
+int64_t Reader::read_once(uint32_t offset, void* dst_v, uint32_t len) {
   if (offset >= m_hdr.size) {
     return 0;
   }
@@ -317,6 +378,7 @@ int64_t Reader::read(uint32_t offset, void* dst_v, uint32_t len) {
         if (!m_cache) {
           m_cache = (uint8_t*)malloc(bs);
           if (!m_cache) {
+            m_no_memory = true;
             return -1;
           }
         }

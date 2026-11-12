@@ -1208,7 +1208,9 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   bool run_bench = ctr_settings().pica_bench;
   if (run_bench && ctr_settings().pica_bench_once) {
     // the marker goes to the card before the bench: a hang in a test can't repeat at the next boot
-    const char* marker = "sdmc:/3ds/jak1/data/log/bench_once.txt";
+    const std::string marker_path =
+        "sdmc:/3ds/jak1/data/log/bench_" + ctr_settings().pica_bench_marker + ".txt";
+    const char* marker = marker_path.c_str();
     if (FILE* f = fopen(marker, "r")) {
       fclose(f);
       run_bench = false;

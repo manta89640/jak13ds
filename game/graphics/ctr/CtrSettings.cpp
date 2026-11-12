@@ -139,7 +139,9 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
     } else if (key == "gpu_perflog") {
       s.gpu_perflog = parse_bool(v);  // (AI-assisted)
     } else if (key == "pica_bench") {
-      s.pica_bench_once = v == "once";
+      // (once2, ...: a later bench version runs once more: its own marker file)
+      s.pica_bench_once = v.rfind("once", 0) == 0;
+      s.pica_bench_marker = s.pica_bench_once ? v : std::string();
       s.pica_bench = s.pica_bench_once || parse_bool(v);
     } else if (key == "compact_textures") {
       s.compact_textures = parse_bool(v);

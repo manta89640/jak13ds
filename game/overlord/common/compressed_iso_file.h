@@ -108,6 +108,7 @@ class Reader {
   uint32_t sd_reads = 0;      // card reads (fread calls)
 
  private:
+  int64_t read_once(uint32_t offset, void* dst, uint32_t len);
   bool load_block(uint32_t block, uint8_t* dst);
   bool window(uint32_t block, const uint8_t** src);
   bool read_at(uint32_t pos, void* dst, uint32_t len);
@@ -116,6 +117,7 @@ class Reader {
   std::shared_ptr<const std::vector<uint32_t>> m_index;
   const uint32_t* m_offsets = nullptr;
   uint32_t m_pos = 0;          // file position of m_fp
+  bool m_no_memory = false;    // the last read found no memory for a block buffer
   uint8_t* m_cbuf = nullptr;   // one compressed block
   uint8_t* m_cache = nullptr;  // one decoded block, for reads that don't cover whole blocks
   int64_t m_cache_block = -1;
