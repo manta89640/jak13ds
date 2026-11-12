@@ -7032,10 +7032,10 @@ bool CtrLevels::load_file(const fs::path& path,
   load_tfrag_lod(f, hdr, file_runs, out);
   u32 stream_skipped = 0, stream_core_kb = 0;
   std::map<std::string, std::pair<u32, u64>> not_made;  // section: chunks, bytes
-  // per chunk: kLeaveLowres the low resolution tfrag of a level with a vista tier (never drawn:
-  // its vista copies stand in for it, draw_level), kLeaveTitle what the Jak 1 title's camera can't
-  // show ("Title screen")
-  constexpr u8 kLeaveLowres = 1, kLeaveTitle = 2;
+  // per chunk: kLeaveNever what draw_level never draws (tfrag tier 2: tier 1's geomorph covers it;
+  // the low resolution tfrag of a level with a vista tier: its vista copies stand in for it),
+  // kLeaveTitle what the Jak 1 title's camera can't show ("Title screen")
+  constexpr u8 kLeaveNever = 1, kLeaveTitle = 2;
   std::vector<u8> leave(out->chunks.size(), 0);
   {
     bool vista = false;
@@ -7054,8 +7054,8 @@ bool CtrLevels::load_file(const fs::path& path,
       if (out->is_unit(ci) || !ch.draw_count) {
         continue;
       }
-      if (vista && ch.lod_tier == 3) {
-        leave[ci] = kLeaveLowres;
+      if (ch.lod_tier == 2 || (vista && ch.lod_tier == 3)) {
+        leave[ci] = kLeaveNever;
       } else if (title && !title_needed(*out, ci)) {
         leave[ci] = kLeaveTitle;
       }
@@ -7104,8 +7104,8 @@ bool CtrLevels::load_file(const fs::path& path,
       out->mesh_index_end.push_back(0);
       continue;
     }
-    out->mesh_index_first.push_back(leave[ci] == kLeaveLowres ? UINT32_MAX : first);
-    out->mesh_index_end.push_back(leave[ci] == kLeaveLowres ? 0 : end);
+    out->mesh_index_first.push_back(leave[ci] == kLeaveNever ? UINT32_MAX : first);
+    out->mesh_index_end.push_back(leave[ci] == kLeaveNever ? 0 : end);
     if (leave[ci] == kLeaveTitle) {
       out->chunk_dormant[ci] = CtrLevelData::kTitleFreed;
       title_n++;

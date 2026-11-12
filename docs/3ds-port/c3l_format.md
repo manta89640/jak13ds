@@ -71,7 +71,7 @@ What goes in:
 
 - tfrag trees of kind NORMAL, TRANS, DIRT, ICE and WATER, twice: the near version
   (`--tfrag-geo`, chunk tier 1) and a coarse one (`--far-tfrag-geo`, tier 2). The runtime draws
-  tier 1 (with the tfrag geomorph's versions); tier 2 is never drawn (tier 1's far versions cover it).
+  tier 1 (with the tfrag geomorph's versions); tier 2 is never drawn nor read (tier 1's far versions cover it).
 - LOWRES / LOWRES_TRANS tfrag (the PS2's version for views from a neighbouring level; often only
   the parts visible from there) as tier 3. It is drawn only when the camera is outside the level.
 - The static draws of every tie tree (categories normal, trans, water, and the base pass of
@@ -814,7 +814,7 @@ In the file (with the .tfragmorph; `--no-tfrag-morph`: as before):
   `ExtTfrag`'s RunLod array, not the ExtHeader's), in the cells of the group's center. A version
   the same as the one before it (fragments whose chains are the same) is left out and the group
   switches past it (TfragGroup mid = far, or far = FLT_MAX); a group with one geometry is always
-  drawn. The far tier (geometry 2 cells) is never drawn.
+  drawn. The far tier (geometry 2 cells) is never drawn nor read.
 - **Near chunks.** A near or mid version that a coarser one follows is in a near chunk (Chunk::kind
   CHUNK_KIND_TFRAG, lod tier 1, StreamChunk cls kStreamCore, need class cells as the ties'),
   streamed in while the camera is within need_a (each group's offset + radius + the depth its
