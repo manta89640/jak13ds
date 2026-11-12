@@ -1013,13 +1013,24 @@
   (and (not (logtest? (-> this perm status) (entity-perm-status bit-0 dead)))
        (< (vector-vector-distance (-> this trans) arg0) (-> *ACTOR-bank* birth-dist))))
 
+(#when TARGET_3DS
+  (define-extern pc-3ds-frame-run-time (function int)))
+
 (defmethod actors-update ((this level-group))
   (when *compact-actors*
     (if (and (= *compact-actors* 'debug) (= (-> *nk-dead-pool* alive-list prev) (-> *nk-dead-pool* first-gap)))
       (churn *nk-dead-pool* 1))
     (if (nonzero? *debug-dead-pool*) (compact *debug-dead-pool* 10))
+    ;; og:preserve-this 3DS: the compaction steps a frame go by the frame's real load, as on the PS2
+    ;; (the PC port's run-time is 0: 8 relocations a frame), twice the PS2's per frame: a frame is
+    ;; two vblanks (as Jak II). Hosts report no load and keep the port's count.
     (compact *nk-dead-pool*
-             (the int (lerp-scale 8.0 1.0 (the float (-> *display* frames (-> *display* last-screen) frame run-time)) 2000.0 8000.0))))
+             (#if TARGET_3DS
+               (let ((frame-ticks (pc-3ds-frame-run-time)))
+                 (if (> frame-ticks 0)
+                   (* 2 (the int (lerp-scale 8.0 1.0 (the float frame-ticks) 2000.0 8000.0)))
+                   8))
+               (the int (lerp-scale 8.0 1.0 (the float (-> *display* frames (-> *display* last-screen) frame run-time)) 2000.0 8000.0)))))
   (when (not (paused?))
     (let ((s5-1 (-> *display* frames (-> *display* last-screen) frame run-time)))
       (let ((f0-5 (fmax 327680.0 (fmin (+ 327680.0 (* 204.8 (the float (- 7000 s5-1)))) (-> *ACTOR-bank* birth-dist)))))

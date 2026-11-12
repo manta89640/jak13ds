@@ -55,6 +55,56 @@ struct ParticleMem {
   }
 };
 
+/*!
+ * Particle LOD (with the logic LOD; sparticle.gc process-particles fills *sp-lod-work*: the
+ * camera's position, its forward axis, then the frame count, on, the squared distance and the
+ * depth behind the camera). A 2d particle without a callback, an orbit or an alpha to restore that
+ * is that far from the camera is updated on every 2nd frame only, beyond the second distance or
+ * that far behind the camera on every 4th
+ * (staggered by index), over the frames it stands for.
+ */
+struct SpLod {
+  bool on = false;
+  float cx = 0, cy = 0, cz = 0, fx = 0, fy = 0, fz = 0, far2 = 0, behind = 0, far4 = 0;
+  u32 frame = 0;
+};
+
+SpLod sp_lod_read(const ParticleMem& m) {
+  static const u32 work_sym = sym_addr("*sp-lod-work*");
+  SpLod l;
+  const u32 w = m.u(work_sym);
+  if (w == 0 || m.f(w + 36) == 0.f) {
+    return l;
+  }
+  l.on = true;
+  l.cx = m.f(w);
+  l.cy = m.f(w + 4);
+  l.cz = m.f(w + 8);
+  l.fx = m.f(w + 16);
+  l.fy = m.f(w + 20);
+  l.fz = m.f(w + 24);
+  l.frame = m.u(w + 32);
+  l.far2 = m.f(w + 40);
+  l.behind = m.f(w + 44);
+  l.far4 = m.f(w + 48);
+  return l;
+}
+
+//! the frames this update stands for (1 as usual, 2 or 4), or 0: wait this frame
+inline int sp_lod_2d(const SpLod& l, const ParticleMem& m, u32 info, u32 vec, u64 index) {
+  if (!l.on || m.u(info + 112) != 0 || (m.u(info + 104) & (64 | 128))) {
+    return 1;
+  }
+  const float dx = m.f(vec) - l.cx, dy = m.f(vec + 4) - l.cy, dz = m.f(vec + 8) - l.cz;
+  const float d2 = dx * dx + dy * dy + dz * dz;
+  const bool behind = dx * l.fx + dy * l.fy + dz * l.fz < -l.behind;
+  if (d2 <= l.far2 && !behind) {
+    return 1;
+  }
+  const u32 n = (behind || d2 > l.far4) ? 4 : 2;
+  return ((index + l.frame) & (n - 1)) ? 0 : (int)n;
+}
+
 // sparticle-cpuinfo (144 bytes): sprite 0, adgif 4, radius 8, omega 12, vel-sxvel 16,
 // rot-syvel 32, fade 48, acc 64, rotvel3d 80, friction 96, timer 100, flags 104, user 108,
 // func 112, next-time 116, next-launcher 120, cache-alpha 124, valid 128, key 132, binding 136.
@@ -83,10 +133,11 @@ CTR_HOT u64 sp_process_block_2d_impl(const NativeArgs& args) {
 
   // x: the frame count (int), y: velocity scale, z: acceleration scale, w: friction scale
   const u32 frame_time = m.u(frame_time_sym);
-  const u64 frames = m.u(frame_time) & 255;
-  const float ft_vel = m.f(frame_time + 4);
-  const float ft_acc = m.f(frame_time + 8);
-  const float ft_friction = m.f(frame_time + 12);
+  const u64 frames_1 = m.u(frame_time) & 255;
+  const float ft_vel_1 = m.f(frame_time + 4);
+  const float ft_acc_1 = m.f(frame_time + 8);
+  const float ft_friction_1 = m.f(frame_time + 12);
+  const SpLod lod = sp_lod_read(m);
 
   // a3 is not set by this function before calling the callbacks: it is the argument, or the last
   // vecdata passed to sp-relaunch-particle-2d / sp-free-particle
@@ -113,7 +164,12 @@ CTR_HOT u64 sp_process_block_2d_impl(const NativeArgs& args) {
           m.set_u(vec + 44, m.u(info + 124));
         }
       }
-    } else {
+    } else if (const int lod_n = sp_lod_2d(lod, m, info, vec, index); lod_n != 0) {
+      // particle LOD: the time of the frames it stands for on the frame it runs
+      const u64 frames = (u64)lod_n * frames_1;
+      const float ft_vel = (float)lod_n * ft_vel_1;
+      const float ft_acc = (float)lod_n * ft_acc_1;
+      const float ft_friction = ft_friction_1;
       bool do_free = false;
       const s64 timer = m.s(info + 100);
       if (timer != -1) {
@@ -164,7 +220,11 @@ CTR_HOT u64 sp_process_block_2d_impl(const NativeArgs& args) {
         if (friction_bits != 0) {
           const float a = 1.f - u2f(friction_bits);
           const float b = a * ft_friction;
-          const float c = 1.f - b;
+          float c = 1.f - b;
+          // particle LOD: the friction of each frame it stands for
+          for (int k = 1; k < lod_n; k++) {
+            c = c * (1.f - b);
+          }
           vx = vx * c;
           vy = vy * c;
           vz = vz * c;

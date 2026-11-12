@@ -347,7 +347,75 @@
                (set! (-> self master-options) (the-as uint v0-1))
                v0-1)))))
 
+;; og:preserve-this 3DS: master-check-regions asks for every camera's volumes every frame, each a
+;; res-lump search by name and index. The volumes' data (where in the level's res-lump, how many
+;; planes) is kept per camera and name while the same levels stay loaded.
+(#when TARGET_3DS
+  (defconstant CAM_VOL_CACHE_SIZE 32)
+  (defconstant CAM_VOL_MAX 8)
+  (define *cam-vol-cache-ent* (new 'global 'array 'entity CAM_VOL_CACHE_SIZE))
+  (define *cam-vol-cache-tag* (new 'global 'array 'symbol CAM_VOL_CACHE_SIZE))
+  (define *cam-vol-cache-count* (new 'global 'array 'int32 CAM_VOL_CACHE_SIZE))
+  (define *cam-vol-cache-data* (new 'global 'array 'pointer (* CAM_VOL_CACHE_SIZE CAM_VOL_MAX)))
+  (define *cam-vol-cache-elts* (new 'global 'array 'int32 (* CAM_VOL_CACHE_SIZE CAM_VOL_MAX)))
+  (define *cam-vol-cache-next* 0)
+  (define *cam-vol-cache-key* (new 'global 'array 'uint32 4))
+  (dotimes (i CAM_VOL_CACHE_SIZE)
+    (set! (-> *cam-vol-cache-ent* i) #f))
+  (defun cam-vol-cache-slot ((ent entity) (tag symbol))
+    "The cache slot of ent's tag volumes, filled on a miss; -1 when they don't fit."
+    ;; any change to the loaded levels empties the cache
+    (let ((key *cam-vol-cache-key*)
+          (changed #f))
+      (dotimes (i 2)
+        (let ((lev (-> *level* level i)))
+          (when (or (!= (-> key (* i 2)) (the-as uint (-> lev bsp))) (!= (-> key (+ (* i 2) 1)) (the-as uint (-> lev status))))
+            (set! (-> key (* i 2)) (the-as uint (-> lev bsp)))
+            (set! (-> key (+ (* i 2) 1)) (the-as uint (-> lev status)))
+            (set! changed #t))))
+      (when changed
+        (dotimes (i CAM_VOL_CACHE_SIZE)
+          (set! (-> *cam-vol-cache-ent* i) #f))))
+    (dotimes (i CAM_VOL_CACHE_SIZE)
+      (if (and (eq? (-> *cam-vol-cache-ent* i) ent) (eq? (-> *cam-vol-cache-tag* i) tag)) (return i)))
+    (let ((slot *cam-vol-cache-next*)
+          (n 0))
+      (set! *cam-vol-cache-next* (if (= (+ slot 1) CAM_VOL_CACHE_SIZE) 0 (+ slot 1)))
+      (loop
+        (let* ((tag-out (new 'static 'res-tag))
+               (data ((method-of-type res-lump get-property-data)
+                      ent
+                      tag
+                      'exact
+                      (the float n)
+                      (the-as pointer #f)
+                      (& tag-out)
+                      *res-static-buf*)))
+          (cond
+            ((not data) (goto done))
+            ((= n CAM_VOL_MAX) (return -1))
+            (else
+             (set! (-> *cam-vol-cache-data* (+ (* slot CAM_VOL_MAX) n)) data)
+             (set! (-> *cam-vol-cache-elts* (+ (* slot CAM_VOL_MAX) n)) (the-as int (-> tag-out elt-count)))
+             (+! n 1)))))
+      (label done)
+      (set! (-> *cam-vol-cache-ent* slot) ent)
+      (set! (-> *cam-vol-cache-tag* slot) tag)
+      (set! (-> *cam-vol-cache-count* slot) n)
+      slot)))
+
 (defun in-cam-entity-volume? ((arg0 vector) (arg1 entity) (arg2 float) (arg3 symbol))
+  (#when TARGET_3DS
+    (let ((slot (cam-vol-cache-slot arg1 arg3)))
+      (when (>= slot 0)
+        (dotimes (s2-0 (-> *cam-vol-cache-count* slot))
+          (let ((v1-1 (the-as (inline-array vector) (-> *cam-vol-cache-data* (+ (* slot CAM_VOL_MAX) s2-0))))
+                (planes (-> *cam-vol-cache-elts* (+ (* slot CAM_VOL_MAX) s2-0)))
+                (a0-2 0))
+            (while (and (< a0-2 planes) (not (< arg2 (- (vector-dot arg0 (-> v1-1 a0-2)) (-> v1-1 a0-2 w)))))
+              (+! a0-2 1))
+            (if (= a0-2 planes) (return #t))))
+        (return #f))))
   (let ((s2-0 0))
     (loop
       (let* ((sv-16 (new 'static 'res-tag))
