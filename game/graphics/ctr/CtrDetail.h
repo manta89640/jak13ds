@@ -13,7 +13,6 @@ constexpr float kNearRingMeters = 40.f;
 // a distance limit's fade band: from the limit to this times it
 constexpr float kFadeBand = 1.1f;
 constexpr float kOldTieLodPx = 4.f;
-constexpr float kOldLodDistance = 200.f;  // meters (Jak II)
 constexpr float kOldTieScale = 1.5f;      // (Jak II)
 constexpr float kShrubBandK = 0.5f;
 constexpr float kTieFarMeters = 150.f;
@@ -50,21 +49,19 @@ inline void shrub_band(float* x, float* w, float k, float near_ring) {
   *x = nx;
 }
 
-// the floor's values for a config (tie_lod_px, lod_distance and tie_distance_scale as the config
+// the floor's values for a config (tie_lod_px and tie_distance_scale as the config
 // has them, unless the floor is coarser); on: Jak 1 / Jak II (other games: the config's)
 struct Floor {
   bool on = false;
   float tie_lod_px = 4.f;
-  float lod_distance = 0.f;        // meters, 0: none
   float tie_distance_scale = 0.f;  // 0: none
   float shrub_far = 1.f;           // shrub fade bands beyond ring 0 x this (shrub_band)
   float tie_far = 0.f;             // tie chunks by their vista copies from this (meters, 0: never)
 };
-inline Floor floor_of(float px, float lod, float tie, float draw_distance, bool jak1, bool jak2) {
+inline Floor floor_of(float px, float tie, float draw_distance, bool jak1, bool jak2) {
   Floor f;
   f.on = jak1 || jak2;
   f.tie_lod_px = px;
-  f.lod_distance = lod;
   f.tie_distance_scale = tie;
   if (!f.on) {
     return f;
@@ -72,7 +69,6 @@ inline Floor floor_of(float px, float lod, float tie, float draw_distance, bool 
   const float draw = draw_distance > 0 ? draw_distance : 2000.f;
   f.tie_lod_px = std::max(px, kOldTieLodPx);
   if (jak2) {
-    f.lod_distance = (lod > 0 ? lod : draw) > kOldLodDistance ? kOldLodDistance : lod;
     f.tie_distance_scale = (tie > 0 ? tie : draw / 100.f) > kOldTieScale ? kOldTieScale : tie;
   }
   f.shrub_far = kShrubBandK;

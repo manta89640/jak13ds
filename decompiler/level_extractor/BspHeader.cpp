@@ -2132,6 +2132,9 @@ void BspHeader::read_from_file(const decompiler::LinkedObjectFile& file,
   if (version == GameVersion::Jak1) {
     subdivide_close = read_plain_data_field<float>(ref, "unk-data-4", dts);
     subdivide_far = read_plain_data_field<float>(ref, "unk-data-5", dts);
+  } else if (version == GameVersion::Jak2) {
+    subdivide_close = read_plain_data_field<float>(ref, "subdivide-close", dts);
+    subdivide_far = read_plain_data_field<float>(ref, "subdivide-far", dts);
   }
   if (texture_page_count > 0) {
     auto tex_id_ptr = deref_label(get_field_ref(ref, "texture-ids", dts));

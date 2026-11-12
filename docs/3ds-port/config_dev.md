@@ -123,7 +123,7 @@ text_min_height = 9        # the smallest capital letter height, in pixels of th
 draw_distance = 500        # meters; level chunks further away are not drawn (0 = no limit)
 fog_start = 0.6            # the extra fog towards draw_distance starts at this fraction of it
 fog = on                   # the game's own distance fog
-lod_distance = 0           # meters; detailed tfrag up to here, the coarse version beyond (0 = always detailed, the default: the PS2 has no tfrag distance LOD). A cell is 200 m: its center at 180 m can hold ground under the camera, drawn coarse until it switches (host A/B: env CTR_TIER_AB, odd frames every cell coarse; CTR_POP_LOG's [popT] lines: switches in view). (AI-assisted, title-popin) A cell in view whose detailed version is drawn keeps it up to 1.5 x lod_distance while the camera moves away (the switch happened in view: a cliff on the title changed shape); out of view at lod_distance as before. Tie and shrub chunks in view moving away likewise stay up to 1.5 x their own distance (not past draw_distance). (AI-assisted, titlemove) Not shrubs: they go at their distance, run by run (performance.md "Title flight pops, shrub distances")
+lod_distance = 0           # meters; far mode draws a neighbouring level's landmark ties only within this distance (0 = no limit; Jak II default 200). Tfrag versions follow the PS2's tfrag geomorph (both games); the coarse tier 2 is far mode's. Nothing is held in view: tie, tfrag and shrub chunks go at their distance (10% hysteresis)
 far_level_distance = 80    # meters; a level seen from a neighbouring one is drawn with only its low resolution version (0 = off). (AI-assisted) Was 40: its objects popped in at 40 m. With chunk kinds (see below) it also keeps its ties without a distance limit (houses, towers, big rocks) in that mode (within lod_distance; (AI-assisted, levellod, Oct 29) in a level without a vista tier out to draw_distance while far mode is forced with the camera inside the near distance: a partial unload's re-read after a respawn or cut left Citadel's landmarks beyond 200 m missing. Seen from a neighbour the 200 m stays: the pop at the near switch is cheaper than up to 152k more triangles)
 detail_scale = 1           # multiplies the draw distance of small and medium objects and shrubs (all of them, also with the two keys below). (AI-assisted, levellod) 0.1-4 (0 drew every tie LOD group far)
 shrub_distance = 50        # (AI-assisted) meters; shrubs (grass, bushes, flowers) up to here (0 = the converter's 100 m). They are most of the GPU's work in village2, rolling, ogre and swamp (200-300k triangles within 100 m)
@@ -205,8 +205,8 @@ vfp_vector = on            # (AI-assisted, vfpvec, Nov 11) pc-new-bones-mtx-calc
 - **Real New 3DS (default):** the staged file (or none). If the frame rate is low, run once with
   `gpu_profile = on` and look for `[ctr] gpu profile: all X ms, level Y, merc Z, sprites ...` in
   the log: it shows which group costs the GPU the most. Then:
-  - level expensive: lower `shrub_scale` (e.g. 0.6; older levels: `shrub_distance`, e.g. 35), `draw_distance` (e.g. 300) and
-    `lod_distance` (e.g. 120), or `detail_scale = 0.7`;
+  - level expensive: lower `shrub_scale` (e.g. 0.6; older levels: `shrub_distance`, e.g. 35), `draw_distance` (e.g. 300),
+    or `detail_scale = 0.7`;
   - sprites expensive: `particles = reduced`;
   - turn off `distort` or `envmap` to see what they cost.
   Keep `mipmaps = on` and `vram_textures = auto`: without them the GPU reads full size textures

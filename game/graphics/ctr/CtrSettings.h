@@ -22,9 +22,8 @@ struct CtrSettings {
   float fog_start = 0.6f;
   // the game's own distance fog (like the PC renderer)
   bool fog = true;
-  // tfrag: the detailed version up to this distance, the coarse one beyond (meters, 0 = always
-  // detailed, as the PS2: its tfrag has no distance LOD). Needs .c3l files with both versions
-  // (ctr_level_converter --far-lod).
+  // far mode: a neighbouring level's landmark ties only within this distance (meters, 0 = no
+  // limit). Tfrag versions follow the PS2's tfrag geomorph.
   float lod_distance = 0.f;
   // a level whose bounds are further than this from the camera (seen from a neighbouring level)
   // is drawn with only its low resolution tfrag, no tie (meters, 0 = off). (AI-assisted) 80 (was

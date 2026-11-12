@@ -5111,7 +5111,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   // tier's mid and far versions of each visibility group, geometries 0 and 1 morphing
   tfrag_lod::Morph tfrag_morph_data;
   float tfrag_dists[3] = {0, 0, 0};
-  if (two_tiers && !opt.merc_only && opt.tfrag_morph && !jak2 && opt.stream &&
+  if (two_tiers && !opt.merc_only && opt.tfrag_morph && opt.stream &&
       opt.tfrag_geo == 0 && opt.far_tfrag_geo == 2) {
     const fs::path dir =
         opt.tfrag_morph_dir.empty() ? in.parent_path() : fs::path(opt.tfrag_morph_dir);

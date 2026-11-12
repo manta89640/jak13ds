@@ -377,7 +377,7 @@ std::string CtrSettings::summary() const {
   // the fixed detail floor (CtrDetail.h): what it changes from the config
   auto floor_text = [&]() {
     const ctr_detail::Floor fl = ctr_detail::floor_of(
-        tie_lod_px, lod_distance, tie_distance_scale, draw_distance,
+        tie_lod_px, tie_distance_scale, draw_distance,
         g_game_version == GameVersion::Jak1, g_game_version == GameVersion::Jak2);
     if (!fl.on) {
       return std::string("no floor");
@@ -389,9 +389,6 @@ std::string CtrSettings::summary() const {
     }
     if (fl.tie_lod_px != tie_lod_px) {
       r += fmt::format(", tie_lod_px {:.0f}", fl.tie_lod_px);
-    }
-    if (fl.lod_distance != lod_distance) {
-      r += fmt::format(", lod {:.0f}m", fl.lod_distance);
     }
     if (fl.tie_distance_scale != tie_distance_scale) {
       r += fmt::format(", ties x{:.1f}", fl.tie_distance_scale);
