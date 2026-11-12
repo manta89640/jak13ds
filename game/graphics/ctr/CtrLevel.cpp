@@ -5760,7 +5760,7 @@ void load_shrub_fade(c3l::Reader& f,
     for (u32 r = r0; r < r0 + ch.vis_run_count; r++) {
       if (bands[r]) {
         w = std::max(w, (float)(bands[r] & 0xffff));
-        x = std::min(x, (float)(bands[r] >> 16));
+        x = std::min({x, (float)(bands[r] >> 16), (bands[r] & 0xffff) / ctr_detail::kFadeBand});
       }
     }
     if (w > 0) {
@@ -11433,10 +11433,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   if (reveal) {
     lev.reveal_frame = rs.frame_idx;
   }
-  // ctr_pop: counted while the picture goes on (no cut, zoom, reveal or black screen)
+  // ctr_pop: counted while the picture goes on (no cut, zoom, reveal or black screen, this frame
+  // or the last)
   ctr_pop::Stats& pst = m_levels->pop_stats();
   const u16 pf = (u16)rs.frame_idx, pf_last = (u16)(rs.frame_idx - 1);
-  bool pop_on = !reveal && !g_screen_black;
+  bool pop_on = !reveal && !g_screen_black && !lev.pop_black;
+  lev.pop_black = g_screen_black;
+  float cam_step = 0;  // the camera's move since the last draw
   {
     const float pzw0 = std::abs(cam.perspective[2][3]);
     const float focal =
@@ -11447,6 +11450,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       lev.pop_cam[c] = cam.trans[c];
     }
     constexpr float kCut = 40.f * 4096.f;
+    cam_step = std::sqrt(d2);
     pop_on = pop_on && d2 < kCut * kCut && focal < lev.pop_cam[3] * 1.3f &&
              focal * 1.3f > lev.pop_cam[3];
     lev.pop_cam[3] = focal;
@@ -11693,16 +11697,20 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     return std::max(1.f + fog0[3] * std::clamp(fog0[0] - d * pzw, fog0[1], fog0[2]),
                     (d - f1[1]) * f1[2]);
   };
-  auto pop = [&](ctr_pop::Cause c, const float* b, const char* what, u32 id, bool vista = false) {
+  auto pop = [&](ctr_pop::Cause c, const float* b, const char* what, u32 id, bool vista = false,
+                 const c3l::Chunk* chp = nullptr) {
     if (!pop_on || fog_at(b, vista) >= 0.9f) {
       return;
     }
     pst.pops[c]++;
-    if (pop_log_on()) {
+    // (the first few of each stats line on the 3DS too: every label is attributable on hardware)
+    if (pop_log_on() || pst.logged < ctr_pop::kLogged) {
+      pst.logged++;
       const float x = b[0] - cx, y = b[1] - cy, z = b[2] - cz;
-      lg::info("[popE] f={} {} {}: {} {} d={:.0f} r={:.0f}", rs.frame_idx, lev.name,
-               ctr_pop::kNames[c], what, id, std::sqrt(x * x + y * y + z * z) / 4096.f,
-               b[3] / 4096.f);
+      lg::info("[popE] f={} {} {}: {} {}{} d={:.0f} r={:.0f}", rs.frame_idx, lev.name,
+               ctr_pop::kNames[c], what, id,
+               chp ? fmt::format(" kind {} tier {}", chp->kind, chp->lod_tier) : std::string(),
+               std::sqrt(x * x + y * y + z * z) / 4096.f, b[3] / 4096.f);
     }
   };
   bool dist_cfg = true;  // decide_dist: the config's limit would draw it
@@ -11728,14 +11736,18 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       const float lim = lim_of(tie_limit(ci, ch));
       const float dx = ch.bsphere[0] - cx, dy = ch.bsphere[1] - cy, dz = ch.bsphere[2] - cz;
       const float d2 = dx * dx + dy * dy + dz * dz;
+      // (no band: the draw distance's haze is over the cut)
+      auto has_band = [&](float l) {
+        return l < draw_dist || !(draw_dist > 0) || (vista_ok && lev.vista_copy[ci]);
+      };
       auto alpha = [&](float l) {
         const float in = l + ch.bsphere[3], out = l * ctr_detail::kFadeBand + ch.bsphere[3];
         if (!(l > 0) || d2 <= in * in) {
           return 1.f;
         }
-        const bool band = l < draw_dist || !(draw_dist > 0) || (vista_ok && lev.vista_copy[ci]);
-        return !band || d2 >= out * out ? 0.f
-                                        : ctr_detail::band_alpha(std::sqrt(d2) - ch.bsphere[3], l);
+        return !has_band(l) || d2 >= out * out
+                   ? 0.f
+                   : ctr_detail::band_alpha(std::sqrt(d2) - ch.bsphere[3], l);
       };
       const bool was_in = state & 4;
       const bool copy = vista_ok && lev.vista_copy[ci];
@@ -11751,8 +11763,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       state |= kChunkDecided;
       dist_cfg = dist_ok || (dfl.on && q(alpha(lim_of(cfg_limit(ch)))) != 0);
       if (was_in != dist_ok) {
-        const float out = lim * ctr_detail::kFadeBand + ch.bsphere[3];
-        m_pop_why[ci] = (dist_ok ? fade >= kRunOpaque : d2 < out * out) ? 1 + ctr_pop::kLimit : 0xff;
+        // ctr_pop: the fade is a function of the camera's position: a step only without a band
+        m_pop_why[ci] = has_band(lim) ? 0xff : 1 + ctr_pop::kLimit;
       }
       state = (u8)(dist_ok ? (state | 4) : (state & ~4));
       return dist_ok;
@@ -11883,6 +11895,31 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const float x = b[0] - cx, y = b[1] - cy, z = b[2] - cz;
     const float r = ctr_detail::kNearRingMeters * 4096.f + b[3];
     return x * x + y * y + z * z < r * r;
+  };
+  // ctr_pop: a group's version that goes was on screen last frame: the group in that frame's view
+  // and the chunk of that version (its units', else its coarse one) drawn. A switch from what wasn't
+  // (out of view, culled run by run, or the level's string all zero) shows nothing
+  auto went_drawn = [&](const float* b, bool from_units, const u32* gu, u32 cnt, u16 coarse) {
+    for (int i = 0; i < 4; i++) {
+      const auto& p = lev.pop_planes;
+      if (!(p[0][i] * b[0] + p[1][i] * b[1] + p[2][i] * b[2] - p[3][i] > -b[3])) {
+        return false;
+      }
+    }
+    if (!from_units) {
+      return coarse != 0xffff && lev.pop_drawn_at[coarse] == pf_last;
+    }
+    for (u32 j = 0; j < cnt; j++) {
+      if (lev.pop_drawn_at[lev.stream_units[gu[j]].chunk] == pf_last) {
+        return true;
+      }
+    }
+    return false;
+  };
+  auto gu_of = [&](size_t g) -> const u32* {
+    return has_units && g < lev.group_unit_count.size() && lev.group_unit_count[g]
+               ? &lev.group_units[lev.group_unit_first[g]]
+               : nullptr;
   };
   if (tie_lod) {
     u32 near = 0;
@@ -12048,7 +12085,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           m_pop_kept.push_back((u32)g);
         }
         if ((st & 2) && v_old != v && (forced || (st & 16)) && pop_on && !covered &&
-            sphere_in_view(cam, lg.bsphere)) {
+            sphere_in_view(cam, lg.bsphere) &&
+            went_drawn(lg.bsphere, forced, gu_of(g), gu_of(g) ? lev.group_unit_count[g] : 0,
+                       lev.pop_far_chunk[g])) {
           pop(!forced ? ctr_pop::kLate
               : gone     ? ctr_pop::kEvict
                          : ctr_pop::kUnit,
@@ -12284,7 +12323,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         m_pop_kept.push_back((u32)g | 0x80000000u);
       }
       if ((st & 9) != v && (forced || (st & 64)) && pop_on && !ramp &&
-          rs.frame_idx > lev.reveal_frame + 1 && sphere_in_view(cam, b)) {
+          rs.frame_idx > lev.reveal_frame + 1 && sphere_in_view(cam, b) &&
+          went_drawn(b, forced, cnt ? &lev.tf_units[lev.tf_unit_first[g]] : nullptr, cnt,
+                     lev.pop_tf_chunk[g])) {
         pop(!forced ? ctr_pop::kLate
             : gone     ? ctr_pop::kEvict
             : held_now ? ctr_pop::kHold
@@ -12525,7 +12566,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         // per run bands (the PS2's x and w of its prototype), else the chunk's class band
         const bool banded = !lev.run_band.empty() && lev.chunk_band_x[ci] > 0;
         const float band_k = shrub_k * det * (1.f / 16.f) * 4096.f;
-        float near_lim = banded ? std::min(lev.chunk_band_x[ci] * shrub_k * det, lim)
+        float near_lim = banded ? std::min(lev.chunk_band_x[ci] * shrub_k * det,
+                                           lim / ctr_detail::kFadeBand)
                                 : lim * kShrubNearK;
         const float lim_c = lim;
         const float dcx = ch.bsphere[0] - cam.trans[0], dcy = ch.bsphere[1] - cam.trans[1],
@@ -12537,23 +12579,19 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                                 : (lev.chunk_run_count[ci] ? lev.chunk_run_count[ci]
                                                            : ch.vis_run_count);
         u8* const rin = lev.run_dist_in.data();
-        // ctr_pop: a run's fade that jumps by a quarter or more between two frames it is drawn in
+        // ctr_pop: a drawn run's fade that jumps by a quarter or more between two frames, beyond
+        // what the camera's step over its band explains
         const bool fade_seen = pop_on && lev.pop_drawn_at[ci] == pf_last;
         u32 fade_jumps = 0;
         u8& cst = lev.chunk_state[ci];
-        if (dc + ch.bsphere[3] <= near_lim) {
-          // all of it within full detail: every run in, none faded (no per run test)
-          if (cst & 8) {
-            for (u32 r = r0; r < r0 + nr; r++) {
-              fade_jumps += rin[r] + 32 <= kRunOpaque;
-            }
-            cst &= (u8)~8;
-          }
+        const bool all_near = dc + ch.bsphere[3] <= near_lim;
+        if (all_near && !(cst & 8)) {
+          // all of it within full detail since the last draw: every run in, none faded
           for (u32 r = r0; r < r0 + nr; r++) {
             rin[r] = kRunOpaque;
           }
         } else {
-          cst |= 8;
+          cst = (u8)(all_near ? (cst & ~8) : (cst | 8));
           if (!runs_valid) {
             for (u32 r = r0; r < r0 + nr; r++) {
               m_run_shown[r] = 1;
@@ -12566,16 +12604,18 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           for (u32 r = r0; r < r0 + nr; r++) {
             const auto& rs_ = lev.run_spheres[r];
             u8 fade = kRunOpaque;
+            float rb = chunk_band;
             if (rs_.r != 0xffff) {
               const float x = ch.origin[0] + rs_.c[0] * ch.scale - cam.trans[0];
               const float y = ch.origin[1] + rs_.c[1] * ch.scale - cam.trans[1];
               const float z = ch.origin[2] + rs_.c[2] * ch.scale - cam.trans[2];
               const float d = std::sqrt(x * x + y * y + z * z) - (float)rs_.r * ch.scale;
               const u32 b = banded && r < lev.run_band.size() ? lev.run_band[r] : 0;
-              float rl = lim_c, rn = near_lim, rb = chunk_band;
+              float rl = lim_c, rn = near_lim;
               if (b) {
+                // (a fade band of at least the limits' standard one: a PS2 x of w was a step)
                 rl = std::min((float)(b & 0xffff) * band_k, lim);
-                rn = std::min((float)(b >> 16) * band_k, rl);
+                rn = std::min((float)(b >> 16) * band_k, rl / ctr_detail::kFadeBand);
                 rb = 128.f / std::max(rl - rn, 1.f);
               }
               if (d > rn) {
@@ -12583,7 +12623,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                 fade = (u8)std::clamp((int)std::lround((rl - d) * rb), 0, (int)kRunOpaque);
               }
             }
-            fade_jumps += std::abs((int)fade - (int)rin[r]) >= 32;
+            const int jump = std::abs((int)fade - (int)rin[r]);
+            fade_jumps += m_run_shown[r] && jump >= 32 && jump > rb * cam_step + 8.f;
             rin[r] = fade;
             m_run_fade[r] = fade;
             if (!fade) {
@@ -12605,9 +12646,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             return;
           }
           partly = partly || shown < nr || faded;
-        }
-        if (fade_seen && fade_jumps && dc + ch.bsphere[3] <= near_lim) {
-          pop(ctr_pop::kShrub, ch.bsphere, "shrub runs", fade_jumps);
         }
       }
       // the vista copies fading in over their chunks: blended, after the opaque draws
@@ -12660,12 +12698,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         faded = faded || any;
         partly = partly || any;
       }
-      // ctr_pop: drawn now, not chosen last frame
-      if (!sel_last && m_pop_why[ci] != 0xff && !lev.is_unit(ci)) {
+      // ctr_pop: drawn now, not chosen last frame (under a quarter of its alpha: it fades in)
+      if (!sel_last && m_pop_why[ci] != 0xff && !lev.is_unit(ci) && m_tie_fade[ci] >= 32) {
         pop(vista_tier ? ctr_pop::kVista
                        : m_pop_why[ci] ? (ctr_pop::Cause)(m_pop_why[ci] - 1)
                                        : ctr_pop::kOther,
-            ch.bsphere, "chunk in", (u32)ci, vista_tier || vista_chunk);
+            ch.bsphere, "chunk in", (u32)ci, vista_tier || vista_chunk, &ch);
       }
       lev.pop_drawn_at[ci] = pf;
 #ifndef __3DS__
@@ -13135,11 +13173,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     pop(vista ? ctr_pop::kVista
               : m_pop_why[ci] ? (ctr_pop::Cause)(m_pop_why[ci] - 1)
                               : ctr_pop::kOther,
-        ch.bsphere, "chunk out", ci, vista || (lowres_vista && ch.lod_tier == 3));
+        ch.bsphere, "chunk out", ci, vista || (lowres_vista && ch.lod_tier == 3), &ch);
   }
   lev.pop_drawn.clear();
   for (const auto& vc : m_visible) {
     lev.pop_drawn.push_back(vc.chunk);
+  }
+  for (int c = 0; c < 4; c++) {
+    for (int i = 0; i < 4; i++) {
+      lev.pop_planes[c][i] = cam.planes[c][i];
+    }
   }
   // ... a group kept far or coarse for want of its near data: that version's chunk is chosen
   for (const u32 k : m_pop_kept) {

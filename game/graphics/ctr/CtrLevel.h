@@ -72,6 +72,7 @@ constexpr const char* kNames[kCauses] = {
     "shrub fade",  "vista",        "tier switch", "held far", "unit limit", "mesh or rule"};
 enum HoleKind : u8 { kHoleTfrag, kHoleTie, kHoleVista, kHoleKinds };
 constexpr u32 kHoleFrames = 15;  // a hole this long is counted (0.5 s)
+constexpr u32 kLogged = 4;       // pops logged per stats line ([popE])
 struct Stats {
   u32 pops[kCauses] = {};
   u32 hole_frames[kHoleKinds] = {};  // chunk frames
@@ -82,6 +83,7 @@ struct Stats {
   u32 morph_in = 0, morph_out = 0;   // near chunks that came / went in view under a morph
   u32 holes = 0, hole_longest = 0;   // holes of kHoleFrames or more that ended; frames
   u32 frames = 0;
+  u32 logged = 0;
 };
 }  // namespace ctr_pop
 
@@ -330,6 +332,8 @@ struct CtrLevelData {
   std::vector<u8> vista_copy;
   std::vector<u16> pop_far_chunk, pop_tf_chunk;  // per tie LOD / tfrag group: its far version's chunk
   float pop_cam[4] = {0, 0, 0, 0};
+  float pop_planes[4][4] = {};  // the last draw's view planes (as CtrBackgroundCamera::planes)
+  bool pop_black = false;       // the last draw's screen was black
   std::vector<u32> hole_since, hole_last;
   bool cull_made = false;
   size_t cull_sizes[3] = {0, 0, 0};  // chunks, tie LOD groups, chunk_unit when made
