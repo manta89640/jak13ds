@@ -2908,6 +2908,7 @@ void tod_light_table(CtrLevelData::Tod& t) {
   t.lday.assign((size_t)t.lcolors * 3, 0);
   t.lrgb.assign(t.lent.size(), 0);
   t.lchg.assign(t.lent.size(), 1);
+  t.lstamp.assign(t.lent.size(), 0);
   t.lday_ver = t.lrgb_ver = t.lprev_ver = 0;
 }
 
@@ -2977,14 +2978,22 @@ void tod_light_refresh(CtrLevelData::Tod& t) {
     lchg[k] = rgba != lrgb[k];
     lrgb[k] = rgba;
   }
-  const c3l::TodMul* const muls = t.muls.data();
-  for (u32 k = nl; k < (u32)t.lent.size(); k++) {
-    const u32 rgba = tod_mul_rgb(lrgb[t.lmul_color[k - nl]], muls[t.lent[k] - nc]);
-    lchg[k] = rgba != lrgb[k];
-    lrgb[k] = rgba;
-  }
+  // (the TodMuls when a light vertex drawn needs one: tod_light_mul)
+  (void)nc;
   t.lprev_ver = t.lrgb_ver;
   t.lrgb_ver = t.ver;
+}
+
+// Compact entry k (a TodMul) at the table's version: made at its first use in a refresh, its
+// change against its last making (a group holding the refresh before made it then)
+inline void tod_light_mul(CtrLevelData::Tod& t, u32 k) {
+  if (t.lstamp[k] == t.lrgb_ver) {
+    return;
+  }
+  t.lstamp[k] = t.lrgb_ver;
+  const u32 rgba = tod_mul_rgb(t.lrgb[t.lmul_color[k - t.lcolors]], t.muls[t.lent[k] - t.color_count]);
+  t.lchg[k] = rgba != t.lrgb[k];
+  t.lrgb[k] = rgba;
 }
 
 // The title's entry copies (Tod::chunk_entries): u32 count, then the entries
@@ -4045,7 +4054,7 @@ u32 tod_light_write(CtrLevelData& lev, size_t ci, const u8* shown) {
   }
   const u32* const lrgb = t.lrgb.data();
   const u8* const lchg = t.lchg.data();
-  const u32 keep = t.keep_alpha, ver = t.ver, prev = t.lprev_ver;
+  const u32 keep = t.keep_alpha, ver = t.ver, prev = t.lprev_ver, nl = t.lcolors;
   const u32* it = t.light_items.data() + ct.light_first;
   const u32* const end = it + ct.light_n;
   u32 written = 0, lo = UINT32_MAX, hi = 0, least = ver;
@@ -4069,6 +4078,9 @@ u32 tod_light_write(CtrLevelData& lev, size_t ci, const u8* shown) {
     const bool part = gr.lver && gr.lver == prev;
     for (; it < end && (*it & 0xffff) <= ghi; it++) {
       const u32 x = *it, k = x >> 16, vi = x & 0xffff;
+      if (k >= nl) {
+        tod_light_mul(t, k);
+      }
       if (part && !lchg[k]) {
         continue;
       }
@@ -8141,7 +8153,15 @@ void CtrLevels::process_pending_loads(u64 frame) {
     update_level_count();
   }
   stream_take_pending(frame);  // (AI-assisted, streaming) the near chunks read, colored
-  stream_update(frame);        // (AI-assisted, streaming) the near chunks around the camera
+  // the near chunks around the camera: every other frame (its lead is 2 s of the camera's
+  // travel; 1.4-2.7 ms a call on hardware), every frame while the screen is black or after a cut
+  constexpr u64 kHurryFrames = 90;  // (as stream_update's burst after a cut)
+  const bool stream_hurry = m_game_black.load(std::memory_order_relaxed) ||
+                            m_hold_black.load(std::memory_order_relaxed) ||
+                            (m_cut_frame && frame < m_cut_frame + kHurryFrames);
+  if (!(frame & 1) || stream_hurry) {
+    stream_update(frame);
+  }
   tod_sweep(frame);
   // (AI-assisted) levels that loaded with parts left out (no memory then): made again once the last
   // frame's free linear memory covers them (another level was unloaded, or this one's textures
