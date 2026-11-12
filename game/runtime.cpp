@@ -45,6 +45,7 @@
 #include "game/kernel/common/klisten.h"
 #include "game/kernel/common/kmachine.h"
 #include "game/kernel/common/kmalloc.h"
+#include "game/kernel/common/memory_layout.h"
 #include "game/kernel/common/kmemcard.h"
 #include "game/kernel/common/kperf.h"
 #include "game/kernel/common/kprint.h"
@@ -104,6 +105,7 @@
 
 u8* g_ee_main_mem = nullptr;
 u8* g_ee_main_mem_exec = nullptr;
+u32 g_ee_main_mem_size = EE_MAIN_MEM_SIZE;
 std::thread::id g_main_thread_id = std::thread::id();
 GameVersion g_game_version = GameVersion::Jak1;
 BackgroundWorker g_background_worker;
@@ -173,9 +175,20 @@ void ee_runner(SystemThreadInterface& iface) {
   // Apple Silicon uses separate writable and executable mappings for EE memory.
 #if defined(__3DS__)
   // No mmap. GOAL code is compiled to C, so the memory doesn't need to be executable.
-  g_ee_main_mem = (u8*)memalign(4096, EE_MAIN_MEM_SIZE);
+  // Without a debug heap (-debug, -debug-mem) nothing uses the memory above the kernel stack
+  // (memory_layout.h): left out but for a margin, 4 MB of the malloc heap.
+  bool debug_heap = false;
+  for (int i = 0; i < g_argc; i++) {
+    debug_heap = debug_heap || !strcmp(g_argv[i], "-debug") || !strcmp(g_argv[i], "-debug-mem");
+  }
+  if (!debug_heap) {
+    g_ee_main_mem_size = DEBUG_HEAP_START + 0x10000;
+  }
+  g_ee_main_mem = (u8*)memalign(4096, g_ee_main_mem_size);
+  lg::info("EE memory: {} KB of {} KB ({})", g_ee_main_mem_size >> 10, EE_MAIN_MEM_SIZE >> 10,
+           debug_heap ? "with the debug heap" : "no debug heap");
   if (!g_ee_main_mem) {
-    lg::error("Failed to allocate {} MB of main memory!", EE_MAIN_MEM_SIZE >> 20);
+    lg::error("Failed to allocate {} MB of main memory!", g_ee_main_mem_size >> 20);
     iface.initialization_complete();
     return;
   }
@@ -245,7 +258,7 @@ void ee_runner(SystemThreadInterface& iface) {
   iface.initialization_complete();
 
   lg::debug("[EE] Run!");
-  memset((void*)g_ee_main_mem, 0, EE_MAIN_MEM_SIZE);
+  memset((void*)g_ee_main_mem, 0, g_ee_main_mem_size);
 
   // prevent access to the first 512 kB of memory.
   // On the PS2 this is the kernel and can't be accessed either.

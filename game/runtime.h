@@ -15,6 +15,8 @@
 #include "system/background_worker.h"
 
 extern u8* g_ee_main_mem;
+// the bytes of it that exist (EE_MAIN_MEM_SIZE; less on the 3DS without a debug heap)
+extern u32 g_ee_main_mem_size;
 // executable view of g_ee_main_mem for GOAL calls
 extern u8* g_ee_main_mem_exec;
 extern GameVersion g_game_version;
