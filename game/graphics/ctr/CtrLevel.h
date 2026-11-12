@@ -282,22 +282,10 @@ struct CtrLevelData {
   bool has_vista = false;  // (AI-assisted) c3l v13 vista tier chunks (CHUNK_KIND_VISTA)
   // (AI-assisted) c3l v14: the shrub chunks' max_dist is their shrubs' PS2 distance
   bool shrub_ps2_dist = false;
-  // (AI-assisted) partial unload: a level only seen from a neighbouring one (far mode: only its
-  // far chunks are drawn) frees the meshes of its other chunks after a while (linear memory for
-  // the level the camera is in), and reads them again from its file when the camera comes back
-  // (CtrLevels::unload_detail / request_detail). (AI-assisted, streammem) Read back in jobs of at
-  // most kDetailJobBytes (the tfrag first, then the nearest), each one's meshes kept; meanwhile a
-  // camera within far_level_distance draws it in near mode with what is there (its tfrag the far
-  // tier's while some of tiers 1 / 2 are missing: detail_tfrag_missing).
   std::string path;  // the .c3l file
   u32 vertex_data_offset = 0, index_data_offset = 0;
   u32 merc_vertex_offset = 0, merc_index_offset = 0;  // (AI-assisted) for incomplete loads
   std::vector<u32> mesh_index_first, mesh_index_end;  // per chunk: its index range in the file
-  bool detail_loaded = true;      // the meshes of all chunks are there
-  bool detail_requested = false;  // their reload is queued
-  u32 far_frames = 0;             // frames in a row beyond the unload distance
-  u64 detail_retry_frame = 0;     // after a failed reload (no memory): not before this frame
-  u32 detail_tfrag_missing = 0;   // (AI-assisted, streammem) tier 1 / 2 tfrag chunks not back yet
   // (AI-assisted) the load ran out of linear memory even after making room: some chunk or merc
   // meshes (or the texture pool) are missing. They are made again from the file once the memory
   // is there (CtrLevels::process_pending_loads, request_repair), while the level is drawn.
@@ -323,12 +311,9 @@ struct CtrLevelData {
   bool vista_ok_last = false;
   u64 vista_ok_frame = 0;
   std::vector<u8> chunk_vok;
-  // (AI-assisted, j2-mem) Jak II: a level the game's visibility string has hidden whole for a while
-  // (dormant_levels; CtrLevel.cpp "Dormant levels")
-  bool dormant = false;
-  u32 hidden_frames = 0;        // level draws in a row with its string all zero
-  // (AI-assisted, j2intro) the frame its string showed it again after it was dormant (a reveal: the
-  // title intro's first frame); CtrLevels::note_late_in_view
+  // Jak II: the game's visibility string hid the level whole at its last draw
+  bool hidden = false;
+  // the frame its string showed it again after hiding it (a reveal); CtrLevels::note_late_in_view
   u64 shown_frame = 0;
   u32 vis_scan_bytes = UINT32_MAX;  // the string's bytes its ids are in (UINT32_MAX: not known yet)
   std::vector<u8> chunk_all_vis;  // per chunk: a zero string hides all of its runs (draw_level)
@@ -827,8 +812,6 @@ class CtrLevels {
    * a partial unload and a reload / repair of parts (never 0). */
   u32 set_generation() const { return m_set_gen; }
   /*! Partial unload (render thread): free the meshes a far level doesn't draw / read them again. */
-  void unload_detail(CtrLevelData& lev);
-  void request_detail(CtrLevelData& lev);
   /*! Jak II, render thread, each frame: the chunks with a draw distance read and freed by need
    * under one budget of linear memory (CtrLevel.cpp "Residency by need"). parts_room: the meshes
    * of the parts jobs in flight; claim: what else waits for linear memory (the stream arena) */
@@ -1023,7 +1006,7 @@ class CtrLevels {
     std::string name;
     bool common = false;
     bool prefetch = false;
-    // detail reload (request_detail) or (AI-assisted) repair of an incomplete load
+    // read by need (with dormant) or repair of an incomplete load
     // (request_repair): only these parts of the loaded level `generation`
     bool detail = false;
     bool repair = false;
@@ -1058,10 +1041,9 @@ class CtrLevels {
     bool ring0 = false;   // (stream) starts with ring 0 units
     // (AI-assisted, streammem) the linear memory the job's meshes take (parts jobs: kept free of
     // the stream arena's growth while it is queued or runs), when it was queued (the loader's
-    // aging), a detail reload with more chunks after these (read by the next one)
+    // aging)
     u64 room_bytes = 0;
     double queued_ms = 0;
-    bool detail_more = false;
     bool parts() const { return detail || repair || stream; }
     // in m_requested
     std::string key() const {

@@ -241,7 +241,7 @@ int missing_parts(const CtrLevelData& lev, u32* bytes) {
     const auto& ch = lev.chunks[ci];
     // (AI-assisted, streaming) near chunks: streamed (or never there), not missing
     if (lev.meshes[ci] < 0 && lev.mesh_index_first[ci] != UINT32_MAX && !lev.is_unit(ci) &&
-        !lev.dormant_freed(ci) && (lev.detail_loaded || far_chunk(lev, ch))) {
+        !lev.dormant_freed(ci)) {
       n++;
       b += ch.vertex_count * (u32)sizeof(c3l::Vertex) +
            (lev.mesh_index_end[ci] - lev.mesh_index_first[ci]) * (u32)sizeof(u16);
@@ -259,20 +259,6 @@ int missing_parts(const CtrLevelData& lev, u32* bytes) {
     b += lev.tex_pool_bytes;
   }
   *bytes = b;
-  return n;
-}
-
-// (AI-assisted, streammem) the tfrag chunks of tiers 1 / 2 a partial unload freed that aren't back
-// yet (draw_level draws the level's tfrag by far mode's rules while there are some: a cell's tier 1
-// or 2 version missing would be a hole, the far tier is always there)
-u32 tfrag_missing(const CtrLevelData& lev) {
-  u32 n = 0;
-  for (size_t ci = 0;
-       ci < lev.chunks.size() && ci < lev.meshes.size() && ci < lev.mesh_index_first.size(); ci++) {
-    const auto& ch = lev.chunks[ci];
-    n += (ch.lod_tier == 1 || ch.lod_tier == 2) && lev.meshes[ci] < 0 &&
-         lev.mesh_index_first[ci] != UINT32_MAX && !lev.is_unit(ci) && !far_chunk(lev, ch);
-  }
   return n;
 }
 
@@ -1407,9 +1393,8 @@ void CtrLevels::delete_parts(Done& d) {
   delete_textures(&d.tex);
 }
 
-// (AI-assisted) render thread: what a detail reload / repair made, for the same load of the level
-// (else deleted). (AI-assisted, streammem) Every kind keeps what it made; a detail reload's level
-// counts as loaded (detail_loaded) once its last job made everything.
+// render thread: what a read by need / repair made, for the same load of the level (else deleted).
+// Every kind keeps what it made.
 void CtrLevels::take_parts(Done& d, u64 frame) {
   const std::string& name = d.job.name;
   auto it = m_levels.find(name);
@@ -1417,9 +1402,7 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
                           ? it->second.get()
                           : nullptr;
   if (lev) {
-    (d.job.dormant  ? lev->dormant_requested
-     : d.job.detail ? lev->detail_requested
-                    : lev->repair_requested) = false;
+    (d.job.dormant ? lev->dormant_requested : lev->repair_requested) = false;
     bump_set_generation();  // (AI-assisted)
   }
   // the chunks of the job that didn't come are absent again (another read when needed)
@@ -1438,7 +1421,7 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
   // a read that ran short (the heap in pieces): what it made is taken, the rest asked for again
   // a second later
   if (lev && d.yielded) {
-    lev->dormant_retry_frame = lev->detail_retry_frame = frame;
+    lev->dormant_retry_frame = frame;
   } else if (lev && d.job.dormant && d.result != LoadResult::LOADED) {
     lev->dormant_retry_frame = frame + 30;
     if (lev->dist_warn_ms <= 0 || ctr_gpu_time_ms() - lev->dist_warn_ms >= kPartsLogMs) {
@@ -1446,15 +1429,6 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
       lg::warn("[ctr] {}: {} of {} chunks read (no memory for the others yet; {})", name,
                d.meshes.size(), d.job.chunks.size(), linear_room_text());
     }
-  }
-  // (AI-assisted, streammem) a detail reload that ran short keeps what it made too; the rest is
-  // read by the next one (collect_chunks: the chunks without a mesh), soon when this one made
-  // some, else after a wait (not every frame while the memory isn't there)
-  if (lev && !d.yielded && d.job.detail && !d.job.dormant && d.result != LoadResult::LOADED) {
-    lev->detail_retry_frame = frame + (d.meshes.empty() ? 300 : 30);
-    lg::warn("[ctr] {}: {} of {} detail meshes read again (no memory for the others yet), the "
-             "rest later",
-             name, d.meshes.size(), d.job.chunks.size());
   }
   if (!lev) {
     delete_parts(d);
@@ -1502,16 +1476,6 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
     made++;
   }
   delete_parts(d);
-  if (d.job.detail && !d.job.dormant) {
-    // (AI-assisted, streammem) jobs of kDetailJobBytes: the next one at the next draw
-    if (d.result == LoadResult::LOADED && !d.job.detail_more) {
-      lev->detail_loaded = true;
-      lg::info("[ctr] {}: detail meshes back ({})", name, made);
-    } else if (d.result == LoadResult::LOADED) {
-      lev->detail_retry_frame = 0;
-    }
-    lev->detail_tfrag_missing = lev->detail_loaded ? 0 : tfrag_missing(*lev);
-  }
   if (lev->incomplete) {
     u32 bytes = 0;
     const int left = missing_parts(*lev, &bytes);
@@ -1527,43 +1491,11 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
   }
 }
 
-void CtrLevels::unload_detail(CtrLevelData& lev) {
-  const bool was_loaded = lev.detail_loaded;  // (AI-assisted, streammem) or partly read back
-  int freed = 0;
-  for (size_t ci = 0; ci < lev.chunks.size() && ci < lev.meshes.size(); ci++) {
-    // (AI-assisted) what far mode draws stays (far_chunk)
-    if (!far_chunk(lev, lev.chunks[ci]) && lev.meshes[ci] >= 0 && !lev.is_unit(ci)) {
-      ctr_gpu_mesh_delete(lev.meshes[ci]);  // freed after the GPU is done with it
-      lev.meshes[ci] = -1;
-      forget_chunk_colors(lev, ci);
-      if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
-        tod_drop_entries(*lev.tod, ci);
-      }
-      // (Jak II: a chunk with a draw distance comes back by need, not with the detail reload)
-      if (g_game_version == GameVersion::Jak2 && ci < lev.chunk_dormant.size() &&
-          lev.chunk_dormant[ci] == 0 && dist_frees(lev, ci)) {
-        lev.chunk_dormant[ci] = CtrLevelData::kDistFreed;
-      }
-      freed++;
-    }
-  }
-  lev.detail_loaded = false;
-  lev.far_frames = 0;
-  lev.detail_tfrag_missing = tfrag_missing(lev);  // (AI-assisted, streammem)
-  if (was_loaded || freed) {
-    bump_set_generation();  // (AI-assisted)
-    lg::info("[ctr] {}: only seen from far away, {} detail meshes freed", lev.name, freed);
-  }
-}
-
-// ---- Dormant levels (Jak II, config dormant_levels) ----
-// A level the game's visibility string hides whole for kDormantFrames level draws is dormant: it
-// wants no near chunks, and its tie chunks with a draw distance that the string hides are needed
-// only within kNeedDormMeters ("Residency by need"). One not back when the string shows the level
-// again isn't drawn; once its mesh comes it fades in (kArriveFrames).
+// ---- Hidden levels (Jak II) ----
+// A level the game's visibility string hides whole (CtrLevelData::hidden) wants no near chunks, and
+// its chunks with a draw distance that the string hides are needed only within kNeedDormMeters
+// ("Residency by need"). An absent managed chunk fades in once its mesh comes (kArriveFrames).
 namespace {
-constexpr u32 kDormantFrames = 90;  // 3 s at 30 fps
-// a dormant chunk's arrival in view: faded in over this many frames (chunk_hold_since)
 constexpr u32 kArriveFrames = 8;
 constexpr u32 kArrived = 0x80000000u;
 // a chunk the visibility string hides whole when it is zero: visibility runs, each with an id
@@ -1762,7 +1694,7 @@ bool CtrLevels::coming() {
     return true;
   }
   for (const auto& [name, lev] : m_levels) {
-    if (lev->dormant_requested || lev->detail_requested || lev->repair_requested) {
+    if (lev->dormant_requested || lev->repair_requested) {
       return true;
     }
   }
@@ -1817,7 +1749,7 @@ void CtrLevels::need_scan(const float pos[kNeedPos][3], int np, u64 frame) {
         fl = CtrLevelData::kDistFreed;  // left out by a load or a read short of memory
         left_out = true;
       }
-      const bool hidden = lev.dormant && ch.kind == c3l::CHUNK_KIND_TIE && chunk_hideable(lev, ci);
+      const bool hidden = lev.hidden && chunk_hideable(lev, ci);
       float reach = need_reach(lev, ch);
       if (hidden) {
         reach = std::min(reach, kNeedDormMeters * kM);
@@ -2071,7 +2003,11 @@ void CtrLevels::need_update(u64 frame, u32 free_now, u64 parts_room, bool level_
   if (coming) {
     bump_set_generation();
   }
-  // more needed than fits: logged (a load's or a repair's wait alone: four times as long first)
+  // more needed than fits on screen: logged (a load's or a repair's wait alone: four times as long
+  // first). While the game is black a load and the reads for the place it shows take turns
+  if (m_game_black.load(std::memory_order_relaxed)) {
+    short_bytes = 0;
+  }
   m_dst.short_max = std::max(m_dst.short_max, short_bytes);
   if (short_bytes) {
     m_dst.short_passes++;
@@ -2254,7 +2190,7 @@ void CtrLevels::title_update(u64 frame) {
       lev.title_pass = false;
     }
     // the title came with the level there: what the path can't draw freed, once
-    if (keep_out && drawn && !lev.title_pass && lev.detail_loaded && !lev.repair_requested) {
+    if (keep_out && drawn && !lev.title_pass && !lev.repair_requested) {
       lev.title_pass = true;
       if (lev.chunk_dormant.size() != lev.chunks.size()) {
         lev.chunk_dormant.assign(lev.chunks.size(), 0);
@@ -2315,7 +2251,7 @@ void CtrLevels::title_update(u64 frame) {
       }
       continue;
     }
-    if (back.empty() || lev.dormant_requested || lev.detail_requested || lev.repair_requested ||
+    if (back.empty() || lev.dormant_requested || lev.repair_requested ||
         frame < lev.dormant_retry_frame) {
       continue;
     }
@@ -2366,7 +2302,7 @@ void CtrLevels::collect_chunks(const CtrLevelData& lev,
     // (the chunks absent by need or left out by the title come back by theirs)
     if (lev.meshes[ci] < 0 && lev.mesh_index_first[ci] != UINT32_MAX && !lev.is_unit(ci) &&
         !(ci < lev.chunk_dormant.size() && lev.chunk_dormant[ci] >= CtrLevelData::kDistFreed) &&
-        (!missing_only || ((lev.detail_loaded || far_chunk(lev, ch)) && !lev.dormant_freed(ci)))) {
+        (!missing_only || !lev.dormant_freed(ci))) {
       out->push_back({(u32)ci, ch.first_vertex, ch.vertex_count, lev.mesh_index_first[ci],
                       lev.mesh_index_end[ci], lev.tail_file(ci), lev.tail_k(ci)});
     }
@@ -2374,60 +2310,6 @@ void CtrLevels::collect_chunks(const CtrLevelData& lev,
   std::sort(out->begin(), out->end(), [](const DetailChunk& a, const DetailChunk& b) {
     return a.first_vertex < b.first_vertex;
   });
-}
-
-void CtrLevels::request_detail(CtrLevelData& lev) {
-  if (lev.repair_requested) {
-    return;  // (AI-assisted) after it
-  }
-  Job job;
-  job.name = lev.name;
-  job.detail = true;
-  job.generation = lev.generation;
-  job.path = lev.path;
-  job.vertex_data_offset = lev.vertex_data_offset;
-  job.index_data_offset = lev.index_data_offset;
-  std::vector<DetailChunk> all;
-  collect_chunks(lev, false, &all);
-  if (all.empty()) {
-    lev.detail_loaded = true;
-    lev.detail_tfrag_missing = 0;
-    return;
-  }
-  // (AI-assisted, streammem) at most kDetailJobBytes per job: the tfrag of tiers 1 / 2 first (the
-  // level's tfrag is drawn by far mode's rules until it is all back), then the nearest chunks
-  float cam[3] = {0, 0, 0};
-  camera_lead(0.f, cam);
-  // (not tfrag, squared distance), index in all
-  std::vector<std::pair<std::pair<int, float>, u32>> order;
-  order.reserve(all.size());
-  for (u32 k = 0; k < all.size(); k++) {
-    const auto& ch = lev.chunks[all[k].chunk];
-    const float dx = ch.bsphere[0] - cam[0], dy = ch.bsphere[1] - cam[1],
-                dz = ch.bsphere[2] - cam[2];
-    const int cls = (ch.lod_tier == 1 || ch.lod_tier == 2) ? 0 : 1;
-    order.push_back({{cls, dx * dx + dy * dy + dz * dz}, k});
-  }
-  std::sort(order.begin(), order.end());
-  u64 bytes = 0;
-  for (const auto& [key, k] : order) {
-    const auto& c = all[k];
-    const u32 b = CtrStreamArena::mesh_bytes(c.vertex_count, c.index_end - c.index_first);
-    if (!job.chunks.empty() && bytes + b > kDetailJobBytes) {
-      break;
-    }
-    bytes += b;
-    job.chunks.push_back(c);
-  }
-  job.detail_more = job.chunks.size() < all.size();
-  std::sort(job.chunks.begin(), job.chunks.end(), [](const DetailChunk& a, const DetailChunk& b) {
-    return a.first_vertex < b.first_vertex;
-  });
-  job.room_bytes = bytes;
-  lev.detail_requested = true;
-  lg::info("[ctr] {}: camera coming back, reading {} of {} detail meshes ({} KB)", lev.name,
-           job.chunks.size(), all.size(), bytes / 1024);
-  request(job);
 }
 
 void CtrLevels::request_repair(CtrLevelData& lev) {
@@ -7983,7 +7865,7 @@ void CtrLevels::process_pending_loads(u64 frame) {
     ctr_gpu_get_stats(&st);
     m_stream_repair_room = 0;
     for (auto& [name, lev] : m_levels) {
-      if (level_loading || !lev->incomplete || lev->repair_requested || lev->detail_requested ||
+      if (level_loading || !lev->incomplete || lev->repair_requested ||
           frame < lev->repair_retry_frame) {
         continue;
       }
@@ -9835,7 +9717,7 @@ void CtrLevels::log_memory() {
     const LevelMem m = level_mem(lev);
     all.heap += m.heap;
     per += fmt::format("{}{}{} {}/{} KB", per.empty() ? "" : ", ", name,
-                       lev.dormant ? " (dormant)" : "", m.linear() / 1024, m.heap / 1024);
+                       lev.hidden ? " (hidden)" : "", m.linear() / 1024, m.heap / 1024);
     all.unhideable += m.unhideable;
     all.unhideable_chunks += m.unhideable_chunks;
     for (int t = 0; t < 4; t++) {
@@ -11472,43 +11354,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     far_level = d2 > mf * mf;
     lev.was_far = far_level;
     far_inside = d2 <= (m * 0.9f) * (m * 0.9f);
-    // (AI-assisted) partial unload (the user's idea): a level seen only from far away for a few
-    // seconds gives back the memory of the chunks far mode doesn't draw; read again when the camera
-    // is within 30 m of the far distance (freed beyond 60 m: no back and forth at one edge)
-    // (AI-assisted, streammem, F3) also when the camera will be there in kReloadLeadFrames at its
-    // speed (the zoomer, running), and at once after a camera cut within the unload distance (a
-    // respawn, a cutscene). Until the meshes are back the level was drawn in far mode, the camera
-    // inside it too (coarse tfrag and landmarks only for the 1.5-2 s citadel's read takes, longer
-    // when it failed); now near mode draws it with what is there: the tie LOD groups' far versions
-    // and the far tier's tfrag are always there (far_tfrag), the rest comes as it is read (in jobs
-    // of kDetailJobBytes, each kept). A partly read back level far away again is freed again.
-    constexpr float kUnloadMeters = 60.f, kReloadMeters = 30.f;
-    constexpr float kReloadLeadFrames = 60.f;  // 2 s at 30 fps (the camera's velocity is per frame)
-    constexpr u32 kUnloadFrames = 300;
-    const float unload_d = m + kUnloadMeters * 4096.f, reload_d = m + kReloadMeters * 4096.f;
-    lev.far_frames = d2 > unload_d * unload_d ? lev.far_frames + 1 : 0;
-    if (lev.far_frames > kUnloadFrames && !lev.detail_requested) {
-      m_levels->unload_detail(lev);  // (resets far_frames; logs only what it freed)
-    } else if (!lev.detail_loaded && !lev.detail_requested &&
-               rs.frame_idx >= lev.detail_retry_frame) {
-      float lead[3];
-      float dl2 = 1e30f;
-      if (m_levels->camera_lead(kReloadLeadFrames, lead)) {
-        dl2 = 0;
-        for (int c = 0; c < 3; c++) {
-          const float o = lead[c] < lev.bbox_min[c]
-                              ? lev.bbox_min[c] - lead[c]
-                              : (lead[c] > lev.bbox_max[c] ? lead[c] - lev.bbox_max[c] : 0.f);
-          dl2 += o * o;
-        }
-      }
-      const u64 cut = m_levels->stream_cut_frame();
-      const bool after_cut = cut && rs.frame_idx <= cut + 3;
-      if (d2 < reload_d * reload_d || dl2 < reload_d * reload_d ||
-          (after_cut && d2 < unload_d * unload_d)) {
-        m_levels->request_detail(lev);
-      }
-    }
     // The switch is level-wide (tiers 1/2 and tier 3 overlap: no chunk by chunk): it waits while
     // something it changes was drawn last frame, near kept out to 1.5 x the distance (not past the
     // unload distance) for at most 10 s, far kept in to half of it for at most 2 s
@@ -11523,7 +11368,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           lev.far_want_frame = rs.frame_idx;
         }
         const u64 waited = rs.frame_idx - lev.far_want_frame;
-        const float rn = std::min(m * 1.5f, unload_d), rf = m * 0.5f;
+        const float rn = m * 1.5f, rf = m * 0.5f;
         const bool bound = want ? (d2 > rn * rn || waited >= kFarHoldNearFrames)
                                 : (d2 < rf * rf || waited >= kFarHoldFarFrames);
         bool seen = false;
@@ -11550,7 +11395,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
       far_level = lev.far_eff != 0;
     }
-    far_tfrag = far_level || (!lev.detail_loaded && lev.detail_tfrag_missing > 0);
+    far_tfrag = far_level;
   }
   m_far_levels += far_level;
   m_level_draws++;
@@ -11567,8 +11412,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const bool ok = m_jak2_slot < CtrJak2Vis::kSlots && v.valid[m_jak2_slot];
     m_vis = settings.vis_culling && ok && !lev.vis_runs.empty() ? v.bits[m_jak2_slot] : nullptr;
     vis_own = m_vis != nullptr;
-    // (AI-assisted, j2-mem) dormant levels: the string all zero (the bytes of the level's ids)
-    if (m_vis && settings.dormant_levels) {
+    // the string all zero (the bytes of the level's ids): nothing of the level can be seen
+    if (m_vis) {
       if (lev.vis_scan_bytes == UINT32_MAX) {
         u32 hi = 0;
         bool any = false;
@@ -11586,21 +11431,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
       j2_hidden = zero;
     }
-    if (settings.dormant_levels) {
-      lev.hidden_frames = j2_hidden ? lev.hidden_frames + 1 : 0;
-      if (j2_hidden && !lev.dormant && lev.hidden_frames >= kDormantFrames) {
-        lev.dormant = true;  // (its far ties freed: CtrLevels::dormant_update)
-        lg::info("[ctr] {}: hidden by the visibility string for {} frames: dormant", lev.name,
-                 kDormantFrames);
-      } else if (!j2_hidden && lev.dormant) {
-        lev.dormant = false;
-        lev.shown_frame = std::max<u64>(rs.frame_idx, 1);  // (AI-assisted, j2intro) a reveal
-        lg::info("[ctr] {}: shown by the visibility string again (camera {:.0f} {:.0f} {:.0f} m)",
-                 lev.name, cam.trans.x() / 4096.f, cam.trans.y() / 4096.f, cam.trans.z() / 4096.f);
-      }
-    } else {
-      lev.dormant = false;  // (its freed chunks still come back by distance)
+    if (lev.hidden && !j2_hidden) {
+      lev.shown_frame = std::max<u64>(rs.frame_idx, 1);  // a reveal (the black hold)
     }
+    lev.hidden = j2_hidden;
   } else {
   const int li = (m_id == (int)jak1::BucketId::TFRAG_LEVEL1 ||
                   m_id == (int)jak1::BucketId::TFRAG_TRANS1_AND_SKY_BLEND_LEVEL1 ||
@@ -12328,8 +12162,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     lev.stream_k = k * 1.1f;
     lev.stream_k_hi = std::max(lev.stream_k, lev.stream_k_hi * 0.99f);
-    if (j2_hidden && settings.dormant_levels) {
-      // (AI-assisted, j2-mem) nothing of it can be seen: no near chunks wanted (theirs go first)
+    if (j2_hidden) {
+      // nothing of it can be seen: no near chunks wanted (theirs go first)
       lev.stream_k = lev.stream_k_hi = 0.f;
     }
     if (has_units && stream_check_enabled()) {
@@ -12480,7 +12314,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_tf_groups[2] += n[2];
     m_tf_frames++;
   }
-  lev.stream_tf_k = tf_on && !(j2_hidden && settings.dormant_levels) ? 1.f : 0.f;
+  lev.stream_tf_k = tf_on && !j2_hidden ? 1.f : 0.f;
   if (has_units) {
     lev.stream_frame = rs.frame_idx;
     m_levels->stream_note_level(lev, late_groups, held_groups, rs.frame_idx, ring0_late);
@@ -12807,7 +12641,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         }
         partly = partly || faded;
       }
-      // a tie chunk in its limit's band: its runs blended by the chunk's fade
+      // a tie chunk in its limit's band, or an arrival: its runs blended by the chunk's fade
       if (m_tie_fade[ci] < kRunOpaque && !vista_tier) {
         const u32 r0 = lev.chunk_first_run[ci];
         const u32 nr = std::max<u32>(lev.chunk_run_count[ci], ch.vis_run_count);
@@ -12815,8 +12649,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           if (!runs_valid) {
             m_run_shown[r] = 1;
             m_run_nomerge[r] = 0;
+            m_run_fade[r] = m_tie_fade[ci];
+          } else {
+            m_run_fade[r] = std::min(m_run_fade[r], m_tie_fade[ci]);  // (a shrub's own fades)
           }
-          m_run_fade[r] = m_tie_fade[ci];
         }
         runs_valid = true;
         faded = true;
@@ -13079,8 +12915,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         fog_at(ch.bsphere, vista) >= 0.9f) {
       return;
     }
-    if (!miss && !vista && lev.vista_copy[ci] && m_vista_src[ci]) {
-      pst.copy_frames++;
+    if (!vista && lev.vista_copy[ci] && m_vista_src[ci]) {
+      pst.copy_frames++;  // (its copy stands in)
       return;
     }
     pst.hole_frames[vista ? ctr_pop::kHoleVista
@@ -13209,15 +13045,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         (m_copy_fade[ci] < kRunOpaque || m_tie_fade[ci] < kRunOpaque)) {
       vista_source(ci);  // (its vista copy with the chunk, in the band)
     }
-    // (AI-assisted, j2-mem) dormant levels: a tie chunk seen without its mesh within its distance
+    // a managed chunk seen without its mesh within its distance: its vista copy stands in, and it
     // fades in over kArriveFrames once it comes (chunk_hold_since: the frame it was seen missing,
     // then its arrival frame | kArrived)
     if (dorm && ch.lod_tier == 0 && !far_level) {
       u32& since = lev.chunk_hold_since[ci];
       if (!dist_ok) {
         since = 0;
-      } else if (meshes[ci] < 0 ? lev.dormant_freed(ci) && !lev.dormant : since != 0) {
-        // (while dormant the string hides it anyway)
+      } else if (meshes[ci] < 0 ? lev.dormant_freed(ci) && !lev.hidden : since != 0) {
+        if (lev.vista_copy[ci]) {
+          vista_source(ci);
+        }
         const bool seen = !string_hides(ci, ch) && sphere_in_view(cam, ch.bsphere);
         if (meshes[ci] < 0) {
           since = seen ? (since && !(since & kArrived) ? since : frame32 & ~kArrived) : 0;

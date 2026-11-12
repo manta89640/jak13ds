@@ -138,11 +138,6 @@ struct CtrSettings {
   // (AI-assisted, j2-mem) stream_kb was in config.ini: else Jak II takes its own size
   // (CtrLevel.cpp ctr_stream_kb)
   bool stream_kb_set = false;
-  // (AI-assisted, j2-mem) Jak II: a level the game's visibility string hides whole for 3 s (ctyindb
-  // seen from the slums) is dormant: no near chunks wanted, and its ties with a distance limit
-  // farther than 100 m from the camera freed; read back within 75 m and all once the string shows
-  // it again (CtrLevel.cpp "Dormant levels", streaming.md). off: all resident.
-  bool dormant_levels = true;
   // (AI-assisted, streaming) the linear heap's floor: the arena grows past stream_kb (segments of
   // 1-4 MB, sized to the near chunks needed now and 2 s ahead) while they don't fit and the heap
   // keeps this much (+ 256 KB) free after it; given back when the heap has less, or a level load

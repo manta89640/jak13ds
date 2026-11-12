@@ -530,11 +530,11 @@ for again after 30 frames; it does not call `make_room`. A level load out of mem
 `need_make_room` frees the chunks beyond their reach for what it wants, the arena's growth only
 if that was not enough, the whole arena at the second try. The arena then comes back as a claim.
 
-**Dormant levels** (config `dormant_levels`): a level whose visibility string is all zero for 90
-level draws is dormant: no near chunks are wanted (stream_k 0), and its hidden ties are needed
-only within 45 m (above). When the string shows it again their reach is their own; one not back
-yet within its distance in view is not drawn, and once its mesh comes it fades in over 8 frames
-(the tie fade path), with no hold.
+**Hidden levels**: a level whose visibility string was all zero at its last draw wants no near
+chunks (stream_k 0), and its hidden chunks with a draw distance are needed only within 45 m
+(above). A managed chunk seen missing within its distance shows its vista copy (if it has one)
+and fades in over 8 frames once its mesh comes. A far level's managed chunks are the first to go
+(e + 10 km); there is no other unload of a far level.
 
 Log, every stats period: `[ctr] chunks by need: R of M KB there; N freed for room (KB; KB for a
 load out of memory), J reads of K chunks (KB needed, KB to fill), P passes short of room (at
