@@ -2187,6 +2187,8 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state,
 void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out) {
   memcpy(out->m, clip, sizeof(out->m));
   out->id = 0;
+  out->fog_gen = 0;
+  out->lut_gen = 0;
 }
 
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state,
