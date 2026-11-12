@@ -380,7 +380,7 @@ class CtrVram {
     u64 key = 0;
     u64 hash = 0;
   };
-  static constexpr u32 kHashMemos = 64;
+  static constexpr u32 kHashMemos = 256;
   HashMemo m_hash_memo[kHashMemos];
   const u32* m_epoch = nullptr;
   // a page chunk's id (page_chunk_id's sampled hash), kept the same way
@@ -390,7 +390,7 @@ class CtrVram {
     u64 key = 0;
     u64 id = 0;
   };
-  static constexpr u32 kChunkMemos = 256;
+  static constexpr u32 kChunkMemos = 1024;
   ChunkMemo m_chunk_memo[kChunkMemos];
   u64 chunk_id(const u8* chunk_src, u64 page_key);
   // Jak II: a page's dest offsets (lookup_jak2_texture_dest_offset) by texture index, by page id
