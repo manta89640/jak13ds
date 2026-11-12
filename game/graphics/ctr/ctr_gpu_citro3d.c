@@ -4353,6 +4353,31 @@ static void raw_draw_elements_prim(u32 index_pa, u32 count, int strip) {
 static void raw_draw_elements(u32 index_pa, u32 count) {
   raw_draw_elements_prim(index_pa, count, 0);
 }
+/* A level mesh draw's triangles for the statistics: a list's, or a strip's with area (not its
+ * stitches): counted once per range and kept (the ranges repeat from frame to frame). */
+static struct {
+  u32 pa, count, tris;
+} s_strip_tris[2048];
+static u32 mesh_draw_tris(const ctr_draw_state* state, const MeshSlot* ms, int first_index,
+                          int index_count) {
+  if (!(state->flags & CTR_STATE_STRIP)) {
+    return (u32)index_count / 3;
+  }
+  const u32 pa = ms->indices_pa + 2u * (u32)first_index;
+  const u32 h = (((pa >> 1) * 0x9E3779B1u) ^ ((u32)index_count * 0x85EBCA6Bu)) >> 21;
+  if (s_strip_tris[h].pa == pa && s_strip_tris[h].count == (u32)index_count) {
+    return s_strip_tris[h].tris;
+  }
+  const u16* ix = ms->indices + first_index;
+  u32 n = 0;
+  for (int i = 0; i + 2 < index_count; i++) {
+    n += ix[i] != ix[i + 1] && ix[i + 1] != ix[i + 2] && ix[i] != ix[i + 2];
+  }
+  s_strip_tris[h].pa = pa;
+  s_strip_tris[h].count = (u32)index_count;
+  s_strip_tris[h].tris = n;
+  return n;
+}
 
 /* prim: GPU_TRIANGLES or (AI-assisted) GPU_TRIANGLE_STRIP (ctr_gpu_draw_strip), as C3D_DrawArrays */
 static void raw_draw_arrays(u32 count, u32 prim) {
@@ -6296,6 +6321,7 @@ void ctr_gpu_mesh_delete(int mesh) {
   }
   ctr_linear_lock();
   if (g.meshes[mesh].used == 1) {
+    memset(s_strip_tris, 0, sizeof(s_strip_tris));
     g.meshes[mesh].used = 2;
     g.pending_mesh_delete[g.pending_mesh_delete_count++] = mesh;
   }
@@ -6534,7 +6560,7 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
     PR_ADD(PR_MESH_DRAW, t);
   }
   g.cur.draws++;
-  g.cur.triangles += (state->flags & CTR_STATE_STRIP) ? index_count - 2 : index_count / 3;
+  g.cur.triangles += mesh_draw_tris(state, ms, first_index, index_count);
   PR_ADD(PR_MESH, pr0);
 }
 
@@ -6614,7 +6640,7 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
   raw_draw_elements_prim(ms->indices_pa + 2u * (u32)first_index, (u32)index_count,
                            (state->flags & CTR_STATE_STRIP) != 0);
   g.cur.draws++;
-  g.cur.triangles += (state->flags & CTR_STATE_STRIP) ? index_count - 2 : index_count / 3;
+  g.cur.triangles += mesh_draw_tris(state, ms, first_index, index_count);
 }
 
 int ctr_gpu_wind_ready(void) {
@@ -6694,7 +6720,7 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
                            (state->flags & CTR_STATE_STRIP) != 0);
   }
   g.cur.draws++;
-  g.cur.triangles += (state->flags & CTR_STATE_STRIP) ? index_count - 2 : index_count / 3;
+  g.cur.triangles += mesh_draw_tris(state, ms, first_index, index_count);
 }
 
 int ctr_gpu_morph_ready(void) {
@@ -6759,7 +6785,7 @@ void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix
                            (state->flags & CTR_STATE_STRIP) != 0);
   }
   g.cur.draws++;
-  g.cur.triangles += (state->flags & CTR_STATE_STRIP) ? index_count - 2 : index_count / 3;
+  g.cur.triangles += mesh_draw_tris(state, ms, first_index, index_count);
 }
 
 /* (AI-assisted) the cache flush statistics line since the last call */
@@ -6909,7 +6935,7 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state, int env_tex, const ctr_etie_
   raw_draw_elements_prim(ms->indices_pa + 2u * (u32)first_index, (u32)index_count,
                            (state->flags & CTR_STATE_STRIP) != 0);
   g.cur.draws++;
-  g.cur.triangles += (state->flags & CTR_STATE_STRIP) ? index_count - 2 : index_count / 3;
+  g.cur.triangles += mesh_draw_tris(state, ms, first_index, index_count);
 }
 
 int ctr_gpu_etie_ready(void) {

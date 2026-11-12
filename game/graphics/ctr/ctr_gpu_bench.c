@@ -1219,13 +1219,15 @@ static void b4(int experiments) {
 
 /* ---------------- B9: one mesh as a list and as stitched strips ---------------- */
 
-#define B9_N 48    /* cells per side: 4608 triangles of 2 x 2 pixels */
+#define B9_N 48    /* cells per side: 4608 triangles of about 2 pixels */
 #define B9_PIECE 4 /* cells per strip (the level runs' strips are about this short) */
 #define B9_DRAWS 16
 
-/* The level meshes' case (c3l::kDrawStrip): the same on-screen triangles as an indexed list (3
+/* The level meshes' case (c3l::kDrawStrip): the same triangles with area as an indexed list (3
  * indices each) and as strips of B9_PIECE cells stitched the converter's way (the first index
- * twice, each strip begun at an even place, the last index repeated): ns per triangle of both. */
+ * twice, each strip begun at an even place, the last index repeated): ns per triangle of both.
+ * A cell is one position unit (about 2 pixels): fill is under a tenth of the list's time (the first
+ * version, 4 units a cell, was bound by fill and measured the same time for both). */
 static void b9(void) {
   if (B.dead) {
     return;
@@ -1245,8 +1247,8 @@ static void b9(void) {
     for (int x = 0; x <= B9_N; x++) {
       VtxS* v = &verts[y * (B9_N + 1) + x];
       memset(v, 0, sizeof(*v));
-      v->x = (s16)(-96 + 4 * x);
-      v->y = (s16)(-96 + 4 * y);
+      v->x = (s16)(x - B9_N / 2);
+      v->y = (s16)(y - B9_N / 2);
       v->w = 1;
       v->s = (s16)(x * 64);
       v->t = (s16)(y * 64);
