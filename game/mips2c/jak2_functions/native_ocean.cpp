@@ -402,10 +402,19 @@ u64 render_ocean_quad_impl(const NativeArgs& args) {
   };
 
   bool inside = true;
+  u32 out_all = 15;
   for (int v = 0; v < 4; v++) {
     const float* p = poly_a[v].p;
     const float w = p[3], nw = neg_bits(p[3]);
-    inside &= !(w < p[0]) & !(w < p[1]) & !(p[0] < nw) & !(p[1] < nw);
+    const u32 code = (u32)(w < p[0]) | ((u32)(w < p[1]) << 1) | ((u32)(p[0] < nw) << 2) |
+                     ((u32)(p[1] < nw) << 3);
+    inside &= code == 0;
+    out_all &= code;
+  }
+  // all four outside one of the planes: the clipping leaves nothing (only the scratchpad copies,
+  // which nothing reads, would differ)
+  if (out_all) {
+    return args.st;
   }
 
   bool clipped = false;

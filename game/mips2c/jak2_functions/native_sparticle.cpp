@@ -87,13 +87,14 @@ inline TimeVec time_vec(const ParticleMem& m, u32 spad, u32 info) {
 /*!
  * Particle LOD (with the logic LOD; sparticle.gc process-particles fills *sp-lod-work*: the
  * camera's position, its forward axis, then the frame count, on, the squared distance and the
- * depth behind the camera). A 2d particle of a plain block without a callback, an orbit, an aux
- * sprite or an alpha to restore that is that far from the camera or that far behind it is updated
- * on every other frame only (staggered by index), over both frames' time.
+ * depth behind the camera). A 2d particle of a plain block without an orbit, an aux sprite or an
+ * alpha to restore, and without a callback or with one of the per-particle inline ones, that is
+ * that far from the camera is updated on every 2nd frame only, beyond the second distance or
+ * that far behind the camera on every 4th (staggered by index), over the frames it stands for.
  */
 struct SpLod {
   bool on = false;
-  float cx = 0, cy = 0, cz = 0, fx = 0, fy = 0, fz = 0, far2 = 0, behind = 0;
+  float cx = 0, cy = 0, cz = 0, fx = 0, fy = 0, fz = 0, far2 = 0, behind = 0, far4 = 0;
   u32 frame = 0;
 };
 
@@ -114,19 +115,23 @@ SpLod sp_lod_read(const ParticleMem& m) {
   l.frame = m.u(w + 32);
   l.far2 = m.f(w + 40);
   l.behind = m.f(w + 44);
+  l.far4 = m.f(w + 48);
   return l;
 }
 
-//! 0: update as usual, 1: wait this frame, 2: update over two frames
+//! the frames this update stands for (1 as usual, 2 or 4), or 0: wait this frame
 inline int sp_lod_2d(const SpLod& l, const ParticleMem& m, u32 info, u32 vec, u64 index) {
   if (!l.on || (m.u(info + 104) & (0x8080 | 64 | 32))) {
-    return 0;
+    return 1;
   }
   const float dx = m.f(vec) - l.cx, dy = m.f(vec + 4) - l.cy, dz = m.f(vec + 8) - l.cz;
-  if (dx * dx + dy * dy + dz * dz <= l.far2 && dx * l.fx + dy * l.fy + dz * l.fz >= -l.behind) {
-    return 0;
+  const float d2 = dx * dx + dy * dy + dz * dz;
+  const bool behind = dx * l.fx + dy * l.fy + dz * l.fz < -l.behind;
+  if (d2 <= l.far2 && !behind) {
+    return 1;
   }
-  return ((index + l.frame) & 1) ? 1 : 2;
+  const u32 n = (behind || d2 > l.far4) ? 4 : 2;
+  return ((index + l.frame) & (n - 1)) ? 0 : (int)n;
 }
 
 //! the done tests: color r g b all 0, alpha <= 0, x or y size below 0 (with the flags' bits)
@@ -654,16 +659,20 @@ void block_2d_in_place(const ParticleMem& m,
     const u32 vec = m_vec + kVecSize * i;
     const u64 index = index0 + i;
     TimeVec tv = time_vec(m, clocks, info);
-    if (tv.frames != 0 && s.cls[i] == SP_FN_NONE) {
-      const int lod_mode = sp_lod_2d(lod, m, info, vec, index);
-      if (lod_mode == 1) {
+    int lod_n = 1;
+    // no callback, or one that only reads its own particle's state this frame (motion blur, the
+    // day / night texture, the drop height check)
+    const u8 c = s.cls[i];
+    if (tv.frames != 0 && (c == SP_FN_NONE || c == (SP_FN_INLINE | 1) || c == (SP_FN_INLINE | 3) ||
+                           c == (SP_FN_INLINE | 5))) {
+      lod_n = sp_lod_2d(lod, m, info, vec, index);
+      if (lod_n == 0) {
         continue;
       }
-      if (lod_mode == 2) {
-        tv.frames *= 2;
-        tv.vel *= 2.f;
-        tv.acc *= 2.f;
-        tv.friction *= 2.f;
+      if (lod_n > 1) {
+        tv.frames *= (u64)lod_n;
+        tv.vel *= (float)lod_n;
+        tv.acc *= (float)lod_n;
       }
     }
     const u64 frames = tv.frames;
@@ -734,7 +743,11 @@ void block_2d_in_place(const ParticleMem& m,
       if (friction_bits != 0) {
         const float a = 1.f - u2f(friction_bits);
         const float b = a * tv.friction;
-        const float c = 1.f - b;
+        float c = 1.f - b;
+        // particle LOD: the friction of each frame it stands for
+        for (int k = 1; k < lod_n; k++) {
+          c = c * (1.f - b);
+        }
         vx = vx * c;
         vy = vy * c;
         vz = vz * c;
