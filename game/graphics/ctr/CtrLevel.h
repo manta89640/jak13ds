@@ -1326,7 +1326,7 @@ class CtrLevels {
   struct DistStats {
     u64 freed_chunks = 0, freed_bytes = 0, load_bytes = 0, read_jobs = 0, read_chunks = 0,
         read_bytes = 0, fill_bytes = 0, short_max = 0, short_passes = 0;
-    u64 resident = 0, managed = 0;
+    u64 resident = 0, managed = 0, wanted = 0;  // wanted: within reach + the read margin
   } m_dst;
   math::Vector4f m_planes[4];  // the view's planes (as CtrBackgroundCamera::planes)
   u64 m_cut_frame = 0;         // the last camera cut (a jump of > kCutMeters, or of the factor)
