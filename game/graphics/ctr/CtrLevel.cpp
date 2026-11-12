@@ -11298,10 +11298,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
       j2_hidden = zero;
     }
-    if (lev.hidden && !j2_hidden) {
+    // (not while the screen is black: a continue's level is read for the place it reveals)
+    const bool hidden = j2_hidden && !g_screen_black;
+    if (lev.hidden && !hidden) {
       lev.shown_frame = std::max<u64>(rs.frame_idx, 1);  // a reveal (the black hold)
     }
-    lev.hidden = j2_hidden;
+    lev.hidden = hidden;
   } else {
   const int li = (m_id == (int)jak1::BucketId::TFRAG_LEVEL1 ||
                   m_id == (int)jak1::BucketId::TFRAG_TRANS1_AND_SKY_BLEND_LEVEL1 ||
@@ -11995,7 +11997,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     lev.stream_k = k * 1.1f;
     lev.stream_k_hi = std::max(lev.stream_k, lev.stream_k_hi * 0.99f);
-    if (j2_hidden) {
+    if (lev.hidden) {
       // nothing of it can be seen: no near chunks wanted (theirs go first)
       lev.stream_k = lev.stream_k_hi = 0.f;
     }
@@ -12146,7 +12148,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_tf_groups[2] += n[2];
     m_tf_frames++;
   }
-  lev.stream_tf_k = tf_on && !j2_hidden ? 1.f : 0.f;
+  lev.stream_tf_k = tf_on && !lev.hidden ? 1.f : 0.f;
   if (has_units) {
     lev.stream_frame = rs.frame_idx;
     m_levels->stream_note_level(lev, late_groups, held_groups, rs.frame_idx, ring0_late);
