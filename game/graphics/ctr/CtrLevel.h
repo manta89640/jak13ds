@@ -79,7 +79,6 @@ struct Stats {
   u32 hole_draw_frames = 0;          // tfrag chunk frames beyond the draw distance, nothing in place
   u32 hole_groups = 0;               // group frames: kept far or coarse and that version not drawn
   u32 morph_in = 0, morph_out = 0;   // near chunks that came / went in view under a morph
-  u32 copy_held = 0;   // tie chunk frames in view kept off the vista copies that came
   u32 holes = 0, hole_longest = 0;   // holes of kHoleFrames or more that ended; frames
   u32 frames = 0;
 };
@@ -299,11 +298,6 @@ struct CtrLevelData {
   // (AI-assisted, title-popin) per chunk of tiers 1/2: a sphere around its lod_center holding both
   // versions of the cell (the same for both: their in-view tests agree), x y z r
   std::vector<float> lod_cell_sphere;
-  // the vista copies became drawable (vista_ok) at this frame; per tie chunk whether it was last
-  // decided with them (0xff: not yet): one in view keeps deciding without them for a while
-  bool vista_ok_last = false;
-  u64 vista_ok_frame = 0;
-  std::vector<u8> chunk_vok;
   // Jak II: the game's visibility string hid the level whole at its last draw
   bool hidden = false;
   // the frame its string showed it again after hiding it (a reveal); CtrLevels::note_late_in_view

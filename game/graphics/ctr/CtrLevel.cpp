@@ -2024,8 +2024,8 @@ void CtrLevels::need_update(u64 frame, u32 free_now, u64 parts_room, bool level_
 // Sandover: a glimpse under the logo, then the end of logo-intro-2 and logo-loop, which repeats
 // without a cut. kTitlePath is that path to within 1.3 m (meters, the host's CTR_TITLE_VIS_LOG).
 // While the title level is wanted, a chunk no point of the path can draw is left out of the load
-// (kTitleFreed), or freed if the level was there before: one beyond its largest draw distance,
-// a vista copy whose sources are drawn from all of the path. The view
+// (kTitleFreed), or freed if the level was there before: one beyond its largest draw distance
+// (never the vista tier: read with the level). The view
 // isn't used: the loop turns all the way round, it would leave out < 0.1 MB more. If the camera
 // leaves the path, or the title ends, every such chunk is read back, the nearest first.
 namespace {
@@ -2082,20 +2082,6 @@ float title_path_d2(const float* p) {
   return best;
 }
 
-// the largest distance from p (game units) to a point of the path
-float title_path_far(const float* p) {
-  float best = 0;
-  for (const auto& q : kTitlePath) {
-    float d2 = 0;
-    for (int c = 0; c < 3; c++) {
-      const float d = p[c] - (float)q[c] * 4096.f;
-      d2 += d * d;
-    }
-    best = std::max(best, d2);
-  }
-  return std::sqrt(best);
-}
-
 // whether some point of the path may draw chunk ci (draw_level's rules, the settings now)
 bool title_needed(const CtrLevelData& lev, size_t ci) {
   constexpr float kM = 4096.f;
@@ -2110,32 +2096,8 @@ bool title_needed(const CtrLevelData& lev, size_t ci) {
     const float lim = reach + ch.bsphere[3] + margin;
     return title_path_d2(ch.bsphere) <= lim * lim;
   };
-  if (ch.kind == c3l::CHUNK_KIND_VISTA) {
-    if (!within(s.vista_distance * kM * 1.1f)) {
-      return false;
-    }
-    // a run shows where its source chunk is beyond its distance: one with a limit of its own
-    // (the floor may cut it), or one the path leaves the draw distance (far mode: the LOD
-    // distance) of
-    float lim = draw;
-    if (s.lod_distance > 0) {
-      lim = lim > 0 ? std::min(lim, s.lod_distance * kM) : s.lod_distance * kM;
-    }
-    const u32 r0 = lev.chunk_first_run[ci];
-    for (u32 r = r0; r < r0 + ch.vis_run_count && r < lev.vis_runs.size(); r++) {
-      const u32 src = lev.vis_runs[r].vis;
-      if (src >= lev.chunks.size()) {
-        return true;
-      }
-      const auto& sc = lev.chunks[src];
-      if (sc.lod_tier == 3 || sc.max_dist > 0 || sc.kind == c3l::CHUNK_KIND_SHRUB ||
-          (lim > 0 && title_path_far(sc.bsphere) > lim + sc.bsphere[3] - margin)) {
-        return true;
-      }
-    }
-    return false;
-  }
-  if (ch.lod_tier == 3) {
+  // the vista tier is read with the level: its copies stand in wherever the floor cuts a tie
+  if (ch.kind == c3l::CHUNK_KIND_VISTA || ch.lod_tier == 3) {
     return true;
   }
   // decide_dist's largest: its own limit (held in view), at most the draw distance's with 10%
@@ -9853,14 +9815,12 @@ void CtrLevels::pop_log() {
            "frames ({} without their mesh), {} of {:.1f} s or more ended, {} open, longest {:.1f} "
            "s; {} chunk frames drawn by a vista copy within the config's distance; {} tfrag chunk "
            "frames beyond the draw distance with nothing in place; {} group frames kept far with "
-           "that version not drawn; near chunks under a morph: {} in, {} out; tie chunk frames kept "
-           "off their vista copies {}",
+           "that version not drawn; near chunks under a morph: {} in, {} out",
            m_sst.frames, pops, pops * 1800.0 / frames, by, m_pop.hole_frames[ctr_pop::kHoleTfrag],
            m_pop.hole_frames[ctr_pop::kHoleTie], m_pop.hole_frames[ctr_pop::kHoleVista],
            m_pop.hole_mesh_frames, m_pop.holes, ctr_pop::kHoleFrames / 30.0, open,
            m_pop.hole_longest / 30.0, m_pop.copy_frames, m_pop.hole_draw_frames,
-           m_pop.hole_groups, m_pop.morph_in, m_pop.morph_out,
-           m_pop.copy_held);
+           m_pop.hole_groups, m_pop.morph_in, m_pop.morph_out);
   m_pop = ctr_pop::Stats();
 }
 
@@ -11436,36 +11396,19 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   const bool shrub_fixed = settings.shrub_distance > 0;
   const float shrub_fixed_dist = shrub_d * 4096.f * det;
   const float ring0 = ctr_detail::kNearRingMeters * 4096.f;
-  // the level's vista copies can be drawn: a floor limit only cuts a chunk that has one
-  bool vista_ok = lev.has_vista && draw_dist > 0 && vista_dist > draw_dist;
-  for (const u32 vi : lev.vista_chunks) {
-    vista_ok = vista_ok && lev.meshes[vi] >= 0;
-  }
-  // the copies came (the vista chunks all there): for kVistaHoldFrames a tie chunk in view that was
-  // decided without them keeps that until it leaves view (decide_dist)
-  constexpr u64 kVistaHoldFrames = 300;
-  if (vista_ok && !lev.vista_ok_last) {
-    lev.vista_ok_frame = rs.frame_idx;
-  }
-  lev.vista_ok_last = vista_ok;
-  const bool vok_hold = vista_ok && !reveal && !g_screen_black &&
-                        rs.frame_idx < lev.vista_ok_frame + kVistaHoldFrames;
-  if (lev.chunk_vok.size() != lev.chunks.size()) {
-    lev.chunk_vok.assign(lev.chunks.size(), 0xff);
-  }
+  // the level's vista copies are drawn (its vista chunks are read with it): a floor limit only
+  // cuts a chunk that has one
+  const bool vista_ok = lev.has_vista && draw_dist > 0 && vista_dist > draw_dist;
   // a tie chunk's limit (0: none): its own (the config's), and where its vista copy stands in the
-  // floor's tie limit and far cap, never under ring 0 (vok: the copies can be drawn)
-  auto tie_limit_v = [&](size_t ci, const c3l::Chunk& ch, bool vok) {
+  // floor's tie limit and far cap, never under ring 0
+  auto tie_limit = [&](size_t ci, const c3l::Chunk& ch) {
     const float own = ch.max_dist * tie_k * det;
-    if (!dfl.on || !vok || !lev.vista_copy[ci]) {
+    if (!dfl.on || !vista_ok || !lev.vista_copy[ci]) {
       return own;
     }
     return ctr_detail::far_cap(
         ctr_detail::ring_limit(ch.max_dist * dfl.tie_distance_scale * det, own, ring0),
         dfl.tie_far * 4096.f, ring0);
-  };
-  auto tie_limit = [&](size_t ci, const c3l::Chunk& ch) {
-    return tie_limit_v(ci, ch, vista_ok);
   };
   auto is_tfrag = [](const c3l::Chunk& ch) {
     return ch.kind == c3l::CHUNK_KIND_TFRAG && (ch.lod_tier == 1 || ch.lod_tier == 2);
@@ -11527,23 +11470,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     bool dist_ok = true;
     dist_cfg = true;
     if (ch.kind == c3l::CHUNK_KIND_TIE && !lev.is_unit(ci)) {
-      bool vok = vista_ok;
-      if (lev.vista_copy[ci]) {
-        u8& cv = lev.chunk_vok[ci];
-        if (vok_hold && cv == 0 &&
-            tie_limit_v(ci, ch, true) != tie_limit_v(ci, ch, false) &&
-            sphere_in_view(cam, ch.bsphere)) {
-          vok = false;
-          pst.copy_held++;
-        }
-        cv = vok ? 1 : 0;
-      }
       // a tie chunk: whole up to its limit; over the band beyond it its vista copy fades in over
       // it, then it fades out over the copy (no copy: it fades out; at the draw distance: the haze)
       auto lim_of = [&](float own) {
         return own > 0 ? (draw_dist > 0 ? std::min(draw_dist, own) : own) : draw_dist;
       };
-      const float lim = lim_of(tie_limit_v(ci, ch, vok));
+      const float lim = lim_of(tie_limit(ci, ch));
       const float dx = ch.bsphere[0] - cx, dy = ch.bsphere[1] - cy, dz = ch.bsphere[2] - cz;
       const float d2 = dx * dx + dy * dy + dz * dz;
       auto alpha = [&](float l) {
@@ -11551,12 +11483,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         if (!(l > 0) || d2 <= in * in) {
           return 1.f;
         }
-        const bool band = l < draw_dist || !(draw_dist > 0) || (vok && lev.vista_copy[ci]);
+        const bool band = l < draw_dist || !(draw_dist > 0) || (vista_ok && lev.vista_copy[ci]);
         return !band || d2 >= out * out ? 0.f
                                         : ctr_detail::band_alpha(std::sqrt(d2) - ch.bsphere[3], l);
       };
       const bool was_in = state & 4;
-      const bool copy = vok && lev.vista_copy[ci];
+      const bool copy = vista_ok && lev.vista_copy[ci];
       const float a = alpha(lim);
       auto q = [](float v) { return (u8)(std::lround(std::clamp(v, 0.f, 1.f) * 16.f) * 8); };
       const u8 fade = copy ? q(2.f * a) : q(a);
@@ -13106,17 +13038,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if (dx * dx + dy * dy + dz * dz < lim * lim) {
         if (lev.meshes[ci] >= 0) {
           emit_chunk(ci, true);
-        } else if (dorm && lev.chunk_dormant[ci] >= CtrLevelData::kTitleFreed &&
-                   sphere_in_view(cam, ch.bsphere)) {
-          // left out by the title, not back yet: late if a run of it would show
-          const u32 r0 = lev.chunk_first_run[ci];
-          for (u32 r = r0; r < r0 + ch.vis_run_count; r++) {
-            const u16 src = lev.vis_runs[r].vis;
-            if (src < m_vista_src.size() && m_vista_src[src]) {
-              m_late_in_view++;
-              break;
-            }
-          }
         }
       }
     }
