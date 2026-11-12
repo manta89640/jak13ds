@@ -773,6 +773,8 @@ typedef struct {
    * frames it finished since the last frame end (gpu_busy_frames of them; 0 without frame_pacing =
    * steady, whose fence marks a frame done): done(N) - max(first work handed over(N), done(N-1)) */
   float gpu_wait_ms;
+  /* a full running GX queue drained (in gpu_wait_ms) */
+  int queue_drains;
   float gpu_busy_ms;
   int gpu_busy_frames;
   /* (AI-assisted) the same frames from the moment their command list was handed to the GPU
