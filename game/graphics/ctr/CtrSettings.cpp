@@ -257,6 +257,7 @@ CtrSettings load() {
   // auto defaults: what the emulator draws correctly / what is fast on the 3DS
   s.emulator = ctr_gpu_is_emulator() != 0;
   s.rgba4_as_rgba8 = s.emulator;
+  s.shrub_scale = 0.8f;  // both games: shrubs fade continuously, so the shorter bands show no step
   if (g_game_version == GameVersion::Jak2) {
     // Jak II: the distances its city held 30 fps with, until its renderer can afford the PS2's
     s.tie_distance_scale = 1.5f;

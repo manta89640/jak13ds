@@ -10153,7 +10153,7 @@ float ps2_lod_scale() {
     return (float)atof(env);
   }
 #endif
-  return ctr_is_jak2() ? 0.8f : 1.f;
+  return 0.8f;  // both games: the jungle (Jak 1) and the city (Jak II) need it; the geomorph hides it
 }
 
 // (AI-assisted, title-popin) a sphere against the view's four planes (the chunk test of emit_chunk)
