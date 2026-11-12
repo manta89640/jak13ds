@@ -5,7 +5,8 @@
 .fvec clip[6]       ; as ctr_mesh_opt.v.pica
 .fvec scales
 .fvec fog1
-.fvec morph[80]     ; per row: x, y = the morph factors of band 1, 2
+.fvec morph[80]     ; per row: x, y = the morph factors of band 1, 2 (x the deltas' scale); z, w:
+                    ; the color's factor g / 255, (1 - g) / 255 (row 0: 0, 1 / 255)
 
 .out outpos position
 .out outtc0 texcoord0.xy
@@ -17,6 +18,7 @@
 .alias inclr v2
 .alias indelta v3   ; xyz: band 1 offset, w: row
 .alias indelta2 v4  ; xyz: band 2 offset
+.alias intarget v5  ; rgb: the color target
 
 .entry main_ctr_mesh_morph_fa
 .proc main_ctr_mesh_morph_fa
@@ -32,7 +34,9 @@
   dph outpos.y, r1, clip[1]
   max r0.xy, fog1.xyxy, r0.xyxy
   dph outpos.z, r1, clip[2]
-  mul outclr.xyz, scales.yyyy, inclr
+  ; the color: c + g * (target - c), g its row's band's factor (c3l::MorphChunk::colors)
+  mul r8.xyz, morph[a0.x].wwww, inclr.xyzz
+  mad outclr.xyz, intarget.xyzz, morph[a0.x].zzzz, r8.xyzz
   max outclr.w, -r0.xxxx, r0.yyyy
   dph outpos.w, r1, clip[3]
   end

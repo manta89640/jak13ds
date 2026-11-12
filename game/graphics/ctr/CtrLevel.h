@@ -1,5 +1,6 @@
 #pragma once
 
+#include "game/graphics/ctr/CtrDetail.h"
 #include "game/graphics/ctr/CtrLight.h"
 
 /*!
@@ -230,26 +231,13 @@ struct CtrLevelData {
   // the PS2 far-plane x detail_scale (+ hysteresis, + radius): never coarser than the PS2
   float lod_floor_k = 0.f;
   float lod_switch_error(size_t g) const {
-    // (a morph group's near data: within its far-plane)
-    if (g < group_mid.size() && group_mid[g] > 0) {
-      return std::max(lod_groups[g].dist * lod_floor_k, lod_min_e);
-    }
-    const float e = std::max(std::max(lod_error[g], lod_groups[g].dist * lod_floor_k), lod_min_e);
-    if (lod_ring_e > 0) {
-      // the floor's factor: within ring 0 the config's switch
-      const float e_cfg = std::max(std::max(lod_error[g] * lod_cfg_ratio,
-                                            lod_groups[g].dist * lod_floor_k), lod_min_e);
-      return std::max(e, std::min(e_cfg, lod_ring_e));
-    }
-    return e;
+    // its near data: within its far-plane (a group without the geomorph: and its fade band)
+    return lod_groups[g].dist * lod_floor_k *
+           (g < group_mid.size() && group_mid[g] > 0 ? 1.f : ctr_detail::kFadeBand);
   }
-  // the floor moved the factor (else 0): ring 0 in the units of lod_switch_error, and the
-  // config's factor / this one
-  float lod_ring_e = 0.f, lod_cfg_ratio = 1.f;
-  float lod_bound_e() const { return std::max(lod_min_e, lod_ring_e); }
-  // (AI-assisted, titlemove) the title screen's least switch distance, in the units of
-  // lod_switch_error (distance / factor; 0 elsewhere)
-  float lod_min_e = 0.f;
+  // the floor moved the factor (else 0): ring 0 in the units of lod_switch_error
+  float lod_ring_e = 0.f;
+  float lod_bound_e() const { return lod_ring_e; }
   std::vector<int> textures;  // ctr_gpu handles
   std::vector<u8> tex_min_alpha;  // (AI-assisted) smallest texel alpha per texture (0xff = 1.0)
   u32 tex_empty = 0;  // (AI-assisted) c3l v15: textures the file has no texels for (in atlases)
@@ -303,7 +291,8 @@ struct CtrLevelData {
   // bit 2 within its draw distance,
   // bit 3 shrub runs faded, bit 4 its distance decided at least once
   std::vector<u8> chunk_state;
-  std::vector<u16> lod_switch_at;  // per tie LOD group: the frame (u16) it last switched version
+  // per tie LOD group without the geomorph: its near version's weight in its crossfade (128: whole)
+  std::vector<u8> lod_fade;
   // Jak II: the game's visibility string hid the level whole at its last draw
   bool hidden = false;
   // the frame its string showed it again after hiding it (a reveal); CtrLevels::note_late_in_view
@@ -547,7 +536,6 @@ struct CtrLevelData {
   std::vector<u32> unit_group_first;
   std::vector<u32> unit_groups;
   std::vector<u8> unit_ok;  // per unit, this frame (draw_level): there and within its distance
-  std::vector<u32> lod_hold_since;  // per LOD group: the frame its far version began to be kept
   bool streaming = false;
   float stream_k = 0.f;   // the last draw's tie LOD factor (a group is near within its error x
                           // this + its radius; 0: no near versions)
@@ -635,7 +623,27 @@ struct CtrLevelData {
   std::vector<c3l::MorphChunk> morph_chunks;
   std::vector<s32> chunk_morph;
   std::vector<u32> draw_morph_rows;  // per draw of a morph chunk: its list in morph_draw_rows
+  // the color targets (c3l::ExtMorph::colors_offset): per instance 1 when its rows carry band 1,
+  // the chunks' palettes; per morph chunk its palette (first, count), the palettes its colors use
+  // (bit 8: known), the time of day version and the mesh its words were written at
+  std::vector<u8> morph_band1;
+  std::vector<u16> morph_palette;
+  struct MorphColors {
+    u32 first = 0, count = 0, mask = 0, ver = 0;
+    int mesh = -1;
+  };
+  std::vector<MorphColors> morph_colors;
   bool morph_group(size_t g) const { return g < group_mid.size() && group_mid[g] > 0; }
+  bool morph_colored(size_t ci) const {
+    return ci < chunk_morph.size() && chunk_morph[ci] >= 0 &&
+           morph_colors[chunk_morph[ci]].count;
+  }
+  //! where chunk ci's color target words are in its mesh (0: none)
+  u32 morph_colors_offset(size_t ci) const {
+    return morph_colored(ci) ? normals_offset_in_mesh(ci) +
+                                   chunks[ci].vertex_count * (8u + (morph_normals(ci) ? 4u : 0u))
+                             : 0u;
+  }
   float morph_k = 1.f;  // the last draw's distance factor of the morph groups and rows
   std::vector<s32> chunk_normals;
   std::vector<u32> chunk_normals_file;
@@ -668,7 +676,8 @@ struct CtrLevelData {
       return (u32)sizeof(c3l::TfragMorphVertex);
     }
     if (ci < chunk_morph.size() && chunk_morph[ci] >= 0) {
-      return (u32)sizeof(c3l::MorphVertex) + (morph_normals(ci) ? 4 : 0);
+      return (u32)sizeof(c3l::MorphVertex) + (morph_normals(ci) ? 4 : 0) +
+             (morph_colors[chunk_morph[ci]].count ? 4 : 0);
     }
     return ci < chunk_normals.size() && chunk_normals[ci] == kNormalsInMesh ? 4 : 0;
   }
@@ -1482,7 +1491,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
     u32 row_first, row_count, rows_id;
     int mesh, slots_offset, first, count, nofog;
   };
-  std::vector<WindCall> m_wind_calls;
+  std::vector<WindCall> m_wind_calls, m_wind_fade_calls;
   std::vector<float> m_wind_rows;
   std::vector<s32> m_wind_row_of;  // per visible chunk (m_visible index): its rows, -1 none yet
   std::vector<u32> m_wind_row_id;

@@ -484,7 +484,12 @@ static_assert(sizeof(CullCondBox) == 2 * sizeof(CullCondPlane));
  * version within the far-plane, else the far version.
  * A near chunk with moving vertices (MorphChunk) has a MorphVertex per vertex (at records_offset,
  * the runtime's mesh tail as the envmapped tie normals'); the vertex is at pos + (f_1 * delta + f_2 *
- * delta2) * delta_scale with its row's factors. ExtHeader::size >= kExtHeaderMorphSize, then this
+ * delta2) * delta_scale with its row's factors. A chunk with color targets (MorphChunk::colors)
+ * has after its records (and normals) a uint32_t per vertex: the rgb its color goes to with its
+ * row's band (ExtMorph::colors_offset), the mean of two of the chunk's palette colors (indices
+ * MorphVertex::color and alpha; 255: none; a vertex without a target has its own twice), written
+ * by the runtime: as the PS2's tie program morphs a vertex's color to its parents' mean (the next
+ * geometry's color where it lands). ExtHeader::size >= kExtHeaderMorphSize, then this
  * at ext_offset +
  * kExtHeaderV24Size.
  */
@@ -499,7 +504,9 @@ struct ExtMorph {
   uint32_t group_mid_offset;  // float[ExtHeader::lod_group_count]: mid-plane (game units), 0: none
   uint32_t draw_rows_size;    // uint8_t[]: per morph chunk draw n, then the n rows its vertices use
   uint32_t draw_rows_offset;  // absolute
-  uint32_t pad;
+  // the color targets (0: none): uint8_t[inst_count] (1: the instance's rows carry band 1, else
+  // band 2) padded to 4, uint32_t n, uint16_t[n] the chunks' palettes (time of day ids)
+  uint32_t colors_offset;
 };
 static_assert(sizeof(ExtMorph) == kExtHeaderMorphSize - kExtHeaderV24Size);
 struct MorphInst {
@@ -519,14 +526,14 @@ struct MorphChunk {
   uint32_t draw_rows;       // its draws' lists in ExtMorph's draw rows, from here in draw order
   uint32_t records_offset;  // MorphVertex[vertex_count] (absolute)
   float delta_scale;        // MorphVertex deltas x this = the chunk's quantized units
-  uint32_t pad;
+  uint32_t colors;  // its palette's first in ExtMorph's + 1 (up to the next chunk's; 0: none)
 };
 static_assert(sizeof(MorphChunk) == 32);
 struct MorphVertex {
   int8_t delta[3];   // band 1 (x MorphChunk::delta_scale)
   int8_t row;        // 0: doesn't move
   int8_t delta2[3];  // band 2
-  int8_t pad;
+  int8_t color;      // (uint8_t) its color target's first color in its chunk's palette
 };
 static_assert(sizeof(MorphVertex) == 8);
 

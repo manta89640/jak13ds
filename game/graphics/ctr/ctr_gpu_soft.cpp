@@ -3276,7 +3276,8 @@ int ctr_gpu_wind_ready(void) {
 }
 void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                              const float* rows, const uint8_t* list, int list_n, uint32_t,
-                             int mesh, int morph_offset, int first_index, int index_count) {
+                             int mesh, int morph_offset, int color_offset, int first_index,
+                             int index_count) {
   s_tie_draw++;
   if (!soft_mesh_ok(mesh, true) ||
       morph_offset < 0 || (size_t)morph_offset > g_soft.meshes[mesh].verts.size()) {
@@ -3304,9 +3305,18 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
                                    32767);
     }
     memcpy(at, pos, sizeof(pos));
+    if (color_offset > 0 && (size_t)color_offset + 4 * v + 4 <= m.verts.size()) {
+      // its color toward its target over its band (ctr_mesh_morph.v.pica)
+      const uint8_t* const tg = &m.verts[color_offset + 4 * v];
+      const float g = rows[4 * row + 2] * 255.f;
+      uint8_t* const col = (uint8_t*)sv.c((int)v);
+      for (int c = 0; g != 0 && c < 3; c++) {
+        col[c] = (uint8_t)std::clamp((int)std::lround(col[c] + g * (tg[c] - col[c])), 0, 255);
+      }
+    }
   }
   g_soft_cur_mesh = mesh;
-  softstats::tb_prog(16, m.col_off ? 3 : 2);
+  softstats::tb_prog(18, 3);  // (the color targets: a third buffer)
   const std::string keep = softstats::cur_name;
   if (softstats::enabled()) {
     ctr_gpu_soft_bucket((keep + "+morph").c_str());
@@ -3693,7 +3703,8 @@ void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n) {
     const ctr_mesh_call& c = calls[i];
     if (c.morph_rows) {
       ctr_gpu_draw_mesh_morph(c.state, c.matrix, c.morph_rows, c.morph_list, c.morph_list_n,
-                              c.morph_id, c.mesh, c.morph_offset, c.first_index, c.index_count);
+                              c.morph_id, c.mesh, c.morph_offset, c.morph_color_offset,
+                              c.first_index, c.index_count);
     } else if (c.tmorph) {
       ctr_gpu_draw_mesh_tmorph(c.state, c.matrix, c.tmorph, c.morph_id, c.mesh, c.tmorph_offset,
                                c.first_index, c.index_count);

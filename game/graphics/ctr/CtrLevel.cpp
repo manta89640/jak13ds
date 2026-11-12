@@ -160,12 +160,6 @@ bool size_hist_on() {
   return on;
 }
 #endif
-// (AI-assisted, titlemove) the title screen's least tie LOD switch distance, meters
-// (CtrTfragRenderer::draw_level). Host, the flight's first ~8 s: switches in view 80 -> 19 (all at
-// 102-113 m; the island's groups are near from the reveal on), the flight's later parts +3-10k
-// triangles; 130 m: 7 switches, but +14-34k triangles later (Azahar: 201k triangles, 28 ms render
-// thread build where the gameplay distances drew 138k / 19.5 ms)
-constexpr float kTitleLodMin = 100.f;
 // below the render thread (0x2F) and the sound mixer (0x2E), which share core 2 with the loader
 constexpr int kLoaderPrio = 0x3C;
 // a prefetched level nothing asked for is dropped after this long
@@ -384,7 +378,7 @@ LevelMem level_mem(const CtrLevelData& lev) {
             vec_bytes(lev.stream_units) + vec_bytes(lev.chunk_unit) +
             vec_bytes(lev.group_unit_first) + vec_bytes(lev.group_unit_count) +
             vec_bytes(lev.group_units) + vec_bytes(lev.unit_group_first) +
-            vec_bytes(lev.unit_groups) + vec_bytes(lev.unit_ok) + vec_bytes(lev.lod_hold_since) +
+            vec_bytes(lev.unit_groups) + vec_bytes(lev.unit_ok) + vec_bytes(lev.lod_fade) +
             sizeof(CtrLevelData);
   if (lev.tod) {
     const auto& t = *lev.tod;
@@ -4300,6 +4294,59 @@ u32 tf_morph_colors(CtrLevelData& lev, size_t ci, const u8* shown) {
   return written;
 }
 
+// The tie geomorph's color targets (c3l::MorphChunk::colors): each vertex's target rgb (the mean
+// of two of the chunk's palette colors) in chunk ci's tail, when a palette its colors use moved
+// since they were written. Returns the vertices written.
+u32 tie_morph_colors(CtrLevelData& lev, size_t ci) {
+  auto& t = *lev.tod;
+  const int mesh = ci < lev.meshes.size() ? lev.meshes[ci] : -1;
+  if (mesh < 0 || !t.blended_valid || !lev.morph_colored(ci)) {
+    return 0;
+  }
+  auto& mc = lev.morph_colors[lev.chunk_morph[ci]];
+  const u32 nt = (u32)t.table.size();
+  if (mc.mesh != mesh) {
+    mc.mesh = mesh;
+    mc.ver = 0;
+  }
+  if (!(mc.mask & 0x100)) {
+    u32 m = 0x100;
+    for (u32 i = mc.first; i < mc.first + mc.count; i++) {
+      const u16 e = lev.morph_palette[i];
+      m |= e < t.color_mask.size() ? t.color_mask[e] : 0xff;
+    }
+    mc.mask = m;
+  }
+  if (mc.ver && mc.ver >= t.lut[mc.mask & 0xff]) {
+    return 0;
+  }
+  int n = 0;
+  u8* const base = (u8*)ctr_gpu_mesh_vertices_inplace(mesh, &n);
+  if (!base || (u32)n != lev.chunks[ci].vertex_count) {
+    return 0;
+  }
+  mc.ver = std::max<u32>(t.ver, 1);
+  const u8* const rec = base + lev.normals_offset_in_mesh(ci);
+  tod_word* const col = (tod_word*)(base + lev.morph_colors_offset(ci));
+  u32 pal[256];
+  for (u32 i = 0; i < 256; i++) {
+    const u32 e = i < mc.count ? lev.morph_palette[mc.first + i] : nt;
+    pal[i] = e < nt ? tod_entry(t, e) : 0u;
+  }
+  auto avg = [](u32 a, u32 b) { return (a & b) + (((a ^ b) & 0xfefefefeu) >> 1); };
+  u32 written = 0;
+  for (u32 v = 0; v < (u32)n; v++) {
+    const u32 w = col[v], a = rec[8 * v + 7], b = w >> 24;
+    if (a >= mc.count || b >= mc.count) {
+      continue;
+    }
+    col[v] = (w & 0xff000000u) | (avg(pal[a], pal[b]) & 0xffffffu);
+    written++;
+  }
+  tod_dirty().emplace_back((uintptr_t)col, (uintptr_t)(col + n));
+  return written;
+}
+
 // After a level draw's tod_recolor calls: the rewritten vertices' cache flushes (the ranges sorted
 // and merged where less than 64 KB apart: a few ctr_gpu_flush_range per frame rather than one per
 // chunk, see ctr_gpu_citro3d.c DEFER_GAP2).
@@ -4970,11 +5017,6 @@ void load_tie_lod(c3l::Reader& f,
                                   : ", switched by screen-space error");
 }
 
-#ifndef __3DS__
-// (AI-assisted, lodnear) host log counters (CTR_LOD_LOG), by unit state
-u64 g_lod_far_why[4] = {}, g_lod_far_close[4] = {};
-#endif
-
 // (AI-assisted, j2vis) c3l v20 prototype visibility (c3l::ExtProtoVis): the prototypes the game
 // hides by task state, each with its runs (mapped onto vis_runs like load_tie_lod) and their chunks.
 // Anything wrong: none (drawn always, as before v20).
@@ -5242,6 +5284,9 @@ void load_morph(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   lev->morph_chunks.clear();
   lev->chunk_morph.clear();
   lev->draw_morph_rows.clear();
+  lev->morph_colors.clear();
+  lev->morph_band1.clear();
+  lev->morph_palette.clear();
   c3l::ExtHeader eh;
   if (!hdr.ext_offset || lev->lod_groups.empty() || !read_ext_header(f, hdr, &eh) ||
       eh.size < c3l::kExtHeaderMorphSize) {
@@ -5256,6 +5301,29 @@ void load_morph(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
             f.read_array(em.rows_offset, em.row_count, &lev->morph_rows) &&
             f.read_array(em.draw_rows_offset, em.draw_rows_size, &lev->morph_draw_rows) &&
             f.read_array(em.group_mid_offset, (u32)lev->lod_groups.size(), &lev->group_mid);
+  // the color targets: each chunk's palette from its first to the next chunk's
+  lev->morph_colors.assign(lev->morph_chunks.size(), {});
+  u32 np = 0;
+  const u32 nf = (em.inst_count + 3) & ~3u;
+  if (ok && em.colors_offset && f.read(em.colors_offset + nf, &np, 4) && np) {
+    ok = f.read_array(em.colors_offset, em.inst_count, &lev->morph_band1) &&
+         f.read_array(em.colors_offset + nf + 4, np, &lev->morph_palette);
+    for (size_t i = 0; ok && i < lev->morph_chunks.size(); i++) {
+      const u32 c = lev->morph_chunks[i].colors;
+      if (!c || c - 1 >= np) {
+        continue;
+      }
+      u32 end = np;
+      for (size_t j = i + 1; j < lev->morph_chunks.size(); j++) {
+        if (lev->morph_chunks[j].colors) {
+          end = std::min<u32>(end, lev->morph_chunks[j].colors - 1);
+          break;
+        }
+      }
+      lev->morph_colors[i].first = c - 1;
+      lev->morph_colors[i].count = end > c - 1 ? std::min<u32>(end - (c - 1), 255) : 0;
+    }
+  }
   lev->chunk_morph.assign(lev->chunks.size(), -1);
   lev->draw_morph_rows.assign(lev->draws.size(), UINT32_MAX);
   for (size_t i = 0; ok && i < lev->morph_chunks.size(); i++) {
@@ -5294,6 +5362,8 @@ void load_morph(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
     lev->morph_chunks.clear();
     lev->chunk_morph.clear();
     lev->draw_morph_rows.clear();
+    lev->morph_colors.clear();
+    lev->morph_band1.clear();
     return;
   }
   size_t groups = 0;
@@ -10188,10 +10258,10 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
     u8 nomerge = 0, lod_version = 0;
     if (LOD) {
       const auto& rl = run_lod[r];
-      // (bit 3: a morph group's mid version, c3l::ExtMorph)
+      // (bit 3: a morph group's mid version, c3l::ExtMorph; bit 7: a crossfade, both)
       const u8 gs = rl.lod != c3l::kRunLodAlways ? lod_state[rl.group] : 0;
       const u8 want = (gs & 1) ? ((gs & 8) ? c3l::kRunLodMid : c3l::kRunLodNear) : c3l::kRunLodFar;
-      if (rl.lod != c3l::kRunLodAlways && rl.lod != want) {
+      if (rl.lod != c3l::kRunLodAlways && rl.lod != want && !(gs & 128)) {
         nomerge = 1;
         if (s) {
           s = false;
@@ -11183,23 +11253,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   auto R = make_cam_mat(cam.rot, cam.perspective, cam.fog.x(), cam.hvdf_off.z());
   m_late_in_view = 0;  // (AI-assisted, j2intro) counted below, reported after the chunk loop
-  // (AI-assisted, titlemove) the title screen (the title level loaded): its attract camera flies a
-  // fixed path over Sandover. No tie group switches LOD (geometry 3 -> 0) nearer than
-  // kTitleLodMin there: at the gameplay distances (the PS2 far-plane, 35-75 m for the island) the
-  // island's palms, grass, hut and rock switched one after another on screen as the flight came
-  // nearer (807 switches in view in 40 s in Azahar; 81 in its first ~8 s on the host, objects up to
-  // 137 px across), each a step in shape and in the vertex colors (the far versions' own shading)
+  // the title screen (the title level loaded)
   m_levels->loaded(&m_loaded);
   bool title_on = false;
   for (const auto* l : m_loaded) {
     title_on = title_on || (m_jak2_slot < 0 && l->name == "title");  // (Jak 1's title level)
   }
-  float title_min = kTitleLodMin;
-#ifndef __3DS__
-  if (const char* e = getenv("CTR_TITLE_LOD_MIN")) {
-    title_min = (float)atof(e);  // (host test: meters; 0 = as in gameplay)
-  }
-#endif
   // (AI-assisted, title3) shown again after a gap (the title's reveal of Sandover behind the logo,
   // a level's start): reveal_frame (late near chunks in view)
   {
@@ -11660,17 +11719,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   const u32 frame32p = std::max<u32>((u32)rs.frame_idx, 1u);
   u32 late_groups = 0;  // (AI-assisted, streaming) drawn far: their near chunks not there yet
   u32 held_groups = 0;  // (AI-assisted, streaming) ... there now, but kept far while in view
-#ifndef __3DS__
-  if (getenv("CTR_LOD_LOG") && rs.frame_idx % 30 == 0 &&
-      (g_lod_far_why[0] + g_lod_far_why[2] + g_lod_far_why[3])) {
-    lg::info("[lodlog] {}: group frames in view within their distance but far (30 frames): late {} "
-             "(within 20 m: {}), beyond the near chunk's distance {} ({}), no near chunk {} ({})",
-             lev.name, g_lod_far_why[3], g_lod_far_close[3], g_lod_far_why[2], g_lod_far_close[2],
-             g_lod_far_why[0], g_lod_far_close[0]);
-    memset(g_lod_far_why, 0, sizeof(g_lod_far_why));
-    memset(g_lod_far_close, 0, sizeof(g_lod_far_close));
-  }
-#endif
+  bool lod_fading = false;  // a group without the geomorph crossfades (lod_fade)
   u32 late_view = 0;    // (AI-assisted, title3) ... late and in view
   // ... late, in view and within ring 0 (its surface)
   u32 ring0_late = 0;
@@ -11703,31 +11752,19 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // never coarser than the PS2, and where the PS2 distance decides, its far version's error at
     // the switch is under tie_lod_px
     lev.lod_floor_k = by_error && k > 0 ? k0p / k : 0.f;
-    // (AI-assisted, titlemove) the title: no group switches nearer than kTitleLodMin meters
-    lev.lod_min_e = title_on && by_error && k > 0 ? title_min * 4096.f / k : 0.f;
     // ring 0: the floor's factor never moves a switch nearer than kNearRingMeters
     const float k_cfg = by_error ? k0 * focal / std::max(settings.tie_lod_px, 0.25f) : k0p;
     const bool ring_on = by_error && k > 0 && k < k_cfg;
     lev.lod_ring_e = ring_on ? ctr_detail::kNearRingMeters * 4096.f / k : 0.f;
-    lev.lod_cfg_ratio = ring_on ? k_cfg / k : 1.f;
 #ifndef __3DS__
     static const bool no_floor = getenv("CTR_LOD_NO_FLOOR") != nullptr;  // (host A/B: as before)
     if (no_floor) {
       lev.lod_floor_k = 0.f;
     }
 #endif
-    if (lev.lod_switch_at.size() != lev.lod_groups.size()) {
-      lev.lod_switch_at.assign(lev.lod_groups.size(), 0);
+    if (lev.lod_fade.size() != lev.lod_groups.size()) {
+      lev.lod_fade.assign(lev.lod_groups.size(), 0);
     }
-    u16* const lod_sw = lev.lod_switch_at.data();
-    const u16 f16 = (u16)rs.frame_idx;
-    constexpr u16 kLodDwellFrames = 45;
-    if (has_units && lev.lod_hold_since.size() != lev.lod_groups.size()) {
-      lev.lod_hold_since.assign(lev.lod_groups.size(), 0);
-    }
-    // (AI-assisted, streaming) the longest a group drawn far for want of its data is kept far in
-    // view once the data came (1 s at 30 fps)
-    constexpr u32 kHoldFrames = 30;  // (AI-assisted, lodnear: was 120)
     // the PS2's geomorph (c3l::ExtMorph): its distances x detail_scale, never pulled in by the
     // floor (geometry 3's own vertex colors can't carry geometry 0's lighting: nearer, it shows)
     const bool morph_on = !lev.group_mid.empty();
@@ -11738,7 +11775,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     };
     lev.morph_k = kd;
 #ifndef __3DS__
-    // host A/B, env CTR_MORPH_AB: on odd frames 1 every morph group's near version, 2 no morph
+    // host A/B, env CTR_MORPH_AB: on odd frames 1 every morph group's near version, 2 no morph; 3
+    // the far-plane switch of every group (odd frames the mid version morphed through, even the far)
     static const int morph_ab = getenv("CTR_MORPH_AB") ? atoi(getenv("CTR_MORPH_AB")) : 0;
 #endif
     // (AI-assisted, j2cull) cluster by cluster (CtrLevelData::CullCluster): a cluster beyond every
@@ -11746,20 +11784,18 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // members all were far and not held last frame (state 2) stands for their decisions: each
     // would come out far again, state 2
     const u8* const lod_st = lev.lod_state.data();
-    const bool lod_skip = by_error && lev.lod_state.size() == lev.lod_groups.size();
+    const bool lod_skip = lev.lod_state.size() == lev.lod_groups.size();
     const bool cull_check = cull_check_enabled();
     bool lod_check = false;
     u32 chk_near = 0;
     for (const auto& gcl : lev.lod_clusters) {
       if (lod_skip && !(gcl.flags & CtrLevelData::kClPlain)) {
-        // (lod_switch_error: lodnear's PS2 floor and titlemove's title minimum raise the error)
-        const float sw = by_error ? std::max(std::max(gcl.raw[0], gcl.raw[1] * lev.lod_floor_k),
-                                             lev.lod_bound_e())
-                                  : gcl.raw[1];
-        bool far = !(k > 0);
+        // (every member's near version within its far-plane x kd, with the fade band beyond)
+        bool far = !(kd > 0);
         if (!far) {
           const float dx = gcl.c[0] - cx, dy = gcl.c[1] - cy, dz = gcl.c[2] - cz;
-          const float reach = (gcl.a + std::max(sw, 0.f) * k) * 1.0002f + 256.f;
+          const float reach =
+              (gcl.a + gcl.raw[1] * kd * ctr_detail::kFadeBand) * 1.0002f + 256.f;
           far = dx * dx + dy * dy + dz * dz > reach * reach;
         }
         if (far) {
@@ -11784,18 +11820,21 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if (morph_on && lev.group_mid[g] > 0) {
         // the PS2's rule (c3l::ExtMorph) by the group's nearest point (its sphere: no instance is
         // nearer): the near version within the mid-plane, the mid version within the far-plane;
-        // each instance morphs by its own distance, and every version draws that surface (geometry
-        // 2 with geometry 0's colors): no hysteresis. Geometry 3 has colors of its own (fitted to
-        // the near surface): the title's flight (titlemove) has none nearer than kTitleLodMin
+        // each instance morphs by its own distance and color (c3l::MorphChunk::colors), and every
+        // version draws that surface: no hysteresis
         const float dv = std::sqrt(dx2(lg.bsphere)) - lg.bsphere[3];
-        const float tmin = lev.lod_min_e * k;
-        u8 v = !(kd > 0)                                    ? 2
-               : dv < lev.group_mid[g] * kd                 ? 0
-               : dv < std::max(lg.dist * kd, tmin)          ? 1
-                                                            : 2;
+        u8 v = !(kd > 0)                    ? 2
+               : dv < lev.group_mid[g] * kd ? 0
+               : dv < lg.dist * kd          ? 1
+                                            : 2;
 #ifndef __3DS__
         if (morph_ab == 1 && (rs.frame_idx & 1)) {
           v = 0;  // (host A/B: every group's near version, the surface the same)
+        }
+        if (morph_ab == 3 && v < 2) {
+          // (host A/B: the far-plane switch of every group at once: odd frames the mid version
+          // at the end of its morph, even frames the far version)
+          v = (rs.frame_idx & 1) ? 1 : 2;
         }
 #endif
         const u8 v_nat = v;  // (ctr_pop: by distance alone)
@@ -11863,157 +11902,78 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         near += v < 2;
         continue;
       }
-      const float dx = lg.bsphere[0] - cx, dy = lg.bsphere[1] - cy, dz = lg.bsphere[2] - cz;
-      const float d2 = dx * dx + dy * dy + dz * dz;
-      const float sw = by_error ? lev.lod_switch_error(g) : lg.dist;
-      const float f = (st & 1) ? 1.1f : 1.f;
-      auto near_at = [&](float kk) {
-        const float lim = sw * kk * f + lg.bsphere[3];
-        return kk > 0 && d2 < lim * lim;
-      };
-      bool n = near_at(k);
-      // (AI-assisted, streaming) c3l v19: the near version only while every near chunk holding it
-      // is there and within its distance; else the far version (data late: statistics). A group
-      // drawn far in view for want of its data (bit 4: held) keeps its far version while in view
-      // once the data is there: switching then would be a pop on screen; it switches out of view
-      // (AI-assisted, title3) not while the screen is black: none was seen far
-      bool keep_far = (st & 4) != 0 && !g_screen_black;
-      const bool n_nat = n;  // (ctr_pop: by distance alone)
+      // a group without the geomorph (Jak 1's wind ties): its near version within its PS2
+      // far-plane x the factor, crossfaded into the far one over the fade band beyond it (both
+      // drawn there, the one going out blended over the other: lod_fade, bit 7; not tf_state's 5)
+      const float dv = std::sqrt(dx2(lg.bsphere)) - lg.bsphere[3];
+      const float fl = lg.dist * kd;
+      constexpr float kBand = ctr_detail::kFadeBand - 1.f;
+      float a = fl > 0 ? std::clamp((fl * ctr_detail::kFadeBand - dv) / (fl * kBand), 0.f, 1.f)
+                       : 0.f;
+#ifndef __3DS__
+      static const bool wind_hard = getenv("CTR_WIND_HARD") != nullptr;  // (host pricing)
+      if (wind_hard) {
+        a = dv < fl ? 1.f : 0.f;
+      }
+#endif
+      const float a_nat = a;
       bool gone = false;
-      bool held_now = false;
-      if (n && has_units) {
-        if (g >= lev.group_unit_count.size() || !lev.group_unit_count[g]) {
-          n = false;  // (a v19 group whose near version is in no near chunk: none to draw)
-        } else {
-          const u32* gu = &lev.group_units[lev.group_unit_first[g]];
-          bool ok = true, late = false;
-          for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
-            const u8 uo = lev.unit_ok[gu[j]];
-            ok = ok && uo == 1;
-            late = late || uo == 3;
-          }
-          gone = late;
-          if (!ok) {
-            n = false;
-#ifndef __3DS__
-            {
-              // (AI-assisted, lodnear) host log: groups in view within their distance drawn far,
-              // by why (worst unit state: 3 late, 2 beyond the near chunk's draw distance, 0 none)
-              static const bool lod_log2 = getenv("CTR_LOD_LOG") != nullptr;
-              if (lod_log2 && sphere_in_view(cam, lg.bsphere)) {
-                u8 w = 1;
-                for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
-                  const u8 uo = lev.unit_ok[gu[j]];
-                  w = uo == 3 ? 3 : (w == 3 ? 3 : (uo != 1 ? uo : w));
-                }
-                const float d = std::sqrt(d2) / 4096.f;
-                g_lod_far_why[w & 3] += 1;
-                if (d < 20.f) {
-                  g_lod_far_close[w & 3] += 1;
-                }
-              }
-            }
-#endif
-            // a level its string hides whole asks for no near chunks: none of its groups is late
-            if (late && !j2_hidden) {
-              late_groups++;
-              for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
-                if (lev.unit_ok[gu[j]] == 3) {
-                  m_levels->stream_late(lev, gu[j], rs.frame_idx);
-                }
-              }
-              const bool seen = sphere_in_view(cam, lg.bsphere);
-              m_late_in_view += seen;  // (AI-assisted, j2intro) Jak II
-              late_view += seen;       // (AI-assisted, title3) Jak 1
-              ring0_late += seen && ring0_seen(lg.bsphere);
-              // (AI-assisted, j2intro / title3) not while the screen is black: it switches as
-              // soon as the data is there
-              if (!keep_far && !g_screen_black && seen) {
-                keep_far = true;
-                lev.lod_hold_since[g] = (u32)rs.frame_idx;
-              }
-            }
-          } else if (keep_far && g_screen_black) {
-            keep_far = false;  // (AI-assisted, j2intro) black screen: near at once
-          } else if (keep_far) {
-            // kept far while in view, at most kHoldFrames, and while the switch would show: the
-            // far version's error at least 1.5 x tie_lod_px (the camera nearer than 2/3 of the
-            // group's near distance; near it the error is about tie_lod_px). (AI-assisted,
-            // lodnear) but not where the far version is plainly wrong: from 3 x tie_lod_px of
-            // error on (the camera within 1/3 of that distance) the near version at once. Held
-            // up to 4 s, a continue's late groups stayed coarse 3-15 m from the camera and then
-            // switched together
-            const float e = by_error ? lev.lod_error[g] : lg.dist;
-            const float lim = e * k / 1.5f + lg.bsphere[3], lim_close = e * k / 3.f + lg.bsphere[3];
-            if (sphere_in_view(cam, lg.bsphere) && d2 < lim * lim && d2 > lim_close * lim_close &&
-                (u32)rs.frame_idx - lev.lod_hold_since[g] < kHoldFrames) {
-              n = false;
-              held_groups++;
-              held_now = true;
-            } else {
-              keep_far = false;
-            }
-          }
+      if (a > 0 && has_units) {
+        // data presence only stops an upgrade; the near version comes and goes with its units'
+        // morph floor (a fade here)
+        bool ok = g < lev.group_unit_count.size() && lev.group_unit_count[g] > 0;
+        bool late = false;
+        const u32* gu = ok ? &lev.group_units[lev.group_unit_first[g]] : nullptr;
+        for (u32 j = 0; ok && j < lev.group_unit_count[g]; j++) {
+          ok = lev.unit_ok[gu[j]] == 1;
+          late = late || lev.unit_ok[gu[j]] == 3;
         }
-      } else if (!n) {
-        keep_far = false;  // (beyond its distance: far anyway)
-      }
-      // ctr_pop: these switch without a morph
-      const bool forced = n != n_nat && lev.group_unit_count.size() > g && lev.group_unit_count[g];
-      // in view, a switch back within kLodDwellFrames of the last one waits while the version
-      // drawn is there and not plainly wrong (a camera swinging across a switch distance)
-      if ((st & 2) && ((st & 1) != 0) != n && !forced && !keep_far && !g_screen_black &&
-          (u16)(f16 - lod_sw[g]) < kLodDwellFrames && sphere_in_view(cam, lg.bsphere)) {
-        if (n) {
-          const float e = by_error ? lev.lod_error[g] : lg.dist;
-          const float lim = e * k / 1.5f + lg.bsphere[3];
-          n = d2 < lim * lim;
-        } else {
-          bool ok = !has_units;
-          if (has_units && g < lev.group_unit_count.size() && lev.group_unit_count[g]) {
-            ok = true;
-            const u32* gu = &lev.group_units[lev.group_unit_first[g]];
+        gone = late;
+        if (!ok) {
+          a = 0.f;
+          if (late && !j2_hidden) {
+            late_groups++;
             for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
-              ok = ok && lev.unit_ok[gu[j]] == 1;
+              if (lev.unit_ok[gu[j]] == 3) {
+                m_levels->stream_late(lev, gu[j], rs.frame_idx);
+              }
+            }
+            const bool seen = sphere_in_view(cam, lg.bsphere);
+            m_late_in_view += seen;
+            late_view += seen;
+            ring0_late += seen && ring0_seen(lg.bsphere);
+            if (seen && !g_screen_black) {
+              for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
+                lev.stream_units[gu[j]].late_seen = frame32p;
+              }
             }
           }
-          n = ok;
+        }
+        for (u32 j = 0; ok && j < lev.group_unit_count[g]; j++) {
+          const auto& su = lev.stream_units[gu[j]];
+          a = std::min(a, 1.f - CtrLevelData::unit_floor(su, frame32p));
         }
       }
-      if ((st & 2) && ((st & 1) != 0) != n) {
-        lod_sw[g] = f16;
-      }
-#ifndef __3DS__
-      // (AI-assisted, lodnear) host log, env CTR_LOD_LOG: every switch of a group in view, its
-      // distance, the PS2 far-plane and the screen-error distance, and why it is far
-      static const bool lod_log = getenv("CTR_LOD_LOG") != nullptr;
-      if (lod_log && (st & 2) && ((st & 1) != 0) != n && sphere_in_view(cam, lg.bsphere)) {
-        const char* why = n ? "near" : !near_at(k) ? "dist" : keep_far ? "late/held" : "nodata";
-        lg::info("[lodlog] {} g{} {} d {:.1f} m (to surface {:.1f}) ps2 far {:.1f} err-dist {:.1f} "
-                 "r {:.1f} err {:.3f} m",
-                 lev.name, g, why, std::sqrt(d2) / 4096.f, (std::sqrt(d2) - lg.bsphere[3]) / 4096.f,
-                 lg.dist / 4096.f, by_error ? lev.lod_error[g] * k / 4096.f : 0.f,
-                 lg.bsphere[3] / 4096.f, by_error ? lev.lod_error[g] / 4096.f : 0.f);
-      }
-#endif
-      if (pop_log_on() && (st & 2) && ((st & 1) != 0) != n && sphere_in_view(cam, lg.bsphere)) {
-        (n ? g_pop.lod_up : g_pop.lod_down)++;
-        lg::info("[popL] f={} {} g{} {} d={:.1f} sw={:.1f} r={:.1f} keep_far={}", rs.frame_idx,
-                 lev.name, g, n ? "near" : (!near_at(k) ? "dist" : "nodata/late"),
-                 std::sqrt(d2) / 4096.f, (sw * k) / 4096.f, lg.bsphere[3] / 4096.f,
-                 keep_far ? 1 : 0);  // (titlemove: which group, why)
-      }
+      const u8 fade = (u8)std::lround(a * 128.f);
+      const bool forced = a != a_nat;
       if (forced && pop_on) {
         m_pop_kept.push_back((u32)g);
       }
-      if ((st & 2) && ((st & 1) != 0) != n && pop_on && sphere_in_view(cam, lg.bsphere)) {
-        pop(forced ? (gone ? ctr_pop::kEvict : held_now ? ctr_pop::kHold : ctr_pop::kUnit)
-                     : (st & 16) ? ctr_pop::kLate
-                                 : ctr_pop::kLod,
-            lg.bsphere, n ? "tie group near" : "tie group far", (u32)g);
+      // ctr_pop: a quarter of the crossfade or more in one frame (data that came or went)
+      if ((st & 2) && std::abs((int)fade - (int)lev.lod_fade[g]) >= 32 && pop_on &&
+          sphere_in_view(cam, lg.bsphere)) {
+        pop(forced ? (gone ? ctr_pop::kEvict : ctr_pop::kUnit) : ctr_pop::kLod,
+            lg.bsphere, fade ? "tie group near" : "tie group far", (u32)g);
+        if (pop_log_on()) {
+          lg::info("[popL] f={} {} g{} fade {} -> {} d={:.1f} far={:.1f} r={:.1f}", rs.frame_idx,
+                   lev.name, g, lev.lod_fade[g], fade, dv / 4096.f, fl / 4096.f,
+                   lg.bsphere[3] / 4096.f);
+        }
       }
-      st = (u8)((keep_far ? 4 : 0) | 2 | (n ? 1 : 0) | (forced ? 16 : 0));
-      near += n;
+      lev.lod_fade[g] = fade;
+      lod_fading = lod_fading || (fade > 0 && fade < 128);
+      st = (u8)(2 | (fade ? 1 : 0) | (fade > 0 && fade < 128 ? 128 : 0) | (forced ? 16 : 0));
+      near += fade > 0;
     }
       if (lod_check) {
         lod_check = false;
@@ -12411,10 +12371,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         const float band_k = shrub_k * det * (1.f / 16.f) * 4096.f;
         float near_lim = banded ? std::min(lev.chunk_band_x[ci] * shrub_k * det, lim)
                                 : lim * kShrubNearK;
-        // (Jak 1's shrub lever: bands that start beyond ring 0 drawn nearer)
-        const float shrub_lever = dfl.shrub_far;
-        float lim_c = lim;
-        ctr_detail::shrub_band(&near_lim, &lim_c, shrub_lever, ring0);
+        const float lim_c = lim;
         const float dcx = ch.bsphere[0] - cam.trans[0], dcy = ch.bsphere[1] - cam.trans[1],
                     dcz = ch.bsphere[2] - cam.trans[2];
         const float dc = std::sqrt(dcx * dcx + dcy * dcy + dcz * dcz);
@@ -12463,13 +12420,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
               if (b) {
                 rl = std::min((float)(b & 0xffff) * band_k, lim);
                 rn = std::min((float)(b >> 16) * band_k, rl);
-                ctr_detail::shrub_band(&rn, &rl, shrub_lever, ring0);
                 rb = 128.f / std::max(rl - rn, 1.f);
               }
               if (d > rn) {
-                // 16 steps (of 8 in 0x80): neighbouring runs share a draw
-                const int q = (int)std::lround((rl - d) * rb * (1.f / 8.f)) * 8;
-                fade = (u8)std::clamp(q, 0, (int)kRunOpaque);
+                // continuous (neighbouring runs within 1/16 of it share a draw: fade_submit)
+                fade = (u8)std::clamp((int)std::lround((rl - d) * rb), 0, (int)kRunOpaque);
               }
             }
             fade_jumps += std::abs((int)fade - (int)rin[r]) >= 32;
@@ -12526,6 +12481,28 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         runs_valid = true;
         faded = true;
         partly = true;
+      }
+      // a crossfading LOD group's runs (lod_fade): the version coming in whole up to half way,
+      // then the one going out blended over it
+      if (lod_fading && lod_chunk && !tf_chunk && runs_valid && !vista_tier) {
+        const u32 r0 = lev.chunk_first_run[ci];
+        const u32 nr = std::max<u32>(lev.chunk_run_count[ci], ch.vis_run_count);
+        const u8 base = m_tie_fade[ci] < kRunOpaque ? m_tie_fade[ci] : kRunOpaque;
+        bool any = false;
+        for (u32 r = r0; r < r0 + nr && r < lev.run_lod.size(); r++) {
+          const auto& rl = lev.run_lod[r];
+          u8 f = base;
+          if (rl.lod != c3l::kRunLodAlways && rl.group < lev.lod_state.size() &&
+              (lev.lod_state[rl.group] & 128)) {
+            const int a = lev.lod_fade[rl.group];
+            const int lf = std::min(rl.lod == c3l::kRunLodFar ? 2 * (128 - a) : 2 * a, 128);
+            f = (u8)std::min<int>(f, lf);
+            any = any || m_run_shown[r];
+          }
+          m_run_fade[r] = f;
+        }
+        faded = faded || any;
+        partly = partly || any;
       }
       // ctr_pop: drawn now, not chosen last frame
       if (!sel_last && m_pop_why[ci] != 0xff && !lev.is_unit(ci)) {
@@ -13113,6 +13090,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if (vc.tmorph) {
         m_tf_colors_written += tf_morph_colors(lev, vc.chunk, shown_of(vc));
       }
+      if (lev.morph_colored(vc.chunk)) {
+        m_tf_colors_written += tie_morph_colors(lev, vc.chunk);
+      }
     }
     tod_finish();
     tod_ms += tod_now_ms() - t0;
@@ -13389,22 +13369,34 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const float kd = morph_kd;
     const float floor = m_visible[slot].floor;
     const float px = cam.trans[0], py = cam.trans[1], pz = cam.trans[2];
-    row[0] = row[1] = row[2] = row[3] = 0.f;
+    row[0] = row[1] = row[2] = 0.f;
+    row[3] = 1.f / 255.f;  // (ctr_gpu_draw_mesh_morph: the color's factors)
     const u32* keys = &lev.morph_rows[mc.row_first];
     for (u32 r = 0; r < mc.row_count; r++) {
       const auto& in = lev.morph_insts[keys[r]];
       const float ex = in.c[0] - px, ey = in.c[1] - py, ez = in.c[2] - pz;
       const float d = std::sqrt(ex * ex + ey * ey + ez * ez) - in.r;
       float* rr = row + 4 * (r + 1);
+      float fb[2];
       for (int b = 0; b < 2; b++) {
         const float f = kd > 0 ? (d - in.start[b] * kd) * in.rlen[b] / kd : 0.f;
-        rr[b] = std::max(std::clamp(f, 0.f, 1.f), floor) * mc.delta_scale;
+        fb[b] = std::max(std::clamp(f, 0.f, 1.f), floor);
+        rr[b] = fb[b] * mc.delta_scale;
       }
-      rr[2] = rr[3] = 0.f;
+      // the color targets' factor: band 1's for the instance copies that carry it, else band 2's
+      const float gc = keys[r] < lev.morph_band1.size() && lev.morph_band1[keys[r]] ? fb[0] : fb[1];
+      rr[2] = gc / 255.f;
+      rr[3] = (1.f - gc) / 255.f;
 #ifndef __3DS__
       static const int morph_ab = getenv("CTR_MORPH_AB") ? atoi(getenv("CTR_MORPH_AB")) : 0;
       if (morph_ab == 2 && (rs.frame_idx & 1)) {
-        rr[0] = rr[1] = 0.f;
+        rr[0] = rr[1] = rr[2] = 0.f;
+        rr[3] = 1.f / 255.f;
+      }
+      if (morph_ab == 3) {
+        rr[0] = rr[1] = mc.delta_scale;
+        rr[2] = 1.f / 255.f;
+        rr[3] = 0.f;
       }
 #endif
     }
@@ -13437,12 +13429,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                        lev.wind_k.size() == 2 * lev.wind_insts.size();
   bool wind_inline = false;  // the ordered pass: drawn in its place
   m_wind_calls.clear();
+  m_wind_fade_calls.clear();
   if (wind_on) {
     m_wind_rows.clear();
     m_wind_row_of.assign(m_visible.size(), -1);
     m_wind_row_id.assign(m_visible.size(), 0);
   }
-  auto wind_submit = [&](u32 di, int slot, const VisibleChunk& vc, u32 first, u32 count) {
+  auto wind_submit = [&](u32 di, int slot, const VisibleChunk& vc, u32 first, u32 count,
+                         const ctr_draw_state* faded = nullptr) {
     const auto& ch = lev.chunks[vc.chunk];
     const u32 n = lev.chunk_wind_n[vc.chunk];
     if (m_wind_row_of[slot] < 0) {
@@ -13458,10 +13452,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         m_wind_rows.insert(m_wind_rows.end(), row, row + 4);
       }
     }
-    m_wind_calls.push_back({&lev.draw_states[di], &vc.gpu, (u32)m_wind_row_of[slot], n + 1,
-                            m_wind_row_id[slot], lev.meshes[vc.chunk], lev.chunk_wind[vc.chunk],
-                            (int)first, (int)count, vc.nofog ? 1 : 0});
-    if (wind_inline) {
+    (faded ? m_wind_fade_calls : m_wind_calls)
+        .push_back({faded ? faded : &lev.draw_states[di], &vc.gpu, (u32)m_wind_row_of[slot], n + 1,
+                    m_wind_row_id[slot], lev.meshes[vc.chunk], lev.chunk_wind[vc.chunk],
+                    (int)first, (int)count, vc.nofog ? 1 : 0});
+    if (wind_inline && !faded) {
 #ifdef __3DS__
       flush_calls(0);
 #endif
@@ -13540,6 +13535,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                                  m_morph_row_of[slot] >= 0 && morph_moving(mlist, slot);
     const float* const mrows = morph ? morph_rows_of(slot) : nullptr;
     const int moff = morph ? (int)lev.normals_offset_in_mesh(vc.chunk) : 0;
+    const int mcoff = morph ? (int)lev.morph_colors_offset(vc.chunk) : 0;
     // the tfrag geomorph: a chunk with near or mid versions shown
     const bool tmorph = vc.tmorph && !vista_pass && !wind && env < 0;
     if (part == kPartMoving && !tmorph) {
@@ -13570,7 +13566,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         m_morph_prog_tris[0] += count / 3;
         m_calls.push_back({&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], (int)first,
                            (int)count, vc.nofog ? 1 : 0, mrows, &lev.morph_draw_rows[mlist + 1],
-                           lev.morph_draw_rows[mlist], moff, m_morph_row_id[slot], nullptr, 0});
+                           lev.morph_draw_rows[mlist], moff, m_morph_row_id[slot], nullptr, 0,
+                           mcoff});
         return;
       }
       if (tm_call) {
@@ -13606,8 +13603,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         m_morph_prog_tris[0] += count / 3;
         ctr_gpu_draw_mesh_morph(&lev.draw_states[di], &vc.gpu, mrows,
                                 &lev.morph_draw_rows[mlist + 1], lev.morph_draw_rows[mlist],
-                                m_morph_row_id[slot], lev.meshes[vc.chunk], moff, (int)first,
-                                (int)count);
+                                m_morph_row_id[slot], lev.meshes[vc.chunk], moff, mcoff,
+                                (int)first, (int)count);
         return;
       }
       if (tm_call) {
@@ -13632,7 +13629,21 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // GS's constant alpha; alpha blended draws keep theirs), next runs of the same fade joined
     auto fade_submit = [&](u32 first, u32 count, u8 fade) {
       const ctr_draw_state& st = lev.draw_states[di];
-      if (!m_fade_calls.empty() && fade_di == di && fade_fd == fade) {
+      if (wind) {
+        // (a crossfading wind group: swayed, blended after the opaque draws)
+        const ctr_draw_state* use = &st;
+        if (st.blend == CTR_BLEND_OFF) {
+          ctr_draw_state& f = m_fade_states.emplace_back(st);
+          f.blend = CTR_BLEND_FIX;
+          f.fix = fade;
+          f.flags &= (u8)~CTR_STATE_EARLY_DEPTH;
+          use = &f;
+        }
+        wind_submit(di, slot, vc, first, count, use);
+        m_fade_runs++;
+        return;
+      }
+      if (!m_fade_calls.empty() && fade_di == di && std::abs((int)fade_fd - (int)fade) < 8) {
         ctr_mesh_call& last = m_fade_calls.back();
         if (last.matrix == &vc.gpu && last.first_index + last.index_count == (int)first) {
           last.index_count += (int)count;
@@ -13991,6 +14002,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     ctr_gpu_draw_mesh_prepared(c.state, c.matrix, c.mesh, c.first_index, c.index_count);
   }
 #endif
+  if (!m_wind_fade_calls.empty()) {
+    // the crossfading wind groups' blended versions
+#ifdef __3DS__
+    flush_calls(0);
+#else
+    ctr_gpu_soft_bucket((m_name.substr(0, 2) + "/windfade").c_str());
+#endif
+    m_wind_calls.swap(m_wind_fade_calls);
+    draw_wind_calls(lev);
+    m_wind_fade_calls.clear();
+  }
   if (m_jak2_slot >= 0) {
     // (AI-assisted, j2water) Jak II: the blended and ordered draws (water, glass, decals) wait
     // for the slot's water bucket (draw_jak2_late), after the characters (merc), as the PS2

@@ -375,10 +375,9 @@ std::string CtrSettings::summary() const {
     if (!fl.on) {
       return std::string("no floor");
     }
-    std::string r = fmt::format("fixed floor: shrub bands x{:.1f} beyond {:.0f}m", fl.shrub_far,
-                                ctr_detail::kNearRingMeters);
+    std::string r = "fixed floor:";
     if (fl.tie_far > 0) {
-      r += fmt::format(", tie vista copies from {:.0f}m", fl.tie_far);
+      r += fmt::format(" tie vista copies from {:.0f}m", fl.tie_far);
     }
     if (fl.tie_lod_px != tie_lod_px) {
       r += fmt::format(", tie_lod_px {:.0f}", fl.tie_lod_px);

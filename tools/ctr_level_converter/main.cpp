@@ -284,6 +284,11 @@ struct SrcVertex {
   u8 mband = 0;
   float mdelta[3] = {0, 0, 0};
   float mdelta2[3] = {0, 0, 0};
+  // its color's morph (c3l::MorphChunk::colors): the band (0: none), the two time of day colors
+  // whose mean it goes to
+  u8 mcband = 0;
+  u32 mctgt[2] = {0, 0};
+  u8 mcrgb[3] = {0, 0, 0};
   // a tfrag vertex of the PS2's tfrag geomorph (c3l::ExtTfrag): tfrag_morph::Kind + 1 (0: none),
   // its world offsets at the end of band 0 and band 1, the colors (tod ids) its color goes to
   u8 tkind = 0;
@@ -297,8 +302,14 @@ struct SrcVertex {
 struct MorphRec {
   u32 key = 0;
   s32 d[6] = {0, 0, 0, 0, 0, 0};  // (32 bits: a fine grid can't hold every offset in 16)
+  // its color's target: the converter's time of day ids of the pair (its own twice without a
+  // target), their mean's rgb in the converter's palette
+  u8 cband = 0;
+  u32 ct[2] = {0, 0};
+  u8 crgb[3] = {0, 0, 0};
   bool operator==(const MorphRec& o) const {
-    return key == o.key && memcmp(d, o.d, sizeof(d)) == 0;
+    return key == o.key && cband == o.cband && ct[0] == o.ct[0] && ct[1] == o.ct[1] &&
+           memcmp(d, o.d, sizeof(d)) == 0;
   }
 };
 
@@ -2207,6 +2218,8 @@ struct Converter {
   // morphing instances (by tree << 32 | matrix) and the level's data
   std::vector<float> lod_group_mid;
   std::vector<c3l::MorphInst> morph_insts;
+  // per MorphInst: 1 a copy whose rows move their vertices' colors over band 1 (ExtMorph::pad)
+  std::vector<u8> morph_inst_band1;
   std::unordered_map<u64, u32> morph_inst_of;
   const tie_lod::Morph* morph = nullptr;
   // vertices: geometry 0's of band 1, of band 2 only, geometry 2's; geometry 2 vertices given
@@ -2546,6 +2559,186 @@ struct Converter {
       st->sgn_own += r.sgn_own;
       st->sgn_fit += r.sgn_fit;
       st->sgn_pick += r.sgn_pick;
+    }
+  }
+
+  // morph_colors' statistics (GS units, mean over the 8 palettes' rgb): the vertices given a color
+  // target, their color against the surface's where they land (the step the plane showed), what
+  // the target (the mean of two colors) is off that
+  struct MorphColorStats {
+    size_t verts = 0, band1 = 0, band2 = 0;
+    double step = 0, off = 0;
+  };
+
+  /*!
+   * The PS2 morphs a tie vertex's color with its position (the tie VU program: from its own color
+   * to the mean of its two parents' colors, the next geometry's color where the vertex lands).
+   * Here: a vertex of a morph group's near version that moves in band 1 goes over band 1 to the
+   * mid version's color where band 1 lands it; every other vertex of the near and mid versions
+   * goes over band 2 to the far version's color where its offsets land it. So no plane shows a
+   * step of light, whatever colors the far version has (the fit). The target is the mean of two
+   * time of day colors: the landing triangle's two heaviest corners (at a corner its own twice).
+   * Band 1's vertices take a copy of their instance (morph_inst_band1): its rows carry band 1.
+   */
+  void morph_colors(MorphColorStats* st) {
+    struct GroupTris {
+      std::vector<u32> near_t, mid_t, far_t;
+    };
+    std::map<u32, GroupTris> groups;
+    for (u32 i = 0; i < tris.size(); i++) {
+      const auto& t = tris[i];
+      if (t.lod_group >= lod_group_mid.size() || !(lod_group_mid[t.lod_group] > 0)) {
+        continue;
+      }
+      auto& g = groups[t.lod_group];
+      (t.lod == c3l::kRunLodNear ? g.near_t : t.lod == c3l::kRunLodMid ? g.mid_t : g.far_t)
+          .push_back(i);
+    }
+    constexpr int kC = 24;
+    using Col = std::array<float, kC>;
+    auto plain = [&](u32 vi) {
+      const u32 t = verts[vi].tod;
+      return t != kTodNone && !(t & kTodMulBit) && t < tod_colors.size();
+    };
+    auto color_of = [&](u32 id) {
+      Col c;
+      for (int k = 0; k < kC; k++) {
+        c[k] = tod_colors[id].rgba[k / 3][k % 3];
+      }
+      return c;
+    };
+    // the surface ts's color at its point nearest to p, and the two time of day colors for it
+    auto target = [&](const std::vector<u32>& ts, const float* p, Col* exact, u32* pv) {
+      float best = 1e30f, bw[3] = {0, 0, 0};
+      const SrcTri* bt = nullptr;
+      for (u32 ti : ts) {
+        tie_lod::Tri tri;
+        for (int k = 0; k < 3; k++) {
+          const auto& v = verts[tris[ti].v[k]];
+          tri[3 * k] = v.x;
+          tri[3 * k + 1] = v.y;
+          tri[3 * k + 2] = v.z;
+        }
+        float w[3];
+        const float d = tie_lod::closest_point_bary(p, tri, w);
+        if (d < best) {
+          best = d;
+          bt = &tris[ti];
+          memcpy(bw, w, sizeof(bw));
+        }
+      }
+      if (!bt || !plain(bt->v[0]) || !plain(bt->v[1]) || !plain(bt->v[2])) {
+        return false;
+      }
+      exact->fill(0.f);
+      for (int k = 0; k < 3; k++) {
+        const Col c = color_of(verts[bt->v[k]].tod);
+        for (int j = 0; j < kC; j++) {
+          (*exact)[j] += bw[k] * c[j];
+        }
+      }
+      int o[3] = {0, 1, 2};
+      std::sort(o, o + 3, [&](int a, int b) { return bw[a] > bw[b]; });
+      pv[0] = bt->v[o[0]];
+      pv[1] = bw[o[0]] >= 0.75f ? pv[0] : bt->v[o[1]];
+      return true;
+    };
+    std::vector<u32> keys;
+    for (const auto& [g, gt] : groups) {
+      if (!gt.far_t.empty() && (!gt.near_t.empty() || !gt.mid_t.empty())) {
+        keys.push_back(g);
+      }
+    }
+    struct Target {
+      u32 v, id[2];
+      u8 band;
+      u8 rgb[3];
+    };
+    struct Result {
+      std::vector<Target> tg;
+      u32 inst = UINT32_MAX;
+      MorphColorStats st;
+    };
+    std::vector<Result> results(keys.size());
+    BS::thread_pool pool(opt.threads > 0 ? opt.threads : std::thread::hardware_concurrency());
+    pool.push_loop(keys.size(), [&](size_t a, size_t b) {
+      for (size_t gi = a; gi < b; gi++) {
+        const auto& gt = groups.at(keys[gi]);
+        auto& res = results[gi];
+        std::set<u32> done;
+        for (const auto* ts : {&gt.near_t, &gt.mid_t}) {
+          for (u32 ti : *ts) {
+            for (u32 vi : tris[ti].v) {
+              if (!done.insert(vi).second || !plain(vi)) {
+                continue;
+              }
+              const auto& v = verts[vi];
+              if (v.mband && res.inst == UINT32_MAX) {
+                res.inst = v.minst;
+              }
+              const bool b1 = ts == &gt.near_t && (v.mdelta[0] || v.mdelta[1] || v.mdelta[2]);
+              const float* d2 = b1 ? nullptr : v.mdelta2;
+              const float p[3] = {v.x + (b1 ? v.mdelta[0] : d2[0]),
+                                  v.y + (b1 ? v.mdelta[1] : d2[1]),
+                                  v.z + (b1 ? v.mdelta[2] : d2[2])};
+              Col exact;
+              u32 pv[2];
+              if (!target(b1 ? gt.mid_t : gt.far_t, p, &exact, pv)) {
+                continue;
+              }
+              const u32 a_ = verts[pv[0]].tod, b_ = verts[pv[1]].tod;
+              if (a_ == v.tod && b_ == v.tod) {
+                continue;
+              }
+              const Col o = color_of(v.tod), ca = color_of(a_), cb = color_of(b_);
+              double step = 0, off = 0;
+              for (int j = 0; j < kC; j++) {
+                step += std::abs(o[j] - exact[j]);
+                off += std::abs((ca[j] + cb[j]) / 2 - exact[j]);
+              }
+              Target tg{vi, {std::min(a_, b_), std::max(a_, b_)}, (u8)(b1 ? 1 : 2), {0, 0, 0}};
+              for (int c = 0; c < 3; c++) {
+                tg.rgb[c] = (u8)((verts[pv[0]].rgba[c] + verts[pv[1]].rgba[c] + 1) / 2);
+              }
+              res.tg.push_back(tg);
+              res.st.verts++;
+              (b1 ? res.st.band1 : res.st.band2)++;
+              res.st.step += step / kC;
+              res.st.off += off / kC;
+            }
+          }
+        }
+      }
+    });
+    pool.wait_for_tasks();
+    morph_inst_band1.resize(morph_insts.size(), 0);
+    for (const auto& r : results) {
+      if (r.inst == UINT32_MAX) {
+        continue;  // (no moving vertex: no morph row)
+      }
+      u32 band1_inst = UINT32_MAX;
+      for (const auto& t : r.tg) {
+        auto& v = verts[t.v];
+        v.mcband = t.band;
+        v.mctgt[0] = t.id[0];
+        v.mctgt[1] = t.id[1];
+        memcpy(v.mcrgb, t.rgb, 3);
+        v.mband = 1;
+        v.minst = r.inst;
+        if (t.band == 1) {
+          if (band1_inst == UINT32_MAX) {
+            band1_inst = (u32)morph_insts.size();
+            morph_insts.push_back(morph_insts[r.inst]);
+            morph_inst_band1.push_back(1);
+          }
+          v.minst = band1_inst;
+        }
+      }
+      st->verts += r.st.verts;
+      st->band1 += r.st.band1;
+      st->band2 += r.st.band2;
+      st->step += r.st.step;
+      st->off += r.st.off;
     }
   }
 
@@ -4769,6 +4962,7 @@ struct TieLodStats {
   size_t groups = 0, candidates = 0, selected = 0, no_dist = 0;
   size_t core = 0;  // (AI-assisted, streaming) selected groups the budget took
   size_t morph = 0;  // selected groups with the PS2's geomorph (three versions)
+  size_t wind_ps2 = 0;  // wind groups at their prototype's PS2 far-plane
   size_t near_tris = 0, far_tris = 0;          // all groups: near / far geometry
   size_t sel_near_tris = 0, sel_far_tris = 0;  // the selected groups
   double cost_kb = 0, cost_all_kb = 0;         // estimated extra vertex + index data
@@ -4854,6 +5048,17 @@ void select_tie_lods(tfrag3::Level& level, const Options& opt, Converter* cv, Ti
     if (!tie_lod::ps2_dists(g_dist_prefix + level.level_name, names[i], &mid, &far)) {
       far = opt.tie_lod_default_m;
       st->no_dist += g.proto != 0xffff;
+      // a wind instance: its prototype's PS2 far-plane (the geomorph data)
+      const u64 wi = list[i].first & 0xffffffffffull;
+      if (g.proto == 0xffff && cv->morph && tree < cv->morph->trees[0].size() &&
+          wi < cv->morph->trees[0][tree].wind.size()) {
+        const auto& mt = cv->morph->trees[0][tree];
+        const u32 p = mt.wind[wi].proto;
+        if (p < mt.protos.size() && mt.protos[p].dists[3] > 0) {
+          far = mt.protos[p].dists[3] / 4096.f;
+          st->wind_ps2++;
+        }
+      }
     }
     dists[i] = far * 4096.f;
     st->groups++;
@@ -5308,6 +5513,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                "{:+.2f}, picked {:.2f} / {:+.2f}",
                in.stem().string(), fs.changed, fs.far_verts, fs.abs_own / a, fs.sgn_own / a,
                fs.abs_fit / a, fs.sgn_fit / a, fs.abs_pick / a, fs.sgn_pick / a);
+    }
+    if (cv.morph) {
+      Converter::MorphColorStats ms;
+      cv.morph_colors(&ms);
+      const double n = std::max<double>(ms.verts, 1);
+      lg::info("{}: tie geomorph colors: {} near / mid vertices with a color target ({} in band "
+               "1, {} in band 2), their step without it {:.2f} GS units, the pair's mean off the "
+               "surface {:.2f}",
+               in.stem().string(), ms.verts, ms.band1, ms.band2, ms.step / n, ms.off / n);
     }
   }
   int shrub_trees = 0;
@@ -6265,11 +6479,14 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   // the PS2's tie geomorph (c3l::ExtMorph): the near chunks with moving vertices, their rows
   std::vector<c3l::MorphChunk> out_morph_chunks;
   std::vector<std::vector<c3l::MorphVertex>> out_morph_recs;  // per morph chunk
+  std::vector<std::vector<u32>> out_morph_cols;  // per morph chunk: its color targets (or none)
+  std::vector<u16> out_morph_palette;  // the morph chunks' color palettes (c3l::ExtMorph::pad)
   std::vector<u32> out_morph_rows;
   std::vector<u8> out_morph_draw_rows;
   struct MorphStats {
     size_t chunks = 0, verts = 0, moving = 0, over_rows = 0, over_verts = 0, max_rows = 0;
     size_t draws = 0, draw_rows = 0, rows = 0;
+    size_t color_chunks = 0, colored = 0, palette_missed = 0, max_palette = 0, color_bytes = 0;
     double max_delta_m = 0;
   } mst;
   // a near chunk's MorphVertex records (its mesh's tail at runtime), its rows
@@ -6325,7 +6542,83 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         mv[v].delta2[c] = (s8)std::clamp((int)std::lround(r.d[3 + c] / dscale), -127, 127);
       }
     }
+    // the color targets (c3l::MorphChunk::colors): with any, the chunk's palette of time of day
+    // ids (at most 255, the most used; a target's id not in it: the palette's nearest color) and
+    // per vertex a word: the target's rgb (the converter's palette; the runtime writes it), alpha
+    // its second id's index in the palette (the first's in the record's color byte; 255: none)
+    std::vector<u32> cols;
+    std::vector<const MorphRec*> vrec(nv, nullptr);
+    std::unordered_map<u32, u32> uses;
+    bool any_col = false;
+    for (u32 v = 0; v < nv; v++) {
+      if (mv[v].row) {
+        const auto& o = out_verts[ch.first_vertex + v];
+        vrec[v] = &recs.at(std::string((const char*)&o, sizeof(o)));
+        any_col = any_col || vrec[v]->cband;
+        if (cv.tod_colors.size() > vrec[v]->ct[1]) {
+          uses[vrec[v]->ct[0]]++;
+          uses[vrec[v]->ct[1]]++;
+        }
+      }
+    }
+    const u32 pfirst = (u32)out_morph_palette.size();
+    if (any_col) {
+      std::vector<std::pair<u32, u32>> by(uses.begin(), uses.end());
+      std::sort(by.begin(), by.end(), [](const auto& a, const auto& b) {
+        return a.second != b.second ? a.second > b.second : a.first < b.first;
+      });
+      by.resize(std::min<size_t>(by.size(), 255));
+      std::unordered_map<u32, u8> pix;
+      for (const auto& [id, n] : by) {
+        pix.emplace(id, (u8)pix.size());
+        out_morph_palette.push_back(cv.tod_pad(id));
+      }
+      mst.max_palette = std::max(mst.max_palette, pix.size());
+      auto index_of = [&](u32 id) -> u8 {
+        if (auto it = pix.find(id); it != pix.end()) {
+          return it->second;
+        }
+        // the palette's nearest color (all 8 palettes)
+        float best = 1e30f;
+        u8 bi = 0;
+        for (const auto& [pid, k] : pix) {
+          float d = 0;
+          for (int q = 0; q < 8; q++) {
+            for (int c = 0; c < 3; c++) {
+              const float x = (float)cv.tod_colors[pid].rgba[q][c] - cv.tod_colors[id].rgba[q][c];
+              d += x * x;
+            }
+          }
+          if (d < best) {
+            best = d;
+            bi = k;
+          }
+        }
+        mst.palette_missed++;
+        return bi;
+      };
+      cols.assign(nv, 0);
+      for (u32 v = 0; v < nv; v++) {
+        const auto& o = out_verts[ch.first_vertex + v];
+        u32 rgb = o.rgba[0] | o.rgba[1] << 8 | o.rgba[2] << 16;
+        u8 a = 255, b = 255;
+        if (vrec[v] && cv.tod_colors.size() > std::max(vrec[v]->ct[0], vrec[v]->ct[1])) {
+          a = index_of(vrec[v]->ct[0]);
+          b = index_of(vrec[v]->ct[1]);
+          rgb = vrec[v]->crgb[0] | vrec[v]->crgb[1] << 8 | vrec[v]->crgb[2] << 16;
+          mst.colored += vrec[v]->cband != 0;
+        }
+        mv[v].color = (s8)a;
+        cols[v] = rgb | (u32)b << 24;
+      }
+    }
     c3l::MorphChunk mc{};
+    if (!cols.empty()) {
+      mc.colors = pfirst + 1;
+      mst.color_chunks++;
+      mst.color_bytes += 4 * (size_t)nv;
+    }
+    out_morph_cols.push_back(std::move(cols));
     mc.draw_rows = (u32)out_morph_draw_rows.size();
     for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
       std::set<u8> used;
@@ -6586,6 +6879,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         MorphRec mr{};
         if (morph_verts && v.mband) {
           mr.key = v.minst + 1;
+          mr.cband = v.mcband;
+          mr.ct[0] = v.mcband ? v.mctgt[0] : v.tod;
+          mr.ct[1] = v.mcband ? v.mctgt[1] : v.tod;
+          memcpy(mr.crgb, v.mcband ? v.mcrgb : v.rgba, 3);
           for (int c = 0; c < 3; c++) {
             mr.d[c] = (s32)std::lround(v.mdelta[c] / cp.grid);
             mr.d[3 + c] = (s32)std::lround(v.mdelta2[c] / cp.grid);
@@ -7643,6 +7940,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       // (a chunk with envmapped tie normals too: the records, then the normals)
       auto& t = tails[out_morph_chunks[i].chunk];
       t.insert(t.begin(), (const u8*)r.data(), (const u8*)(r.data() + r.size()));
+      // (then the color targets' words, c3l::MorphChunk::colors)
+      const auto& c = out_morph_cols[i];
+      t.insert(t.end(), (const u8*)c.data(), (const u8*)(c.data() + c.size()));
     }
   }
   // the tables read with them before the meshes (load_env_tie_chunks, load_morph, load_tfrag_lod)
@@ -7667,6 +7967,21 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       mids[g] = cv.lod_group_mid[g];
     }
     em.group_mid_offset = append(buf, mids.data(), mids.size());
+    if (!out_morph_palette.empty()) {
+      // the color targets (c3l::ExtMorph::colors_offset)
+      std::vector<u8> band1(cv.morph_insts.size(), 0);
+      for (size_t i = 0; i < band1.size() && i < cv.morph_inst_band1.size(); i++) {
+        band1[i] = cv.morph_inst_band1[i];
+      }
+      while (band1.size() % 4) {
+        band1.push_back(0);
+      }
+      const u32 np = (u32)out_morph_palette.size();
+      band1.insert(band1.end(), (const u8*)&np, (const u8*)&np + 4);
+      band1.insert(band1.end(), (const u8*)out_morph_palette.data(),
+                   (const u8*)(out_morph_palette.data() + np));
+      em.colors_offset = append(buf, band1.data(), band1.size());
+    }
   }
   // (then the tfrag geomorph's: load_tfrag_lod reads them after the morph tables)
   c3l::ExtTfrag etf{};
@@ -8090,6 +8405,12 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                (double)mst.rows / std::max<size_t>(mst.chunks, 1),
                (double)mst.draw_rows / std::max<size_t>(mst.draws, 1), mst.draws, mst.over_rows,
                c3l::kMorphRows - 1);
+      lg::info("{}: tie geomorph colors: {} chunks with {} vertices' color targets ({} KB of "
+               "words, {} KB of palettes and band 1 flags), palettes up to {} colors, {} colors "
+               "not in their palette",
+               level.level_name, mst.color_chunks, mst.colored, mst.color_bytes / 1024,
+               (out_morph_palette.size() * 2 + cv.morph_insts.size()) / 1024, mst.max_palette,
+               mst.palette_missed);
     }
     std::vector<std::pair<std::string, TieLodStats::Proto>> left(lstats.protos.begin(),
                                                                  lstats.protos.end());
