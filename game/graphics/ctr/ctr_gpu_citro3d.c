@@ -6362,6 +6362,7 @@ void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out) {
   static uint32_t s_next_id;
   out->id = ++s_next_id ? s_next_id : ++s_next_id; /* never 0 */
   out->fog_gen = 0;
+  out->lut_gen = 0; /* (the fog table row is made at the first draw: the memory may hold another matrix's) */
 }
 
 /* (AI-assisted) shader_opt (ctr_mesh_opt.v.pica): the fog rows clip[4], clip[5] of a matrix (C3D_Mtx
