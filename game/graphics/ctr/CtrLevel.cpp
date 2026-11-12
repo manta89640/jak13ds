@@ -10451,15 +10451,19 @@ struct RunLoopIn {
   float scale;
   u8* shown_out;
   u8* nomerge_out;
-  u16* margin_out;  // STR: per run its kRunMarginUnit steps from the planes (kRunUntested: none)
+  u8* margin_out;  // STR: per run its distance from the planes (run_margin_q; kRunUntested: none)
 };
-// a run's distance from the planes in steps of kRunMarginUnit (rounded down, at most kRunMarginMax);
-// kRunUntested: not view tested (hidden by the string or its LOD group, or no sphere)
-constexpr float kRunMarginUnit = 64.f;
-constexpr u16 kRunMarginMax = 0xfffe, kRunUntested = 0xffff;
-inline u16 run_margin_q(float m) {
-  const float q = m * (1.f / kRunMarginUnit);
-  return q >= (float)kRunMarginMax ? kRunMarginMax : (u16)q;
+// a run's distance from the planes as q, the distance at least q * q * kRunMarginUnit (rounded
+// down, at most kRunMarginMax); kRunUntested: not view tested (hidden by the string or its LOD
+// group, or no sphere)
+constexpr float kRunMarginUnit = 16.f;
+constexpr u8 kRunMarginMax = 0xfe, kRunUntested = 0xff;
+inline u8 run_margin_q(float m) {
+  const float q = std::sqrt(std::max(m, 0.f) * (1.f / kRunMarginUnit));
+  return q >= (float)kRunMarginMax ? kRunMarginMax : (u8)q;
+}
+inline float run_margin_of(u8 q) {
+  return (float)q * (float)q * kRunMarginUnit;
 }
 struct RunLoopOut {
   u32 shown = 0, view_hidden = 0, view_tris = 0, lod_hid = 0;
@@ -10496,7 +10500,7 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
   const u8* const vis = in.vis;
   u8* const shown_out = in.shown_out;
   u8* const nomerge_out = in.nomerge_out;
-  u16* const margin_out = in.margin_out;
+  u8* const margin_out = in.margin_out;
   const bool vista_tier = in.vista_tier;
   for (u32 r = r0; r < r0 + nr; r++) {
     // (AI-assisted, pld) the ARM11 has no hardware prefetch: 16 runs ahead (4 lines of VisRun and
@@ -10540,7 +10544,7 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
       }
     }
     nomerge_out[r] = nomerge;
-    u16 mq = kRunUntested;
+    u8 mq = kRunUntested;
     if (STR && s) {
       const auto& rs = spheres[r];
       if (rs.r != 0xffff) {
@@ -11414,6 +11418,15 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
     m_rc_partial = m_rc_retested = 0;
     lg::info("[ctr] {}: draw ranges kept for {} draws; checked {}, {} differed", m_name,
              m_dr_hits, m_dr_checked, m_dr_bad);
+    auto cap = [](const auto& v) { return (u64)v.capacity() * sizeof(v[0]); };
+    lg::info("[ctr] {}: run / range cache heap: chunks {} KB, runs {} KB, draws {} KB, range pool "
+             "{} KB, group maps {} KB",
+             m_name, (cap(m_run_cache) + cap(m_chunk_rver) + cap(m_run_synced)) / 1024,
+             (cap(m_raw_shown) + cap(m_raw_nomerge) + cap(m_raw_margin)) / 1024,
+             cap(m_dr_cache) / 1024, cap(m_dr_pool) / 1024,
+             (cap(m_g2c_first) + cap(m_g2c) + cap(m_t2c_first) + cap(m_t2c) + cap(m_lod_prev) +
+              cap(m_tf_prev) + cap(m_vis_prev)) /
+                 1024);
     m_dr_hits = m_dr_checked = m_dr_bad = 0;
   }
   if (rs.log_now && m_vista_frames) {
@@ -12632,14 +12645,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         m_run_cache.size() != lev.chunks.size() || m_raw_shown.size() != lev.vis_runs.size()) {
       m_rc_lev = &lev;
       m_rc_gen = lev.generation;
-      m_run_cache.assign(lev.chunks.size(), RunCache());
-      m_chunk_rver.assign(lev.chunks.size(), 0);
-      m_run_synced.assign(lev.chunks.size(), 0);
-      m_dr_cache.assign(lev.draws.size(), DrawRanges());
+      // (exact sizes: the vectors of a larger level before give their room back)
+      m_run_cache = std::vector<RunCache>(lev.chunks.size());
+      m_chunk_rver = std::vector<u32>(lev.chunks.size(), 0);
+      m_run_synced = std::vector<u8>(lev.chunks.size(), 0);
+      m_dr_cache = std::vector<DrawRanges>(lev.draws.size());
       m_dr_pool.clear();
-      m_dr_epoch++;
-      m_raw_shown.assign(lev.vis_runs.size(), 0);
-      m_raw_nomerge.assign(lev.vis_runs.size(), 0);
+      m_dr_pool.reserve(kDrPool);
+      m_raw_shown = std::vector<u8>(lev.vis_runs.size(), 0);
+      m_raw_nomerge = std::vector<u8>(lev.vis_runs.size(), 0);
+      m_raw_margin = std::vector<u8>(lev.vis_runs.size(), kRunUntested);
       m_g2c_first.clear();
       m_t2c_first.clear();
       m_lod_prev = lev.lod_state;
@@ -12788,7 +12803,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         // (incremental: its runs' flags follow the string, its groups' states and, crossing
         // planes, the planes: kept while those moved less than the runs' margin)
         const bool cacheable = rc_on && !vista_tier && (vis_test || lod_chunk || straddles) &&
-                               r0 + nr <= m_raw_shown.size();
+                               r0 + nr <= m_raw_shown.size() && nr < 0x10000;
         // how far the crossed planes moved over the chunk's sphere since rc's evaluation, with
         // twice the float rounding of a plane value (-1: rc doesn't apply)
         auto planes_moved = [&](const RunCache& rc) -> float {
@@ -12821,22 +12836,22 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         // margins less moved), rc's counts follow
         auto runs_again = [&](RunCache& rc, float moved) -> u32 {
           u8* const sh = m_raw_shown.data();
-          u16* const mg = m_raw_margin.data();
+          u8* const mg = m_raw_margin.data();
           const c3l::VisRun* const runs = lev.vis_runs.data();
           const auto* const spheres = lev.run_spheres.data();
           const float scale = ch.scale;
           float least = 3.0e38f;
           u32 flips = 0;
           for (u32 r = r0; r < r0 + nr; r++) {
-            const u16 q = mg[r];
+            const u8 q = mg[r];
             if (q == kRunUntested) {
               continue;
             }
-            const float m = (float)q * kRunMarginUnit;
+            const float m = run_margin_of(q);
             if (m > moved) {
-              const u16 left = run_margin_q(m - moved);
+              const u8 left = run_margin_q(m - moved);
               mg[r] = left;
-              least = std::min(least, (float)left * kRunMarginUnit);
+              least = std::min(least, run_margin_of(left));
               continue;
             }
             m_rc_retested++;
@@ -12850,17 +12865,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
               all &= ctr_float_bits(t);
               tm = std::min(tm, std::abs(t));
             }
-            const u16 nq = run_margin_q(tm);
+            const u8 nq = run_margin_q(tm);
             mg[r] = nq;
-            least = std::min(least, (float)nq * kRunMarginUnit);
+            least = std::min(least, run_margin_of(nq));
             const u8 sn = (all >> 31) != 0;
             if (sn != sh[r]) {
               flips++;
               sh[r] = sn;
               const u32 tris = runs[r].index_count / 3;
               const int dir = sn ? 1 : -1;
-              rc.shown += dir;
-              rc.view_hidden -= dir;
+              rc.shown = (u16)(rc.shown + dir);
+              rc.view_hidden = (u16)(rc.view_hidden - dir);
               rc.view_tris -= dir * (int)tris;
               if (lod_chunk && r < lev.run_lod.size()) {
                 const u8 v = lev.run_lod[r].lod;
@@ -12922,12 +12937,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             loop(in, r0, nr, &o);
             rc.key = m_run_key;
             rc.mode = mode;
-            rc.nr = nr;
-            rc.shown = o.shown;
-            rc.lod_hid = o.lod_hid;
+            rc.nr = (u16)nr;
+            rc.shown = (u16)o.shown;
+            rc.lod_hid = (u16)o.lod_hid;
             rc.lt0 = (u32)o.lod_tris[0];
             rc.lt1 = (u32)o.lod_tris[1];
-            rc.view_hidden = o.view_hidden;
+            rc.view_hidden = (u16)o.view_hidden;
             rc.view_tris = o.view_tris;
             rc.cross = (u8)cross;
             rc.seq = m_rc_seq;
@@ -14359,14 +14374,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     bool rcheck = false;
     if (rcache) {
       const DrawRanges& rec = m_dr_cache[di];
-      if (rec.ver == vc.rver && rec.epoch == m_dr_epoch && rec.vista == (u8)vista_pass) {
+      if (rec.ver == vc.rver && rec.vista == (u8)vista_pass) {
         if (!run_check_enabled()) {
           const u32* const pool = m_dr_pool.data() + rec.at;
+          u32 drawn_k = 0;
           for (u32 k = 0; k < rec.n; k++) {
-            submit(pool[2 * k], pool[2 * k + 1]);
+            const u32 len = pool[k] >> 16;
+            submit(dr.first_index + (pool[k] & 0xffff), len);
+            drawn_k += len;
           }
-          vista_indices += vista_pass ? rec.drawn : 0;
-          m_vis_tris += (dr.index_count - rec.drawn) / 3;
+          vista_indices += vista_pass ? drawn_k : 0;
+          m_vis_tris += (dr.index_count - drawn_k) / 3;
           m_dr_hits++;
           return;
         }
@@ -14488,24 +14506,37 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     if (part != kPartMoving) {
       m_vis_tris += (dr.index_count - drawn) / 3;
     }
+    // (a range as its start in the draw and its count, 16 bits each)
+    bool packs = m_dr_tmp.size() / 2 <= 255;
+    for (size_t k = 0; packs && k < m_dr_tmp.size(); k += 2) {
+      packs = m_dr_tmp[k] - dr.first_index < 0x10000 && m_dr_tmp[k + 1] < 0x10000;
+    }
     if (rcheck) {
       const DrawRanges& rec = m_dr_cache[di];
       m_dr_checked++;
-      m_dr_bad += rec.drawn != drawn || rec.n * 2 != m_dr_tmp.size() ||
-                  memcmp(m_dr_pool.data() + rec.at, m_dr_tmp.data(), m_dr_tmp.size() * 4) != 0;
-    } else if (rcache) {
-      if (m_dr_pool.size() + m_dr_tmp.size() > kDrPool) {
-        m_dr_pool.clear();
-        m_dr_epoch++;
+      bool same = packs && rec.n * 2 == m_dr_tmp.size();
+      for (u32 k = 0; same && k < rec.n; k++) {
+        const u32 e = m_dr_pool[rec.at + k];
+        same = dr.first_index + (e & 0xffff) == m_dr_tmp[2 * k] && (e >> 16) == m_dr_tmp[2 * k + 1];
       }
+      m_dr_bad += !same;
+    } else if (rcache) {
       DrawRanges& rec = m_dr_cache[di];
-      rec.ver = vc.rver;
-      rec.epoch = m_dr_epoch;
-      rec.at = (u32)m_dr_pool.size();
-      rec.n = (u32)m_dr_tmp.size() / 2;
-      rec.drawn = drawn;
-      rec.vista = (u8)vista_pass;
-      m_dr_pool.insert(m_dr_pool.end(), m_dr_tmp.begin(), m_dr_tmp.end());
+      rec.ver = 0;
+      if (packs) {
+        if (m_dr_pool.size() + m_dr_tmp.size() / 2 > kDrPool) {
+          // (full: every kept range forgotten)
+          m_dr_pool.clear();
+          std::fill(m_dr_cache.begin(), m_dr_cache.end(), DrawRanges());
+        }
+        rec.ver = vc.rver;
+        rec.at = (u16)m_dr_pool.size();
+        rec.n = (u8)(m_dr_tmp.size() / 2);
+        rec.vista = (u8)vista_pass;
+        for (size_t k = 0; k < m_dr_tmp.size(); k += 2) {
+          m_dr_pool.push_back((m_dr_tmp[k] - dr.first_index) | m_dr_tmp[k + 1] << 16);
+        }
+      }
     }
   };
   // (AI-assisted) The opaque draws that may use the early depth test first, nearest chunks first
