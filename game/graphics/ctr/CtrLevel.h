@@ -419,6 +419,12 @@ struct CtrLevelData {
     std::vector<u32> lday;       // per color its day palettes' r, g, b sums
     std::vector<u32> lrgb;       // per compact entry its rgba at version lrgb_ver
     std::vector<u8> lchg;        // per compact entry: changed at that refresh
+    std::vector<u32> lstamp;     // per compact entry: the refresh it was made at (made when used)
+    std::vector<u32> ldstamp;    // per color: the day weights its day sums are of (lday_ver)
+    u32 lnd = 0;                 // the day palettes with weight: their slots' offsets, weights
+    u8 ldslot[8] = {};
+    u8 ldw[8][3] = {};
+    u8 lw[8][3] = {};            // the light palettes' weights at lrgb_ver
     u32 lday_ver = 0, lrgb_ver = 0, lprev_ver = 0;
     std::vector<u32> light_items;  // light vertices: vertex | compact entry << 16, per chunk
     // weights (64 = 1.0): the game's at the level's last draw, the table's
