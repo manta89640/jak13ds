@@ -401,12 +401,23 @@ struct CtrLevelData {
     u8 wa[8] = {};
     u32 keep_alpha = 0xff000000u;
     // "light" palettes: used by few colors (the lamps, the lava glow: the game moves their weights
-    // every frame); per chunk its vertices with a light color (by the light palettes they use),
-    // rewritten alone when only those move
+    // every frame). Their entries in a compact table blended once per move (tod_light_refresh:
+    // per color its day palettes' sums, made again when a day palette moves, plus its light
+    // palettes' rgb), and per chunk its light vertices by that table, written whole or only the
+    // changed ones when a light palette moves (tod_light_write)
     u32 light_mask = 0;  // palette bits
     u32 light_color_count = 0;
-    using LightList = CtrLightLists;
-    std::unordered_map<u32, LightList> chunk_lights;
+    u32 lslots = 0;              // light palettes among the colors' slots
+    u8 lslot[8] = {};            // their slots
+    u32 lcolors = 0;             // the compact table: lcolors colors, then their TodMuls
+    std::vector<u32> lent;       // per compact entry its table entry (ascending)
+    std::vector<u16> lmul_color; // per TodMul of it: its color's compact entry
+    std::vector<u8> lrows;       // per color lslots x rgb
+    std::vector<u32> lday;       // per color its day palettes' r, g, b sums
+    std::vector<u32> lrgb;       // per compact entry its rgba at version lrgb_ver
+    std::vector<u8> lchg;        // per compact entry: changed at that refresh
+    u32 lday_ver = 0, lrgb_ver = 0, lprev_ver = 0;
+    std::vector<u32> light_items;  // light vertices: vertex | compact entry << 16, per chunk
     // weights (64 = 1.0): the game's at the level's last draw, the table's
     u8 weights[8][3] = {};
     u8 target_w[8][3] = {};
@@ -440,19 +451,21 @@ struct CtrLevelData {
     std::vector<u32> chunk_group_first;
     std::vector<u16> chunk_group_count;
     std::vector<u16> run_group;  // per run (CtrLevelData::vis_runs): its group in the chunk
-    std::vector<u32> chunk_min_ver, chunk_min_dver, chunk_light_ver;
-    std::vector<u8> chunk_mask, chunk_scanned;
-    std::vector<int> chunk_mesh;
+    // per chunk in one record (a level draw reads it once per chunk drawn)
+    struct ChunkTod {
+      int mesh = -1;
+      u32 min_ver = 0, light_ver = 0;
+      u32 light_first = 0, light_n = 0;  // its light vertices in light_items
+      u8 mask = 0, scanned = 0;
+    };
+    std::vector<ChunkTod> ch;
     // the title's fast day: per chunk its vertices' table entries (CtrLevel.cpp tod_entries), so a
     // whole rewrite reads 2 bytes a vertex, not its 12-byte record; gone with the title or the mesh
     std::vector<std::unique_ptr<u16[]>> chunk_entries;
     u32 entries_bytes = 0;
     u32 bytes() const {
-      u32 lights = 0;
-      for (const auto& [ci, l] : chunk_lights) {
-        lights += (u32)(l.verts.size() * 2 + l.masks.size() * 8 + l.runs.size() * 4 +
-                        l.ranges.size() * 4) + 96;
-      }
+      const u32 lights = (u32)(light_items.size() * 4 + lent.size() * 13 +
+                               lmul_color.size() * 2 + lrows.size() + lday.size() * 4);
       return (u32)(colors.size() + muls.size() * sizeof(c3l::TodMul) + color_mask.size() +
                    table.size() * 8 + cver.size() * 4 + group_list.size() * 4 + akind.size() +
                    akinds.size() * 13 +

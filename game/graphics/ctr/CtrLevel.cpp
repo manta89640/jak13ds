@@ -112,8 +112,8 @@ bool dist_frees(const CtrLevelData& lev, size_t ci);
 // chunk ci's mesh freed or made again (a later mesh may get the same id): its time of day and
 // tfrag / tie morph colors are made again
 void forget_chunk_colors(CtrLevelData& lev, size_t ci) {
-  if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
-    lev.tod->chunk_mesh[ci] = -1;
+  if (lev.tod && ci < lev.tod->ch.size()) {
+    lev.tod->ch[ci].mesh = -1;
   }
   if (ci < lev.tf_mesh.size()) {
     lev.tf_mesh[ci] = -1;
@@ -386,8 +386,7 @@ LevelMem level_mem(const CtrLevelData& lev) {
             sizeof(CtrLevelData);
   if (lev.tod) {
     const auto& t = *lev.tod;
-    m.heap += t.bytes() + vec_bytes(t.stamp) + vec_bytes(t.chunk_min_ver) * 3 +
-              vec_bytes(t.chunk_mask) * 2 + vec_bytes(t.chunk_mesh) + vec_bytes(t.chunk_group_count);
+    m.heap += t.bytes() + vec_bytes(t.stamp) + vec_bytes(t.ch) + vec_bytes(t.chunk_group_count);
   }
   if (lev.file_dir) {
     m.heap += vec_bytes(lev.file_dir->blocks);
@@ -1817,7 +1816,7 @@ void CtrLevels::need_free(CtrLevelData& lev, u32 ci) {
   ctr_gpu_mesh_delete(lev.meshes[ci]);  // freed after the GPU is done with it
   lev.meshes[ci] = -1;
   forget_chunk_colors(lev, ci);
-  if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
+  if (lev.tod && ci < lev.tod->ch.size()) {
     tod_drop_entries(*lev.tod, ci);
   }
   lev.chunk_dormant[ci] = CtrLevelData::kDistFreed;
@@ -2207,7 +2206,7 @@ void CtrLevels::title_update(u64 frame) {
         ctr_gpu_mesh_delete(lev.meshes[ci]);  // freed after the GPU is done with it
         lev.meshes[ci] = -1;
         forget_chunk_colors(lev, ci);
-        if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
+        if (lev.tod && ci < lev.tod->ch.size()) {
           tod_drop_entries(*lev.tod, ci);
         }
         lev.chunk_dormant[ci] = CtrLevelData::kTitleFreed;
@@ -2864,6 +2863,130 @@ void tod_refresh_all(CtrLevelData::Tod& t) {
   }
 }
 
+// The compact light table (load): the colors with a light palette, then the TodMuls of them
+void tod_light_table(CtrLevelData::Tod& t) {
+  const u32 nc = t.color_count, nm = (u32)t.muls.size();
+  t.lslots = 0;
+  for (u32 k = 0; k < t.palette_count; k++) {
+    if (t.light_mask >> t.palettes[k] & 1) {
+      t.lslot[t.lslots++] = (u8)k;
+    }
+  }
+  t.lent.clear();
+  t.lmul_color.clear();
+  if (!t.light_mask || !t.lslots) {
+    return;
+  }
+  for (u32 i = 0; i < nc; i++) {
+    if (t.color_mask[i] & t.light_mask) {
+      t.lent.push_back(i);
+    }
+  }
+  t.lcolors = (u32)t.lent.size();
+  for (u32 j = 0; j < nm; j++) {
+    const u32 c = t.muls[j].color;
+    const auto it = std::lower_bound(t.lent.begin(), t.lent.begin() + t.lcolors, c);
+    if (it != t.lent.begin() + t.lcolors && *it == c) {
+      t.lent.push_back(nc + j);
+      t.lmul_color.push_back((u16)(it - t.lent.begin()));
+    }
+  }
+  if (t.lent.size() > 0xffff) {
+    t.lent.clear();
+    t.lmul_color.clear();
+    t.lcolors = 0;
+    return;
+  }
+  const u32 stride = t.palette_count * 3;
+  t.lrows.resize((size_t)t.lcolors * t.lslots * 3);
+  for (u32 k = 0; k < t.lcolors; k++) {
+    for (u32 s = 0; s < t.lslots; s++) {
+      memcpy(&t.lrows[((size_t)k * t.lslots + s) * 3],
+             t.colors.data() + (size_t)t.lent[k] * stride + t.lslot[s] * 3, 3);
+    }
+  }
+  t.lday.assign((size_t)t.lcolors * 3, 0);
+  t.lrgb.assign(t.lent.size(), 0);
+  t.lchg.assign(t.lent.size(), 1);
+  t.lday_ver = t.lrgb_ver = t.lprev_ver = 0;
+}
+
+// The compact table's entry of table entry e (~0u: not a light entry)
+u32 tod_light_index(const CtrLevelData::Tod& t, u32 e) {
+  const auto it = std::lower_bound(t.lent.begin(), t.lent.end(), e);
+  return it != t.lent.end() && *it == e ? (u32)(it - t.lent.begin()) : ~0u;
+}
+
+// The compact table brought to version t.ver (as tod_entry_slow: per channel min(255, sum >> 6),
+// the color's alpha; a TodMul from its color's), the day sums first when a day palette moved
+void tod_light_refresh(CtrLevelData::Tod& t) {
+  if (t.lrgb_ver == t.ver || t.lent.empty() || !t.blended_valid) {
+    return;
+  }
+  const u32 nc = t.color_count, nl = t.lcolors, ns = t.lslots, stride = t.palette_count * 3;
+  const u32 day_last = t.lut[t.track_mask & ~t.light_mask & 0xff];
+  if (t.lday_ver != day_last || !t.lday_ver) {
+    t.lday_ver = std::max<u32>(day_last, 1);
+    u32 dslot[8], wr[8], wg[8], wb[8], nd = 0;
+    for (u32 k = 0; k < t.palette_count; k++) {
+      const u32 p = t.palettes[k];
+      if (!(t.light_mask >> p & 1) && (t.target_w[p][0] | t.target_w[p][1] | t.target_w[p][2])) {
+        dslot[nd] = k * 3;
+        wr[nd] = t.target_w[p][0];
+        wg[nd] = t.target_w[p][1];
+        wb[nd] = t.target_w[p][2];
+        nd++;
+      }
+    }
+    const u8* const colors = t.colors.data();
+    u32* const lday = t.lday.data();
+    for (u32 k = 0; k < nl; k++) {
+      const u8* src = colors + (size_t)t.lent[k] * stride;
+      u32 r = 0, g = 0, b = 0;
+      for (u32 d = 0; d < nd; d++) {
+        const u8* x = src + dslot[d];
+        r += wr[d] * x[0];
+        g += wg[d] * x[1];
+        b += wb[d] * x[2];
+      }
+      lday[3 * k] = r;
+      lday[3 * k + 1] = g;
+      lday[3 * k + 2] = b;
+    }
+  }
+  u32 lr[8], lg_[8], lb[8];
+  for (u32 s = 0; s < ns; s++) {
+    const u32 p = t.palettes[t.lslot[s]];
+    lr[s] = t.target_w[p][0];
+    lg_[s] = t.target_w[p][1];
+    lb[s] = t.target_w[p][2];
+  }
+  const u32* const lday = t.lday.data();
+  const u8* rows = t.lrows.data();
+  u32* const lrgb = t.lrgb.data();
+  u8* const lchg = t.lchg.data();
+  for (u32 k = 0; k < nl; k++, rows += 3 * ns) {
+    u32 r = lday[3 * k], g = lday[3 * k + 1], b = lday[3 * k + 2];
+    for (u32 s = 0; s < ns; s++) {
+      r += lr[s] * rows[3 * s];
+      g += lg_[s] * rows[3 * s + 1];
+      b += lb[s] * rows[3 * s + 2];
+    }
+    const u32 rgba = std::min<u32>(255, r >> 6) | std::min<u32>(255, g >> 6) << 8 |
+                     std::min<u32>(255, b >> 6) << 16 | tod_alpha_of(t, t.lent[k]);
+    lchg[k] = rgba != lrgb[k];
+    lrgb[k] = rgba;
+  }
+  const c3l::TodMul* const muls = t.muls.data();
+  for (u32 k = nl; k < (u32)t.lent.size(); k++) {
+    const u32 rgba = tod_mul_rgb(lrgb[t.lmul_color[k - nl]], muls[t.lent[k] - nc]);
+    lchg[k] = rgba != lrgb[k];
+    lrgb[k] = rgba;
+  }
+  t.lprev_ver = t.lrgb_ver;
+  t.lrgb_ver = t.ver;
+}
+
 // The title's entry copies (Tod::chunk_entries): u32 count, then the entries
 void tod_drop_entries(CtrLevelData::Tod& t, size_t ci) {
   if (ci < t.chunk_entries.size() && t.chunk_entries[ci]) {
@@ -3120,8 +3243,8 @@ void tod_put_entries(CtrLevelData::Tod& t, size_t ci, u16* p) {
   u32 n;
   memcpy(&n, p, 4);
   tod_drop_entries(t, ci);
-  if (t.chunk_entries.size() < t.chunk_mesh.size()) {
-    t.chunk_entries.resize(t.chunk_mesh.size());
+  if (t.chunk_entries.size() < t.ch.size()) {
+    t.chunk_entries.resize(t.ch.size());
   }
   t.chunk_entries[ci].reset(p);
   t.entries_bytes += 4 + 2 * n;
@@ -3130,7 +3253,7 @@ void tod_put_entries(CtrLevelData::Tod& t, size_t ci, u16* p) {
 const u16* tod_make_entries(CtrLevelData::Tod& t, size_t ci, const TodVerts& v, int n,
                             s64* room) {
   const s64 bytes = 4 + 2 * (s64)n;
-  if (n <= 0 || ci >= t.chunk_mesh.size() || bytes > *room) {
+  if (n <= 0 || ci >= t.ch.size() || bytes > *room) {
     return nullptr;
   }
   u16* const p = tod_copy_entries(v, n);
@@ -3158,15 +3281,6 @@ const u16* tod_entries(CtrLevelData::Tod& t, size_t ci, const TodVerts& v, int n
     room.left = tod_entry_room_now();
   }
   return tod_make_entries(t, ci, v, n, &room.left);
-}
-// A loaded chunk's light layout (loader thread), as its first light pass would make it
-void tod_load_light_layout(CtrLevelData::Tod& t, size_t ci, const TodVerts& v,
-                           CtrLevelData::Tod::LightList& lights) {
-  if (lights.empty() || ci >= t.chunk_group_first.size()) {
-    return;
-  }
-  ctr_light_layout(t.groups.data() + t.chunk_group_first[ci], t.chunk_group_count[ci], lights,
-                   [&](u32 i) { return v.entry((int)i); });
 }
 // A title load's chunk (loader thread): its copy made from the records just read, so the first
 // whole rewrite reads entries like every later one
@@ -3285,12 +3399,12 @@ void tod_color_vertices(CtrLevelData::Tod& t, const TodVerts& v, int first, int 
 }
 
 // The palettes the chunk's vertices use (0: no time of day color) and its vertices with a light
-// color, by the light palettes they use (the light rewrites).
-u8 tod_scan(const CtrLevelData::Tod& t, const TodVerts& v, int n, CtrLevelData::Tod::LightList* lights) {
+// color (vertex | compact light entry << 16, in vertex order: tod_light_write).
+u8 tod_scan(const CtrLevelData::Tod& t, const TodVerts& v, int n, std::vector<u32>* lights) {
   u32 mask = 0;
   bool any = false;
   const u32 nc = t.color_count, nm = (u32)t.muls.size();
-  std::vector<std::pair<u8, u16>> lv;
+  lights->clear();
   for (int i = 0; i < n; i++) {
     const u32 idx = v.entry(i);
     if (idx >= nc + nm) {
@@ -3299,30 +3413,25 @@ u8 tod_scan(const CtrLevelData::Tod& t, const TodVerts& v, int n, CtrLevelData::
     const u32 m = t.color_mask[idx];
     mask |= m;
     any = true;
-    if (m & t.light_mask) {
-      lv.emplace_back((u8)(m & t.light_mask), (u16)i);
+    if ((m & t.light_mask) && i < 0x10000) {
+      const u32 k = tod_light_index(t, idx);
+      if (k != ~0u) {
+        lights->push_back((u32)i | k << 16);
+      }
     }
-  }
-  std::stable_sort(lv.begin(), lv.end(),
-                   [](const auto& a, const auto& b) { return a.first < b.first; });
-  lights->verts.clear();
-  lights->masks.clear();
-  lights->runs.clear();
-  lights->ranges.clear();
-  if (!lv.empty()) {
-    lights->verts.reserve(lv.size() + CtrLightLists::kPad);
-  }
-  for (size_t k = 0; k < lv.size(); k++) {
-    lights->verts.push_back(lv[k].second);
-    if (k + 1 == lv.size() || lv[k + 1].first != lv[k].first) {
-      lights->masks.emplace_back(lv[k].first, (u32)k + 1);
-    }
-  }
-  if (!lv.empty()) {
-    lights->verts.resize(lv.size() + CtrLightLists::kPad, 0);
   }
   // (all black colors: palette 0 stands for them, so the chunk counts as colored)
   return any ? (u8)(mask ? mask : 1) : 0;
+}
+
+// Chunk ci's light vertices (tod_scan's), kept once per level load
+void tod_put_lights(CtrLevelData::Tod& t, size_t ci, const std::vector<u32>& lights) {
+  if (lights.empty() || ci >= t.ch.size() || t.ch[ci].light_n) {
+    return;
+  }
+  t.ch[ci].light_first = (u32)t.light_items.size();
+  t.ch[ci].light_n = (u32)lights.size();
+  t.light_items.insert(t.light_items.end(), lights.begin(), lights.end());
 }
 
 // The chunk's vertex groups: one per visibility id of its runs (c3l v18 files keep each id's
@@ -3529,11 +3638,10 @@ void tod_mark_plain(CtrLevelData::Tod& t, u32 ci, const TodVerts& v, int n) {
   }
 }
 
-// One level draw's rewrites: groups first, then light vertices not already rewritten, followed
+// One level draw's rewrites: groups first, then the light vertices (tod_light_write), followed
 // by tod_finish. (AI-assisted, todlag) every group drawn is brought up to
 // this frame's weights before its draw (the colors drawn are the frame's, as on the PC). Azahar,
 // Oct 23: the title's fast day (a move nearly every frame) 4.6-8.0 ms a frame; c3l_format.md.
-constexpr int kTodLights = 0, kTodRound = 1;
 // (AI-assisted, todlag) the group pass refreshes the whole table first (tod_refresh_all) when the
 // vertices drawn are this many times the table's entries
 constexpr u64 kTodFreshRatio = 3;
@@ -3560,8 +3668,6 @@ inline double tod_now_ms() {
 #endif
 }
 struct TodPass {
-  // the pass: kTodLights (light vertices), kTodRound (groups)
-  int pass = 0;
   bool fresh_ok = false;  // (AI-assisted, todlag) many vertices drawn: tod_refresh_all first
   bool fresh = false;     // the table is all up to date (tod_refresh_all done this pass)
   u32 rewritten = 0;
@@ -3581,8 +3687,6 @@ struct TodPass {
   bool black = false;
   s64 black_left = 0;
   u32 black_late = 0;
-  std::vector<u8> light_visible;  // scratch, reused for each chunk's visibility groups
-  std::vector<u8> list_visible;
 };
 std::vector<std::pair<uintptr_t, uintptr_t>>& tod_dirty() {
   static std::vector<std::pair<uintptr_t, uintptr_t>> d;  // render thread
@@ -3902,6 +4006,87 @@ u32 tod_list_write(CtrLevelData::Tod& t, u32 gl, const TodVerts& v, int first, u
               : tod_list_write<false, false>(t, r, v, first, since, all, only);
 }
 
+// The light vertices of the chunk's shown groups (shown: its runs drawn, nullptr: all) brought to
+// the compact table (version t.lrgb_ver) when a light palette moved since the group's were written
+// (lver; 0: written by the day pass or never): only the changed entries' when they hold the
+// refresh before. A hidden group waits until shown. Returns the vertices written.
+u32 tod_light_write(CtrLevelData& lev, size_t ci, const u8* shown) {
+  auto& t = *lev.tod;
+  if (ci >= t.ch.size()) {
+    return 0;
+  }
+  auto& ct = t.ch[ci];
+  const u32 light_last = t.lut[ct.mask & t.light_mask];
+  if (!ct.light_n || t.lrgb_ver != t.ver || ct.light_ver >= light_last || ct.scanned != 2) {
+    return 0;
+  }
+  const int mesh = ci < lev.meshes.size() ? lev.meshes[ci] : -1;
+  if (mesh < 0 || ct.mesh != mesh) {
+    return 0;
+  }
+  int n = 0;
+  const TodVerts v = tod_verts(mesh, &n);
+  if (!v) {
+    return 0;
+  }
+  const u32 g0 = t.chunk_group_first[ci], ng = t.chunk_group_count[ci];
+  const u32 r0 = lev.chunk_first_run[ci], nr = lev.chunks[ci].vis_run_count;
+  const bool by_runs =
+      shown && ng > 1 && r0 <= t.run_group.size() && nr <= t.run_group.size() - r0;
+  static std::vector<u8> vis;  // (render thread)
+  if (by_runs) {
+    vis.assign(ng, 0);
+    const u16* const rg = t.run_group.data() + r0;
+    for (u32 r = 0; r < nr; r++) {
+      if (shown[r] && rg[r] < ng) {
+        vis[rg[r]] = 1;
+      }
+    }
+  }
+  const u32* const lrgb = t.lrgb.data();
+  const u8* const lchg = t.lchg.data();
+  const u32 keep = t.keep_alpha, ver = t.ver, prev = t.lprev_ver;
+  const u32* it = t.light_items.data() + ct.light_first;
+  const u32* const end = it + ct.light_n;
+  u32 written = 0, lo = UINT32_MAX, hi = 0, least = ver;
+  for (u32 g = 0; g < ng && it < end; g++) {
+    auto& gr = t.groups[g0 + g];
+    const u32 glo = gr.lo, ghi = std::min<u32>(gr.hi, (u32)n - 1);
+    while (it < end && (*it & 0xffff) < glo) {
+      it++;
+    }
+    if (it == end || (*it & 0xffff) > ghi) {
+      gr.lver = ver;  // (no light vertex)
+      continue;
+    }
+    if ((by_runs && !vis[g]) || gr.lver >= light_last) {
+      while (it < end && (*it & 0xffff) <= ghi) {
+        it++;
+      }
+      least = std::min<u32>(least, gr.lver);
+      continue;
+    }
+    const bool part = gr.lver && gr.lver == prev;
+    for (; it < end && (*it & 0xffff) <= ghi; it++) {
+      const u32 x = *it, k = x >> 16, vi = x & 0xffff;
+      if (part && !lchg[k]) {
+        continue;
+      }
+      tod_word* const col = v.col(vi);
+      *col = (*col & keep) | lrgb[k];
+      lo = std::min(lo, vi);
+      hi = std::max(hi, vi);
+      written++;
+    }
+    gr.lver = ver;
+  }
+  ct.light_ver = least;
+  if (written) {
+    tod_dirty().emplace_back((uintptr_t)v.col(lo), (uintptr_t)v.col(hi) + 4);
+  }
+  return written;
+}
+
 // The chunk's vertex colors brought up to date in its mesh (in place: a frame the GPU still draws
 // may see the change) before it is drawn (shown: the chunk's runs drawn this frame, nullptr: all of
 // them). A vertex group (one visibility id's vertices) is brought up to date when a day palette
@@ -3912,30 +4097,28 @@ u32 tod_list_write(CtrLevelData::Tod& t, u32 gl, const TodVerts& v, int first, u
 u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
   auto& t = *lev.tod;
   const int mesh = ci < lev.meshes.size() ? lev.meshes[ci] : -1;
-  if (mesh < 0 || ci >= t.chunk_mask.size() || !t.blended_valid || t.chunk_scanned[ci] == 1) {
+  if (mesh < 0 || ci >= t.ch.size() || !t.blended_valid || t.ch[ci].scanned == 1) {
     return 0;
   }
   const u32 g0 = t.chunk_group_first[ci], ng = t.chunk_group_count[ci];
-  if (t.chunk_mesh[ci] != mesh) {
+  if (t.ch[ci].mesh != mesh) {
     // a mesh made after the load (its vertices as in the file)
-    t.chunk_mesh[ci] = mesh;
+    t.ch[ci].mesh = mesh;
     tod_drop_entries(t, ci);
     for (u32 g = g0; g < g0 + ng; g++) {
       t.groups[g].ver = 0;
       t.groups[g].dver = 0;
       t.groups[g].lver = 0;
     }
-    t.chunk_min_ver[ci] = t.chunk_min_dver[ci] = t.chunk_light_ver[ci] = 0;
+    t.ch[ci].min_ver = t.ch[ci].light_ver = 0;
   }
   // the last move of the chunk's day / light palettes
-  const u32 m = t.chunk_mask[ci];
-  const u32 dm = m & ~t.light_mask, lm = m & t.light_mask;
+  const u32 m = t.ch[ci].mask;
+  const u32 dm = m & ~t.light_mask;
   const u32 day_last = std::max<u32>(1, t.lut[dm]);
-  const u32 light_last = t.lut[lm];
   // quick out: every group up to date
-  const bool day_ok = t.chunk_min_ver[ci] >= day_last;
-  const bool light_ok = t.chunk_light_ver[ci] >= light_last;
-  if (t.chunk_scanned[ci] == 2 && (ps.pass == kTodLights ? light_ok : day_ok)) {
+  const bool day_ok = t.ch[ci].min_ver >= day_last;
+  if (t.ch[ci].scanned == 2 && day_ok) {
     return 0;
   }
   int n = 0;
@@ -3953,19 +4136,17 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
     t.group_list.assign(t.groups.size(), 0);
     t.list_gen = g_tod_lists.gen;
   }
-  if (!t.chunk_scanned[ci]) {
+  if (!t.ch[ci].scanned) {
     // no mesh at load: the palettes and light vertices now (render thread, once)
     if (ci < lev.chunk_tod_slots.size() && lev.chunk_tod_slots[ci]) {
       tod_fill_groups(lev, (u32)ci, mesh, lev.chunk_tod_slots[ci]);
       lev.chunk_tod_slots[ci] = 0;
     }
-    CtrLevelData::Tod::LightList lights;
+    std::vector<u32> lights;
     const u8 mask = tod_scan(t, v, n, &lights);
-    t.chunk_scanned[ci] = mask ? 2 : 1;
-    t.chunk_mask[ci] = mask;
-    if (!lights.empty()) {
-      t.chunk_lights[(u32)ci] = std::move(lights);
-    }
+    t.ch[ci].scanned = mask ? 2 : 1;
+    t.ch[ci].mask = mask;
+    tod_put_lights(t, ci, lights);
     if (!mask) {
       return 0;
     }
@@ -3978,103 +4159,7 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
                        nr <= t.run_group.size() - r0;
   u32 looked = 0;
   int flo = n, fhi = -1;
-  // (AI-assisted) Per-group light versions: hidden runs wait until revealed. The day pass
-  // runs first and marks its groups current, avoiding a second write of their light vertices.
-  if (ps.pass == kTodLights && !light_ok) {
-    auto it = t.chunk_lights.find((u32)ci);
-    if (it != t.chunk_lights.end()) {
-      // the groups with a list from it (their light entries that changed), the others below
-      if (lists) {
-        auto& vis = ps.list_visible;
-        if (by_runs) {
-          vis.assign(ng, 0);
-          for (u32 r = 0; r < nr; r++) {
-            if (shown[r] && t.run_group[r0 + r] < ng) {
-              vis[t.run_group[r0 + r]] = 1;
-            }
-          }
-        }
-        for (u32 g = g0; g < g0 + ng; g++) {
-          auto& gr = t.groups[g];
-          const u32 gl = t.group_list[g];
-          if ((by_runs && !vis[g - g0]) || gr.lver >= light_last || !gl ||
-              gl == CtrLevelData::Tod::kNoList) {
-            continue;
-          }
-          u32 moved = 0;
-          for (u32 m = lm; m; m &= m - 1) {
-            const int p = __builtin_ctz(m);
-            moved |= t.pal_ver[p] > gr.lver ? 1u << p : 0;
-          }
-          const int first = gr.lo, end = std::min<int>(gr.hi + 1, n);
-          const u32 k = tod_list_write(t, gl, v, first, gr.ver, gr.ver == 0, moved);
-          if (k) {
-            flo = std::min(flo, first);
-            fhi = std::max(fhi, end - 1);
-            looked += k;
-            ps.light_verts += k;
-          }
-          gr.lver = t.ver;
-        }
-      }
-      auto& lights = it->second;
-      u8* const w = (u8*)v.rgba;
-      const u32 sh = v.split() ? 2 : 4;
-      const u32* const stamp = t.stamp.data();
-      const u32* const tab = t.table.data();
-      const u32* const cver = t.cver.data();
-      const u8* const cm = t.color_mask.data();
-      const u32* const lut = t.lut;
-      const c3l::TodMul* const muls = t.muls.data();
-      const u32 keep = t.keep_alpha, nc = t.color_count;
-      // (t.cver isn't kept during the fast day)
-      const bool track = !t.fast_day && !t.cver.empty();
-      t.chunk_light_ver[ci] = ctr_recolor_light_groups_cached(
-          t.groups.data() + g0, ng, by_runs ? shown : nullptr,
-          by_runs ? t.run_group.data() + r0 : nullptr, nr, t.ver, light_last, lm, t.pal_ver,
-          lights, ps.light_visible, [&](u32 i) { return v.entry((int)i); },
-          [&](const CtrLightGroup& gr, u32 first, u32 rf, u32 rl, u32 lowest, u32 highest,
-              u32& at) {
-            // per entry its vertices; an entry whose color didn't change since they were all
-            // last current (the group's day write or this part's last write) is passed over
-            const u32 since = track && gr.ver ? std::max<u32>(gr.ver, at) : 0;
-            at = t.ver;
-            const u16* p = lights.verts.data() + first;
-            const u32* const runs = lights.runs.data();
-            u32 written = 0;
-            for (u32 r = rf; r < rl; r++) {
-              const u32 e = runs[r] & 0xffff, c = runs[r] >> 16;
-              const u32 rgb = stamp[e] >= lut[cm[e]] ? tab[e] : tod_entry_slow(t, e);
-              if (since && cver[e < nc ? e : muls[e - nc].color] <= since) {
-                p += c;
-                continue;
-              }
-              written += c;
-              if (!keep) {
-                for (const u16* const end = p + c; p < end; p++) {
-                  __builtin_prefetch(w + ((u32)p[CtrLightLists::kPad] << sh), 1);
-                  *(tod_word*)(w + ((u32)*p << sh)) = rgb;
-                }
-              } else {
-                for (const u16* const end = p + c; p < end; p++) {
-                  __builtin_prefetch(w + ((u32)p[CtrLightLists::kPad] << sh), 1);
-                  tod_word* const x = (tod_word*)(w + ((u32)*p << sh));
-                  *x = (*x & keep) | rgb;
-                }
-              }
-            }
-            if (written) {
-              flo = std::min<int>(flo, (int)lowest);
-              fhi = std::max<int>(fhi, (int)highest);
-              looked += written;
-              ps.light_verts += written;
-            }
-          });
-    } else {
-      t.chunk_light_ver[ci] = t.ver;
-    }
-  }
-  if (ps.pass != kTodLights && !day_ok) {
+  if (!day_ok) {
     bool any = false;
     auto day_group = [&](u32 g) {
       auto& gr = t.groups[g];
@@ -4106,7 +4191,7 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
         }
         gr.ver = t.ver;
         gr.dver = t.dver;
-        gr.lver = t.ver;
+        gr.lver = 0;  // (its light vertices again from the compact table: tod_light_write)
         any = true;
         return;
       }
@@ -4140,7 +4225,7 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
       }
       gr.ver = t.ver;
       gr.dver = t.dver;
-      gr.lver = t.ver;
+      gr.lver = t.ver;  // (every vertex from the table: its light ones current too)
       any = true;
       ps.rewritten++;
     };
@@ -4156,13 +4241,12 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
       }
     }
     if (any) {
-      u32 mv = t.ver, md = t.dver;
+      u32 mv = t.ver;
       for (u32 g = g0; g < g0 + ng; g++) {
         mv = std::min<u32>(mv, t.groups[g].ver);
-        md = std::min<u32>(md, t.groups[g].dver);
       }
-      t.chunk_min_ver[ci] = mv;
-      t.chunk_min_dver[ci] = md;
+      t.ch[ci].min_ver = mv;
+      t.ch[ci].light_ver = 0;
     }
   }
   if (fhi >= flo) {
@@ -4226,6 +4310,14 @@ u32 tf_morph_colors(CtrLevelData& lev, size_t ci, const u8* shown) {
   for (u32 g = 0; g < ng; g++) {
     if (!need[g]) {
       continue;
+    }
+    {
+      // (known palettes, none moved since its colors were made: no search of its entries)
+      const u16 m = lev.tf_color_mask[g0 + g];
+      const u32 ver = lev.tf_color_ver[g0 + g];
+      if (m && ver && ver >= t.lut[m & 0xff]) {
+        continue;
+      }
     }
     const auto& gr = t.groups[g0 + g];
     c3l::TfragMorphColor* it = std::lower_bound(
@@ -4987,6 +5079,7 @@ void load_tod_table(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
     for (u32 i = 0; i < nc; i++) {
       t->light_color_count += (t->color_mask[i] & t->light_mask) != 0;
     }
+    tod_light_table(*t);
   }
   t->table.assign(nc + nm, 0);
   t->stamp.assign(nc + nm, 0);
@@ -4996,12 +5089,7 @@ void load_tod_table(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   t->chunk_group_first.assign(nch, 0);
   t->chunk_group_count.assign(nch, 0);
   t->run_group.assign(lev->vis_runs.size(), 0);
-  t->chunk_min_ver.assign(nch, 0);
-  t->chunk_min_dver.assign(nch, 0);
-  t->chunk_light_ver.assign(nch, 0);
-  t->chunk_mask.assign(nch, 0);
-  t->chunk_scanned.assign(nch, 0);
-  t->chunk_mesh.assign(nch, -1);
+  t->ch.assign(nch, CtrLevelData::Tod::ChunkTod());
   // the weights the level was last drawn with, else the last level's with the same day palettes:
   // the meshes are colored as they are read (CtrLevels::load_file), not all at the level's first
   // draw. Else they keep the file's colors until drawn (tod_recolor).
@@ -7452,7 +7540,7 @@ bool CtrLevels::load_file(const fs::path& path,
       }
       if (read_ok && out->tod) {
         auto& t = *out->tod;
-        CtrLevelData::Tod::LightList lights;
+        std::vector<u32> lights;
         tod_mask = tod_scan(t, vv, (int)ch.vertex_count, &lights);
         tod_state = tod_mask ? 2 : 0;
         if (tod_mask) {
@@ -7461,10 +7549,7 @@ bool CtrLevels::load_file(const fs::path& path,
             tod_load_entries(t, ci, vv, (int)ch.vertex_count, &entry_room);
           }
         }
-        if (!lights.empty()) {
-          tod_load_light_layout(t, ci, vv, lights);
-          t.chunk_lights[(u32)out->meshes.size()] = std::move(lights);
-        }
+        tod_put_lights(t, ci, lights);
         if (tod_state == 2 && t.blended_valid) {
           tod_color_vertices(t, vv, 0, (int)ch.vertex_count);
           tod_state = 1;
@@ -7476,20 +7561,18 @@ bool CtrLevels::load_file(const fs::path& path,
       }
       if (mesh >= 0 && tod_state >= 0) {
         auto& t = *out->tod;
-        t.chunk_mesh[ci] = mesh;
-        t.chunk_mask[ci] = tod_mask;
-        t.chunk_scanned[ci] = tod_state == 0 ? 1 : 2;
+        t.ch[ci].mesh = mesh;
+        t.ch[ci].mask = tod_mask;
+        t.ch[ci].scanned = tod_state == 0 ? 1 : 2;
         if (tod_state == 1) {
           // colored with the start weights: every group at version 1
           for (u32 g = t.chunk_group_first[ci]; g < t.chunk_group_first[ci] + t.chunk_group_count[ci];
                g++) {
             t.groups[g].ver = t.ver;
             t.groups[g].dver = t.dver;
-            t.groups[g].lver = t.ver;
           }
-          t.chunk_min_ver[ci] = t.ver;
-          t.chunk_min_dver[ci] = t.dver;
-          t.chunk_light_ver[ci] = t.ver;
+          t.ch[ci].min_ver = t.ver;
+          t.ch[ci].light_ver = t.ver;
         }
       }
     } else if (out->tod && skip) {
@@ -7836,7 +7919,7 @@ void CtrLevels::tod_sweep(u64 frame) {
       continue;
     }
     auto& t = *lev.tod;
-    const u32 n = (u32)t.chunk_mask.size();
+    const u32 n = (u32)t.ch.size();
     if (!t.blended_valid || t.fast_day || !n) {
       continue;
     }
@@ -7866,7 +7949,6 @@ void CtrLevels::tod_sweep(u64 frame) {
     }
     TodPass ps;
     ps.frame = frame;
-    ps.pass = kTodRound;
     ps.list_left = 0;
     for (u32 k = 0; k < std::min(n, kChunks) && left > 0; k++) {
       const u32 ci = t.sweep_at < n ? t.sweep_at : 0;
@@ -8469,7 +8551,6 @@ void stream_tod_layout(const CtrLevels* /*unused*/,
     g.plain = plain ? 1 : 0;
     g.ver = 0;
     g.dver = 0;
-    g.lver = 0;
   }
 }
 }  // namespace
@@ -8742,7 +8823,7 @@ bool CtrLevels::stream_evict(CtrLevelData& lev, u32 unit, bool now) {
     CtrStreamArena::get().mark_pending(su.mem);
   }
   forget_chunk_colors(lev, ci);
-  if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
+  if (lev.tod && ci < lev.tod->ch.size()) {
     tod_drop_entries(*lev.tod, ci);
   }
   su.state = CtrLevelData::kUnitAbsent;
@@ -9852,7 +9933,7 @@ void CtrLevels::stream_take_pending(u64 frame) {
         for (u32 k = 0; k < o.run_group.size() && r0 + k < t.run_group.size(); k++) {
           t.run_group[r0 + k] = fits ? o.run_group[k] : 0;
         }
-        t.chunk_min_ver[ci] = t.chunk_min_dver[ci] = t.chunk_light_ver[ci] = 0;
+        t.ch[ci].min_ver = t.ch[ci].light_ver = 0;
         if (g0 + n <= t.group_list.size()) {
           std::fill(t.group_list.begin() + g0, t.group_list.begin() + g0 + n, 0u);
         }
@@ -9860,21 +9941,19 @@ void CtrLevels::stream_take_pending(u64 frame) {
       }
       int n = 0;
       const TodVerts v = tod_verts(o.mesh, &n);
-      if (v && t.blended_valid && ci < t.chunk_mask.size()) {
-        if (!t.chunk_scanned[ci]) {
+      if (v && t.blended_valid && ci < t.ch.size()) {
+        if (!t.ch[ci].scanned) {
           // its palettes and light vertices (once per level load)
-          CtrLevelData::Tod::LightList lights;
+          std::vector<u32> lights;
           const u8 mask = tod_scan(t, v, n, &lights);
-          t.chunk_scanned[ci] = mask ? 2 : 1;
-          t.chunk_mask[ci] = mask;
-          if (!lights.empty()) {
-            t.chunk_lights[ci] = std::move(lights);
-          }
+          t.ch[ci].scanned = mask ? 2 : 1;
+          t.ch[ci].mask = mask;
+          tod_put_lights(t, ci, lights);
           if (mask) {
             tod_mark_plain(t, ci, v, n);
           }
         }
-        if (t.chunk_scanned[ci] == 2) {
+        if (t.ch[ci].scanned == 2) {
           // every group with the current blend (the table's entries follow lazily, exact)
           const u32 g0 = t.chunk_group_first[ci], ng = t.chunk_group_count[ci];
           for (u32 g = g0; g < g0 + ng; g++) {
@@ -9885,16 +9964,14 @@ void CtrLevels::stream_take_pending(u64 frame) {
             }
             gr.ver = t.ver;
             gr.dver = t.dver;
-            gr.lver = t.ver;
           }
-          t.chunk_min_ver[ci] = t.ver;
-          t.chunk_min_dver[ci] = t.dver;
-          t.chunk_light_ver[ci] = t.ver;
+          t.ch[ci].min_ver = t.ver;
+          t.ch[ci].light_ver = t.ver;
           ctr_gpu_flush_range(v.rgba, (u32)(n - 1) * v.cs + 4u);
           m_sst.colored++;
         }
-        t.chunk_mesh[ci] = o.mesh;  // (colored: tod_recolor keeps it)
-        if (o.entries && t.chunk_scanned[ci] == 2 && tod_wants_entries(t, ci)) {
+        t.ch[ci].mesh = o.mesh;  // (colored: tod_recolor keeps it)
+        if (o.entries && t.ch[ci].scanned == 2 && tod_wants_entries(t, ci)) {
           tod_put_entries(t, ci, o.entries.release());
         }
       }
@@ -13261,13 +13338,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     auto shown_of = [&](const VisibleChunk& vc) {
       return vc.runs_valid ? &m_run_shown[lev.chunk_first_run[vc.chunk]] : nullptr;
     };
-    // (AI-assisted) Full groups first: their light vertices need no second rewrite.
-    ps.pass = kTodRound;
+    // the groups drawn whose day palettes moved
     {
       auto& t = *lev.tod;
       u64 drawn = 0;
       for (const auto& vc : m_visible) {
-        drawn += vc.chunk < t.chunk_mask.size() && t.chunk_scanned[vc.chunk] == 2
+        drawn += vc.chunk < t.ch.size() && t.ch[vc.chunk].scanned == 2
                      ? lev.chunks[vc.chunk].vertex_count
                      : 0;
       }
@@ -13281,9 +13357,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
       }
     }
-    ps.pass = kTodLights;
+    // then the light vertices of every chunk drawn, from the compact table
+    tod_light_refresh(*lev.tod);
     for (const auto& vc : m_visible) {
-      tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
+      const u32 k = tod_light_write(lev, vc.chunk, shown_of(vc));
+      ps.light_verts += k;
+      tod_verts += k;
     }
     for (const auto& vc : m_visible) {
       if (vc.tmorph) {
@@ -13300,13 +13379,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       auto& t = *lev.tod;
       auto& sc = m_levels->stream_check();
       for (const auto& vc : m_visible) {
-        if (!lev.is_unit(vc.chunk) || t.chunk_scanned[vc.chunk] != 2) {
+        if (!lev.is_unit(vc.chunk) || t.ch[vc.chunk].scanned != 2) {
           continue;
         }
         sc.units_drawn++;
         const u32 g0 = t.chunk_group_first[vc.chunk], ng = t.chunk_group_count[vc.chunk];
         for (u32 g = g0; g < g0 + ng; g++) {
-          if (!t.groups[g].ver || t.chunk_mesh[vc.chunk] != lev.meshes[vc.chunk]) {
+          if (!t.groups[g].ver || t.ch[vc.chunk].mesh != lev.meshes[vc.chunk]) {
             sc.units_baked++;
             break;
           }
