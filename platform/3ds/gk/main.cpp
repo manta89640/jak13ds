@@ -146,6 +146,11 @@ int main(int /*argc*/, char** /*argv*/) {
   }
   lg::info("3DS: share of core 1 (APT_SetAppCpuTimeLimit): {}%", ctr_core1_share());
   {
+    char cores[200];
+    ctr_core_probe(cores, sizeof(cores));
+    lg::info("3DS cores: {}", cores);
+  }
+  {
     int sound_core = 1;
     if (ctr_sound_config(&sound_core)) {
       lg::info("3DS: sound on (config.ini), mixer thread on core {}", sound_core);

@@ -1204,8 +1204,24 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   }
 #ifdef __3DS__
   ctr_boot_mark("8 GPU ready (first top screen frame drawn)");
-  if (ctr_settings().pica_bench) {
-    // (AI-assisted) the GPU microbenchmark, before anything else uses the GPU
+  bool run_bench = ctr_settings().pica_bench;
+  if (run_bench && ctr_settings().pica_bench_once) {
+    // the marker goes to the card before the bench: a hang in a test can't repeat at the next boot
+    const char* marker = "sdmc:/3ds/jak1/data/log/bench_once.txt";
+    if (FILE* f = fopen(marker, "r")) {
+      fclose(f);
+      run_bench = false;
+      lg::info("[ctr] pica_bench = once: already run (data/log/bench_once.txt)");
+    } else if (FILE* w = fopen(marker, "w")) {
+      fputs("pica_bench = once ran at this boot\n", w);
+      fclose(w);
+    } else {
+      run_bench = false;
+      lg::info("[ctr] pica_bench = once: no marker file, not run");
+    }
+  }
+  if (run_bench) {
+    // the GPU microbenchmark, before anything else uses the GPU
     lg::info("[ctr] pica_bench: GPU microbenchmark before the game starts");
     ctr_boot_mark("8b pica_bench (a hang here: see data/log/bench.txt)");
     const int stopped = ctr_gpu_bench_run();
