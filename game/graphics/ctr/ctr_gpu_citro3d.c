@@ -4328,7 +4328,8 @@ static const u32 kRawArrays[22] = {
 };
 
 /* an indexed triangle list: index_pa = physical address of the first u16 index */
-static void raw_draw_elements(u32 index_pa, u32 count) {
+/* strip: the indices are a triangle strip (CTR_STATE_STRIP level draws), as C3D_DrawElements */
+static void raw_draw_elements_prim(u32 index_pa, u32 count, int strip) {
   u32* p = raw_ptr();
   {
     for (int i = 0; i < 24; i += 4) { /* (4 words per ldm / stm) */
@@ -4339,10 +4340,18 @@ static void raw_draw_elements(u32 index_pa, u32 count) {
     }
     p[4] = (index_pa - RAW_BUF_BASE) | BIT(31); /* u16 indices */
     p[6] = count;
+    if (strip) {
+      p[0] = GPU_TRIANGLE_STRIP;
+      p[10] = 0; /* (no triangle element mode: the geometry stage registers stay 0) */
+      p[12] = 0;
+    }
     p += 24;
   }
   raw_end(raw_vc_clear(p));
   __C3D_Context.flags |= C3DiF_DrawUsed;
+}
+static void raw_draw_elements(u32 index_pa, u32 count) {
+  raw_draw_elements_prim(index_pa, count, 0);
 }
 
 /* prim: GPU_TRIANGLES or (AI-assisted) GPU_TRIANGLE_STRIP (ctr_gpu_draw_strip), as C3D_DrawArrays */
@@ -6519,11 +6528,12 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
     }
     PR_ADD(PR_MESH_MTX, t);
     t = PR_T();
-    raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
+    raw_draw_elements_prim(ms->indices_pa + 2u * (u32)first_index, (u32)index_count,
+                           (state->flags & CTR_STATE_STRIP) != 0);
     PR_ADD(PR_MESH_DRAW, t);
   }
   g.cur.draws++;
-  g.cur.triangles += index_count / 3;
+  g.cur.triangles += (state->flags & CTR_STATE_STRIP) ? index_count - 2 : index_count / 3;
   PR_ADD(PR_MESH, pr0);
 }
 
@@ -6600,9 +6610,10 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
     g.wind_rows_id = rows_id;
     raw_unif_xyzw(g.ps->uloc_wind, rows, row_count);
   }
-  raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
+  raw_draw_elements_prim(ms->indices_pa + 2u * (u32)first_index, (u32)index_count,
+                           (state->flags & CTR_STATE_STRIP) != 0);
   g.cur.draws++;
-  g.cur.triangles += index_count / 3;
+  g.cur.triangles += (state->flags & CTR_STATE_STRIP) ? index_count - 2 : index_count / 3;
 }
 
 int ctr_gpu_wind_ready(void) {
@@ -6678,10 +6689,11 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
       }
     }
     raw_end(p);
-    raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
+    raw_draw_elements_prim(ms->indices_pa + 2u * (u32)first_index, (u32)index_count,
+                           (state->flags & CTR_STATE_STRIP) != 0);
   }
   g.cur.draws++;
-  g.cur.triangles += index_count / 3;
+  g.cur.triangles += (state->flags & CTR_STATE_STRIP) ? index_count - 2 : index_count / 3;
 }
 
 int ctr_gpu_morph_ready(void) {
@@ -6742,10 +6754,11 @@ void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix
       }
       raw_end(raw_unif(raw_ptr(), g.ps->uloc_tband, v, 8, 1));
     }
-    raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
+    raw_draw_elements_prim(ms->indices_pa + 2u * (u32)first_index, (u32)index_count,
+                           (state->flags & CTR_STATE_STRIP) != 0);
   }
   g.cur.draws++;
-  g.cur.triangles += index_count / 3;
+  g.cur.triangles += (state->flags & CTR_STATE_STRIP) ? index_count - 2 : index_count / 3;
 }
 
 /* (AI-assisted) the cache flush statistics line since the last call */
@@ -6892,9 +6905,10 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state, int env_tex, const ctr_etie_
     raw_unif_xyzw(p->uloc_etie_fog0, g.fog0, 1);
     raw_unif_xyzw(p->uloc_etie_fog1, g.fog1, 1);
   }
-  raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
+  raw_draw_elements_prim(ms->indices_pa + 2u * (u32)first_index, (u32)index_count,
+                           (state->flags & CTR_STATE_STRIP) != 0);
   g.cur.draws++;
-  g.cur.triangles += index_count / 3;
+  g.cur.triangles += (state->flags & CTR_STATE_STRIP) ? index_count - 2 : index_count / 3;
 }
 
 int ctr_gpu_etie_ready(void) {

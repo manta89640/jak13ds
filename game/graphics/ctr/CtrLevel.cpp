@@ -6254,6 +6254,9 @@ void build_draw_order(CtrLevelData* out) {
     if (d.kind & c3l::kDrawAtlasUV) {
       st.tcc |= CTR_TCC_ST_ATLAS;
     }
+    if (d.kind & c3l::kDrawStrip) {
+      st.flags |= CTR_STATE_STRIP;
+    }
     // (AI-assisted) fog_alpha: the vertex alpha is 0x80 everywhere in this draw
     const size_t di = out->draw_states.size();
     if (di < out->draw_alpha80.size() && out->draw_alpha80[di]) {
