@@ -819,11 +819,7 @@ void CtrSpriteRenderer::flush(bool hud) {
       }
     }
     if (!b.clip.empty()) {
-      if (m_jak2) {
-        ctr_gpu_draw_clip_pz(&b.state, b.clip.data(), (int)b.clip.size());
-      } else {
-        ctr_gpu_draw_clip(&b.state, b.clip.data(), (int)b.clip.size());
-      }
+      ctr_gpu_draw_clip_pz(&b.state, b.clip.data(), (int)b.clip.size());
       m_stats.draws++;
     }
     b.verts.clear();
@@ -1008,10 +1004,9 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
   // position that times w, so the division cancels: c = t * k + w * o (see the corner loop)
   const float k3x = m_pfog0 * (1.f / 256.f), o3x = (m_hvdf_offset.x() - 2048.f) * (1.f / 256.f);
   const float k3y = -m_pfog0 * kInvY, o3y = (2048.f - m_hvdf_offset.y()) * kInvY;
-  // Jak II: z as the PICA's, -(GS z / (2^24 - 1)) * w, in float32 here (ctr_gpu_draw_clip_pz)
-  const float k3z = m_jak2 ? m_pfog0 * (-1.f / 16777215.f) : m_pfog0 * (1.f / 8388607.5f);
-  const float o3z = m_jak2 ? m_hvdf_offset.z() * (-1.f / 16777215.f)
-                           : m_hvdf_offset.z() * (1.f / 8388607.5f) - 1.f;
+  // z as the PICA's, -(GS z / (2^24 - 1)) * w, in float32 here (ctr_gpu_draw_clip_pz)
+  const float k3z = m_pfog0 * (-1.f / 16777215.f);
+  const float o3z = m_hvdf_offset.z() * (-1.f / 16777215.f);
   // (AI-assisted) the frame's values in locals: the vertex stores could be to any float as far as
   // the compiler knows, which made it load the matrix and these again for every sprite
   float m[16];
