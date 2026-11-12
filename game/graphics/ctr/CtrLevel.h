@@ -1459,6 +1459,8 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_proto_tris = 0, m_proto_frames = 0;  // statistics: triangles hidden, level draws
   void draw_level(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRenderState& rs);
   void flush_calls(int pass);
+  void run_cache_states(const CtrLevelData& lev, const std::vector<u8>& cur, std::vector<u8>& prev,
+                        std::vector<u32>& first, std::vector<u32>& list, u8 kind);
   void log_stats(const CtrRenderState& rs, CtrLevelData* lev);  // (AI-assisted) the log lines
   int m_jak2_slot = -1;  // (AI-assisted) Jak II: the level slot being drawn (-1: Jak 1)
   // (AI-assisted, j2cull) draw_level's phases (ticks summed since the last log line): setup, the
@@ -1544,6 +1546,33 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // of its group (hidden, and never drawn along with neighbouring runs); statistics: groups at
   // their near version, triangles drawn of near / far versions (over m_lod_frames level draws)
   std::vector<u8> m_run_nomerge;
+  // Incremental run state: per chunk the run loop's last result for the chunk within the planes
+  // (its runs' flags in m_raw_*), kept while its inputs hold: the visibility string's bytes
+  // (m_run_key moves when they change) and its LOD groups' states (a changed group clears its
+  // chunks' keys through m_g2c / m_t2c, groups to chunks)
+  // A chunk crossing planes keeps it while the planes moved less (over its sphere) than its runs'
+  // smallest distance to them at the evaluation (m_plane_ring: the planes of the last frames).
+  struct RunCache {
+    u32 key = 0;
+    u32 nr = 0;
+    u32 shown = 0, lod_hid = 0, lt0 = 0, lt1 = 0, view_hidden = 0, view_tris = 0;
+    u32 seq = 0;
+    float margin = 0;
+    u8 mode = 0, cross = 0;
+  };
+  static constexpr u32 kPlaneRing = 32;
+  float m_plane_ring[kPlaneRing][4][4] = {};
+  u32 m_rc_seq = 0;
+  std::vector<RunCache> m_run_cache;
+  std::vector<u8> m_raw_shown, m_raw_nomerge, m_chk_shown, m_chk_nomerge;
+  std::vector<u16> m_raw_margin, m_chk_margin;  // per run (CtrLevel.cpp run_margin_q)
+  u64 m_rc_partial = 0, m_rc_retested = 0;
+  std::vector<u8> m_vis_prev, m_lod_prev, m_tf_prev;
+  std::vector<u32> m_g2c_first, m_g2c, m_t2c_first, m_t2c;
+  const void* m_rc_lev = nullptr;
+  u32 m_rc_gen = ~0u, m_run_key = 1;
+  bool m_rc_vis = false;
+  u64 m_rc_hits = 0, m_rc_runs = 0, m_rc_tested = 0, m_rc_bad = 0, m_rc_checked = 0;
   // per run of the level being drawn: a shrub run's fade (0x80: opaque), read for faded chunks
   std::vector<u8> m_run_fade;
   // the faded shrub runs' draws (blend FIX with their fade), after the opaque level draws

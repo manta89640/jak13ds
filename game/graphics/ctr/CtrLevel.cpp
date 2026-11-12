@@ -10421,10 +10421,20 @@ struct RunLoopIn {
   float scale;
   u8* shown_out;
   u8* nomerge_out;
+  u16* margin_out;  // STR: per run its kRunMarginUnit steps from the planes (kRunUntested: none)
 };
+// a run's distance from the planes in steps of kRunMarginUnit (rounded down, at most kRunMarginMax);
+// kRunUntested: not view tested (hidden by the string or its LOD group, or no sphere)
+constexpr float kRunMarginUnit = 64.f;
+constexpr u16 kRunMarginMax = 0xfffe, kRunUntested = 0xffff;
+inline u16 run_margin_q(float m) {
+  const float q = m * (1.f / kRunMarginUnit);
+  return q >= (float)kRunMarginMax ? kRunMarginMax : (u16)q;
+}
 struct RunLoopOut {
   u32 shown = 0, view_hidden = 0, view_tris = 0, lod_hid = 0;
   u64 lod_tris[2] = {0, 0};
+  float margin = 3.0e38f;  // the smallest |plane value| of the runs view tested (world units)
 };
 // (AI-assisted, micro-level) NP: the number of crossed planes (0: the chunk crosses none, no view
 // test), their coefficients in locals (registers: the stores don't make them be loaded again)
@@ -10448,6 +10458,7 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
   // (AI-assisted, perfv2) u32 within one chunk (at most 65536 vertices, runs of u16 index counts):
   // the u64 sums were adds / adc pairs through the stack per run
   u32 lod_tris1 = 0, lod_tris2 = 0;
+  float margin = 3.0e38f;
   const c3l::VisRun* const runs = in.runs;
   const CtrLevelData::RunSphere* const spheres = in.spheres;
   const c3l::RunLod* const run_lod = in.run_lod;
@@ -10455,6 +10466,7 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
   const u8* const vis = in.vis;
   u8* const shown_out = in.shown_out;
   u8* const nomerge_out = in.nomerge_out;
+  u16* const margin_out = in.margin_out;
   const bool vista_tier = in.vista_tier;
   for (u32 r = r0; r < r0 + nr; r++) {
     // (AI-assisted, pld) the ARM11 has no hardware prefetch: 16 runs ahead (4 lines of VisRun and
@@ -10498,6 +10510,7 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
       }
     }
     nomerge_out[r] = nomerge;
+    u16 mq = kRunUntested;
     if (STR && s) {
       const auto& rs = spheres[r];
       if (rs.r != 0xffff) {
@@ -10505,16 +10518,24 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
         // (AI-assisted, signbits) every plane, then one branch on their sign bits (CtrSimd.h
         // ctr_gt_bit: the same result as `> rad` per plane), not a vcmp / vmrs and a branch each
         uint32_t all = ~0u;
+        float tm = 3.0e38f;
 #pragma GCC unroll 4
         for (int i = 0; i < NP; i++) {
-          all &= ctr_float_bits(rad - (po[i] + pk0[i] * x + pk1[i] * y + pk2[i] * z));
+          const float t = rad - (po[i] + pk0[i] * x + pk1[i] * y + pk2[i] * z);
+          all &= ctr_float_bits(t);
+          tm = std::min(tm, std::abs(t));
         }
+        margin = std::min(margin, tm);
+        mq = run_margin_q(tm);
         s = (all >> 31) != 0;
         if (!s) {
           view_hidden++;
           view_tris += run.index_count / 3;
         }
       }
+    }
+    if (STR) {
+      margin_out[r] = mq;
     }
     shown_out[r] = s;
     shown += s;
@@ -10528,6 +10549,7 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
   out->lod_hid = lod_hid;
   out->lod_tris[0] = lod_tris1;
   out->lod_tris[1] = lod_tris2;
+  out->margin = margin;
 }
 using RunLoopFn = void (*)(const RunLoopIn&, u32, u32, RunLoopOut*);
 // [VIS][NP][LOD]
@@ -10542,6 +10564,25 @@ constexpr RunLoopFn kRunLoops[2][5][2] = {
      {run_loop<true, 2, false>, run_loop<true, 2, true>},
      {run_loop<true, 3, false>, run_loop<true, 3, true>},
      {run_loop<true, 4, false>, run_loop<true, 4, true>}}};
+
+// Incremental run state (CtrTfragRenderer::RunCache): host env CTR_RUN_CACHE=0 turns it off (A/B);
+// CTR_RUN_CHECK: every cached result is checked against the run loop's ("[ctr] run cache" line)
+bool run_cache_enabled() {
+#ifdef __3DS__
+  return true;
+#else
+  static const bool off = getenv("CTR_RUN_CACHE") && atoi(getenv("CTR_RUN_CACHE")) == 0;
+  return !off;
+#endif
+}
+bool run_check_enabled() {
+#ifdef __3DS__
+  return false;
+#else
+  static const bool on = getenv("CTR_RUN_CHECK") != nullptr;
+  return on;
+#endif
+}
 
 // (AI-assisted, j2cull) host --ctr-gfx: env CTR_CULL_CHECK: every cluster that stood for its
 // members (chunks, tie LOD groups) is decided member by member as well, and must have changed
@@ -11334,6 +11375,14 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              (double)m_cull_tris / m_cull_frames, m_cull_frames);
     m_cull_runs = m_cull_tris = m_cull_chunks = m_cull_frames = 0;
   }
+  if (rs.log_now && m_rc_tested) {
+    lg::info("[ctr] {}: run cache: {} of {} runs kept ({} chunks whole, {} in part with {} runs "
+             "tested again); checked {}, {} differed",
+             m_name, m_rc_runs, m_rc_tested, m_rc_hits, m_rc_partial, m_rc_retested, m_rc_checked,
+             m_rc_bad);
+    m_rc_runs = m_rc_tested = m_rc_hits = m_rc_checked = m_rc_bad = 0;
+    m_rc_partial = m_rc_retested = 0;
+  }
   if (rs.log_now && m_vista_frames) {
     lg::info("[ctr] {}: vista {:.1f} chunks {:.0f} tris, low resolution chunks in near mode {:.1f} "
              "per level draw ({} level draws)",
@@ -11429,6 +11478,62 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
 
 // (AI-assisted, gpu-rt) the pass's draws collected by draw_level, to the backend (0: the main
 // pass, 1: the vista pass)
+// The LOD states (lod_state, kind 1; tf_state, kind 2) against last frame's: the chunks of a group
+// that changed lose their cached run results (the groups' chunks made at the first change)
+void CtrTfragRenderer::run_cache_states(const CtrLevelData& lev, const std::vector<u8>& cur,
+                                        std::vector<u8>& prev, std::vector<u32>& first,
+                                        std::vector<u32>& list, u8 kind) {
+  if (cur.size() != prev.size()) {
+    prev = cur;
+    m_run_key = m_run_key + 1 ? m_run_key + 1 : 1;
+    return;
+  }
+  if (cur.empty() || memcmp(cur.data(), prev.data(), cur.size()) == 0) {
+    return;
+  }
+  if (first.size() != cur.size() + 1) {
+    std::vector<u64> pairs;
+    const size_t nch = std::min(lev.chunks.size(), lev.chunk_lod.size());
+    for (size_t ci = 0; ci < nch; ci++) {
+      if (lev.chunk_lod[ci] != kind) {
+        continue;
+      }
+      const u32 r0 = lev.chunk_first_run[ci];
+      const u32 n = std::max<u32>(ci < lev.chunk_run_count.size() ? lev.chunk_run_count[ci] : 0,
+                                  lev.chunks[ci].vis_run_count);
+      for (u32 r = r0; r < r0 + n && r < lev.run_lod.size(); r++) {
+        const auto& rl = lev.run_lod[r];
+        if (rl.lod != c3l::kRunLodAlways && rl.group < cur.size()) {
+          pairs.push_back((u64)rl.group << 32 | ci);
+        }
+      }
+    }
+    std::sort(pairs.begin(), pairs.end());
+    pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
+    first.assign(cur.size() + 1, 0);
+    for (u64 p : pairs) {
+      first[(p >> 32) + 1]++;
+    }
+    for (size_t g = 0; g < cur.size(); g++) {
+      first[g + 1] += first[g];
+    }
+    list.resize(pairs.size());
+    for (size_t k = 0; k < pairs.size(); k++) {
+      list[k] = (u32)pairs[k];
+    }
+  }
+  for (size_t g = 0; g < cur.size(); g++) {
+    if (cur[g] != prev[g]) {
+      for (u32 k = first[g]; k < first[g + 1]; k++) {
+        if (list[k] < m_run_cache.size()) {
+          m_run_cache[list[k]].key = 0;
+        }
+      }
+      prev[g] = cur[g];
+    }
+  }
+}
+
 void CtrTfragRenderer::flush_calls(int /*pass*/) {
   tod_finish();  // (the tie morph color targets written by the draws)
   if (!m_calls.empty()) {
@@ -12487,6 +12592,50 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // chunk's sphere against the four planes; with run_culling, a chunk that crosses planes has its
   // runs tested against those planes on their own), the visibility bits or (vista tier) the
   // source chunks, then its matrix. vista: drawn in the vista pass.
+  // incremental run state (RunCache): its key follows the level, the string and the LOD states
+  const bool rc_on = run_cache_enabled();
+  if (rc_on) {
+    if (m_rc_lev != &lev || m_rc_gen != lev.generation ||
+        m_run_cache.size() != lev.chunks.size() || m_raw_shown.size() != lev.vis_runs.size()) {
+      m_rc_lev = &lev;
+      m_rc_gen = lev.generation;
+      m_run_cache.assign(lev.chunks.size(), RunCache());
+      m_raw_shown.assign(lev.vis_runs.size(), 0);
+      m_raw_nomerge.assign(lev.vis_runs.size(), 0);
+      m_g2c_first.clear();
+      m_t2c_first.clear();
+      m_lod_prev = lev.lod_state;
+      m_tf_prev = lev.tf_state;
+      m_rc_vis = false;
+      m_vis_prev.clear();
+    }
+    if (m_vis && lev.vis_scan_bytes == UINT32_MAX) {
+      u32 hi = 0;
+      bool any = false;
+      for (const auto& r : lev.vis_runs) {
+        if (r.vis != 0xffff) {
+          hi = std::max<u32>(hi, r.vis);
+          any = true;
+        }
+      }
+      lev.vis_scan_bytes = any ? std::min<u32>(hi / 8 + 1, 2048) : 0;
+    }
+    const u32 vb = m_vis ? lev.vis_scan_bytes : 0;
+    if ((m_vis != nullptr) != m_rc_vis || m_vis_prev.size() != vb ||
+        (vb && memcmp(m_vis_prev.data(), m_vis, vb) != 0)) {
+      m_rc_vis = m_vis != nullptr;
+      m_vis_prev.assign(m_vis, m_vis + vb);
+      m_run_key = m_run_key + 1 ? m_run_key + 1 : 1;
+    }
+    run_cache_states(lev, lev.lod_state, m_lod_prev, m_g2c_first, m_g2c, 1);
+    run_cache_states(lev, lev.tf_state, m_tf_prev, m_t2c_first, m_t2c, 2);
+    m_rc_seq++;
+    for (int c = 0; c < 4; c++) {
+      for (int i = 0; i < 4; i++) {
+        m_plane_ring[m_rc_seq % kPlaneRing][c][i] = cam.planes[c][i];
+      }
+    }
+  }
   // the run loop's inputs that are the same for every chunk (filled before the chunk loop)
   RunLoopIn run_in;
   float run_po[4], run_pk[4][3];
@@ -12589,7 +12738,157 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         in.scale = ch.scale;
         RunLoopOut o;
         m_ph_runs += nr;
-        kRunLoops[vis_test ? 1 : 0][straddles ? np : 0][lod_chunk ? 1 : 0](in, r0, nr, &o);
+        const RunLoopFn loop = kRunLoops[vis_test ? 1 : 0][straddles ? np : 0][lod_chunk ? 1 : 0];
+        // (incremental: its runs' flags follow the string, its groups' states and, crossing
+        // planes, the planes: kept while those moved less than the runs' margin)
+        const bool cacheable = rc_on && !vista_tier && (vis_test || lod_chunk || straddles) &&
+                               r0 + nr <= m_raw_shown.size();
+        // how far the crossed planes moved over the chunk's sphere since rc's evaluation, with
+        // twice the float rounding of a plane value (-1: rc doesn't apply)
+        auto planes_moved = [&](const RunCache& rc) -> float {
+          if (rc.cross != cross || (cross && m_rc_seq - rc.seq >= kPlaneRing)) {
+            return -1.f;
+          }
+          if (!cross) {
+            return 0.f;
+          }
+          const float(*then)[4] = m_plane_ring[rc.seq % kPlaneRing];
+          const float* s = ch.bsphere;
+          // (a run's center lies within the cube about the chunk's sphere)
+          const float reach = s[3] * 1.7321f;
+          const float eps =
+              64.f + 2.0e-6f * (std::abs(s[0]) + std::abs(s[1]) + std::abs(s[2]) + s[3]) * 8.f;
+          float dmax = 0.f;
+          for (int i = 0; i < 4; i++) {
+            if (!(cross >> i & 1)) {
+              continue;
+            }
+            const float d0 = cam.planes[0][i] - then[0][i], d1 = cam.planes[1][i] - then[1][i],
+                        d2 = cam.planes[2][i] - then[2][i], d3 = cam.planes[3][i] - then[3][i];
+            const float d = std::abs(d0 * s[0] + d1 * s[1] + d2 * s[2] - d3) +
+                            std::sqrt(d0 * d0 + d1 * d1 + d2 * d2) * reach;
+            dmax = std::max(dmax, d);
+          }
+          return dmax + 2.f * eps;
+        };
+        // the runs within moved of a plane tested again (the others keep their flags, their
+        // margins less moved), rc's counts follow
+        auto runs_again = [&](RunCache& rc, float moved) {
+          u8* const sh = m_raw_shown.data();
+          u16* const mg = m_raw_margin.data();
+          const c3l::VisRun* const runs = lev.vis_runs.data();
+          const auto* const spheres = lev.run_spheres.data();
+          const float scale = ch.scale;
+          float least = 3.0e38f;
+          for (u32 r = r0; r < r0 + nr; r++) {
+            const u16 q = mg[r];
+            if (q == kRunUntested) {
+              continue;
+            }
+            const float m = (float)q * kRunMarginUnit;
+            if (m > moved) {
+              const u16 left = run_margin_q(m - moved);
+              mg[r] = left;
+              least = std::min(least, (float)left * kRunMarginUnit);
+              continue;
+            }
+            m_rc_retested++;
+            const auto& sp = spheres[r];
+            const float x = sp.c[0], y = sp.c[1], z = sp.c[2], rad = -(float)sp.r * scale;
+            uint32_t all = ~0u;
+            float tm = 3.0e38f;
+            for (int i = 0; i < np; i++) {
+              const float t = rad - (run_po[i] + run_pk[i][0] * x + run_pk[i][1] * y +
+                                     run_pk[i][2] * z);
+              all &= ctr_float_bits(t);
+              tm = std::min(tm, std::abs(t));
+            }
+            const u16 nq = run_margin_q(tm);
+            mg[r] = nq;
+            least = std::min(least, (float)nq * kRunMarginUnit);
+            const u8 sn = (all >> 31) != 0;
+            if (sn != sh[r]) {
+              sh[r] = sn;
+              const u32 tris = runs[r].index_count / 3;
+              const int dir = sn ? 1 : -1;
+              rc.shown += dir;
+              rc.view_hidden -= dir;
+              rc.view_tris -= dir * (int)tris;
+              if (lod_chunk && r < lev.run_lod.size()) {
+                const u8 v = lev.run_lod[r].lod;
+                if (v) {
+                  (v == c3l::kRunLodFar ? rc.lt1 : rc.lt0) += dir * (int)tris;
+                }
+              }
+            }
+          }
+          rc.seq = m_rc_seq;
+          rc.margin = least;
+        };
+        if (cacheable) {
+          RunCache& rc = m_run_cache[ci];
+          const u8 mode = (vis_test ? 1 : 0) | (lod_chunk ? 2 : 0) | (tf_chunk ? 4 : 0) |
+                          (straddles ? 8 : 0);
+          m_rc_tested += nr;
+          const float moved =
+              rc.key == m_run_key && rc.mode == mode && rc.nr == nr ? planes_moved(rc) : -1.f;
+          if (moved >= 0.f) {
+            if (!(moved < rc.margin)) {
+              runs_again(rc, moved);
+              m_rc_partial++;
+            } else {
+              m_rc_hits++;
+            }
+            o.shown = rc.shown;
+            o.lod_hid = rc.lod_hid;
+            o.lod_tris[0] = rc.lt0;
+            o.lod_tris[1] = rc.lt1;
+            o.view_hidden = rc.view_hidden;
+            o.view_tris = rc.view_tris;
+            m_rc_runs += nr;
+            if (run_check_enabled()) {
+              if (m_chk_shown.size() < m_raw_shown.size()) {
+                m_chk_shown.resize(m_raw_shown.size());
+                m_chk_nomerge.resize(m_raw_shown.size());
+                m_chk_margin.resize(m_raw_shown.size());
+              }
+              in.shown_out = m_chk_shown.data();
+              in.nomerge_out = m_chk_nomerge.data();
+              in.margin_out = m_chk_margin.data();
+              RunLoopOut f;
+              loop(in, r0, nr, &f);
+              in.margin_out = m_raw_margin.data();
+              m_rc_checked++;
+              m_rc_bad += memcmp(&m_chk_shown[r0], &m_raw_shown[r0], nr) ||
+                          memcmp(&m_chk_nomerge[r0], &m_raw_nomerge[r0], nr) ||
+                          f.shown != o.shown || f.lod_hid != o.lod_hid ||
+                          f.lod_tris[0] != o.lod_tris[0] || f.lod_tris[1] != o.lod_tris[1] ||
+                          f.view_hidden != o.view_hidden || f.view_tris != o.view_tris;
+            }
+          } else {
+            in.shown_out = m_raw_shown.data();
+            in.nomerge_out = m_raw_nomerge.data();
+            loop(in, r0, nr, &o);
+            rc.key = m_run_key;
+            rc.mode = mode;
+            rc.nr = nr;
+            rc.shown = o.shown;
+            rc.lod_hid = o.lod_hid;
+            rc.lt0 = (u32)o.lod_tris[0];
+            rc.lt1 = (u32)o.lod_tris[1];
+            rc.view_hidden = o.view_hidden;
+            rc.view_tris = o.view_tris;
+            rc.cross = (u8)cross;
+            rc.seq = m_rc_seq;
+            rc.margin = o.margin;
+          }
+          in.shown_out = m_run_shown.data();
+          in.nomerge_out = m_run_nomerge.data();
+          memcpy(&m_run_shown[r0], &m_raw_shown[r0], nr);
+          memcpy(&m_run_nomerge[r0], &m_raw_nomerge[r0], nr);
+        } else {
+          loop(in, r0, nr, &o);
+        }
         if (proto_chunk) {
           // (AI-assisted, j2vis) the hidden prototypes' runs: not drawn, and never drawn along
           // with their neighbours (the small-gap merge)
@@ -12879,6 +13178,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   run_in.vista_src_n = m_vista_src.size();
   run_in.shown_out = m_run_shown.data();
   run_in.nomerge_out = m_run_nomerge.data();
+  if (m_raw_margin.size() < lev.vis_runs.size()) {
+    m_raw_margin.resize(lev.vis_runs.size(), kRunUntested);
+  }
+  run_in.margin_out = m_raw_margin.data();
   // (AI-assisted) vista tier: a chunk not drawn because of its distance, within vista_distance
   // the string shows none of chunk ci's runs, by the rule emit_chunk tests its tier's runs with: its
   // vista copy isn't drawn either (the PS2 hides a neighbour's low resolution tfrag by the bits)
