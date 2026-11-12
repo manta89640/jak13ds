@@ -25,7 +25,7 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--tie-lod-budget-kb K` | per level | (v17) extra vertex and index data for near versions per level; default: the level's planned budget (`kTieLodBudgets` in main.cpp), else every group. |
 | `--tie-lod-min-angle A`, `--tie-lod-view-m M` | 0.002, 15 | (v17) a group gets a near version when its shape error seen from the larger of its radius and M meters is at least A radians. |
 | `--tie-lod-default-m M` | 60 | (v17) near version distance of groups without a PS2 distance (wind instances). |
-| `--no-tfrag-morph`, `--tfrag-morph-dir DIR` | Jak 1 on; the .fr3's folder | the PS2's tfrag geomorph from `<level>.tfragmorph` (the level extractor's): geometries 1 and 2 as the near tier's mid and far versions of each tfrag visibility group, geometries 0 and 1 morphing. See "The PS2's tfrag geomorph". |
+| `--no-tfrag-morph`, `--tfrag-morph-dir DIR` | on; the .fr3's folder | the PS2's tfrag geomorph from `<level>.tfragmorph` (the level extractor's): geometries 1 and 2 as the near tier's mid and far versions of each tfrag visibility group, geometries 0 and 1 morphing. See "The PS2's tfrag geomorph". |
 | `--no-tie-morph`, `--tie-morph`, `--tie-morph-dir DIR` | Jak 1 on, Jak II off; the .fr3's folder | the PS2's tie geomorph from `<level>.tiemorph` (the level extractor's): geometry 2 as a third version and the morph of geometries 0 and 2. `--tie-morph`: Jak II too (the shipped Jak II set; its `.tiemorph` files come from the level extractor run on Jak II). See "The PS2's tie geomorph". |
 | `--tie-far-own-colors` | off | (AI-assisted, lod-light) tie far versions keep geometry 3's own vertex colors (the PS2's) instead of colors fitted to their near version. See "Far version colors". |
 | `--no-stream` | off | (AI-assisted, v19) no near chunks: a v18 file (near versions within `kTieLodBudgets`, in the far versions' chunks). See "Near chunks (v19)" and `streaming.md`. |
@@ -71,7 +71,7 @@ What goes in:
 
 - tfrag trees of kind NORMAL, TRANS, DIRT, ICE and WATER, twice: the near version
   (`--tfrag-geo`, chunk tier 1) and a coarse one (`--far-tfrag-geo`, tier 2). The runtime draws
-  one of the two per grid cell, by the camera's distance to the cell center (`lod_distance`).
+  tier 1 (with the tfrag geomorph's versions); tier 2 is never drawn (tier 1's far versions cover it).
 - LOWRES / LOWRES_TRANS tfrag (the PS2's version for views from a neighbouring level; often only
   the parts visible from there) as tier 3. It is drawn only when the camera is outside the level.
 - The static draws of every tie tree (categories normal, trans, water, and the base pass of
@@ -804,16 +804,17 @@ their own view depth, so no switch shows. Read from `draw-inline-array-tfrag`
 - **Data.** The .fr3 has the points where they are (the PC draws geometry 0, unmoved). The level
   extractor writes `<level>.tfragmorph` (common/custom_data/TfragMorph.h: per vertex of geometries
   0 and 1 its offsets at the end of band 0 and band 1, its kind, the color indices its color goes
-  to; the level's close / far). Jak 1 only.
+  to; the level's close / far; Jak II: bsp-header subdivide-close / subdivide-far, 0 in every
+  level, so the PS2's 30 / 70 m).
 
-In the file (Jak 1, with the .tfragmorph; `--no-tfrag-morph`: as before):
+In the file (with the .tfragmorph; `--no-tfrag-morph`: as before):
 
 - **Versions.** Each tfrag visibility group (a BVH node, up to 8 fragments) of the near tier (lod
   tier 1) has its geometry 0, 1 and 2 as RunLod kRunLodNear / kRunLodMid / kRunLodFar runs (in
   `ExtTfrag`'s RunLod array, not the ExtHeader's), in the cells of the group's center. A version
   the same as the one before it (fragments whose chains are the same) is left out and the group
   switches past it (TfragGroup mid = far, or far = FLT_MAX); a group with one geometry is always
-  drawn. The far tier (geometry 2 cells beyond lod_distance) stays as it was.
+  drawn. The far tier (geometry 2 cells) is never drawn.
 - **Near chunks.** A near or mid version that a coarser one follows is in a near chunk (Chunk::kind
   CHUNK_KIND_TFRAG, lod tier 1, StreamChunk cls kStreamCore, need class cells as the ties'),
   streamed in while the camera is within need_a (each group's offset + radius + the depth its

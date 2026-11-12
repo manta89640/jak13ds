@@ -69,8 +69,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.fog_start = f;
     } else if (key == "fog") {
       s.fog = parse_bool(v);
-    } else if (key == "lod_distance") {
-      s.lod_distance = f;
     } else if (key == "detail_scale") {
       s.detail_scale = std::clamp(f, 0.1f, 4.f);  // (AI-assisted, levellod: 0 drew everything far)
     } else if (key == "shrub_distance") {
@@ -261,7 +259,6 @@ CtrSettings load() {
   s.rgba4_as_rgba8 = s.emulator;
   if (g_game_version == GameVersion::Jak2) {
     // Jak II: the distances its city held 30 fps with, until its renderer can afford the PS2's
-    s.lod_distance = 200.f;
     s.tie_distance_scale = 1.5f;
     s.tie_lod_px = 4.f;
     s.vista_distance = 3000.f;
@@ -373,7 +370,7 @@ std::string CtrSettings::summary() const {
   // the fixed detail floor (CtrDetail.h): what it changes from the config
   auto floor_text = [&]() {
     const ctr_detail::Floor fl = ctr_detail::floor_of(
-        tie_lod_px, lod_distance, tie_distance_scale, draw_distance,
+        tie_lod_px, tie_distance_scale, draw_distance,
         g_game_version == GameVersion::Jak1, g_game_version == GameVersion::Jak2);
     if (!fl.on) {
       return std::string("no floor");
@@ -386,16 +383,13 @@ std::string CtrSettings::summary() const {
     if (fl.tie_lod_px != tie_lod_px) {
       r += fmt::format(", tie_lod_px {:.0f}", fl.tie_lod_px);
     }
-    if (fl.lod_distance != lod_distance) {
-      r += fmt::format(", lod {:.0f}m", fl.lod_distance);
-    }
     if (fl.tie_distance_scale != tie_distance_scale) {
       r += fmt::format(", ties x{:.1f}", fl.tie_distance_scale);
     }
     return r;
   };
   return fmt::format(
-      "dist {:.0f}m lod {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
+      "dist {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
       "merc {} sprites {} "
       "pipeline {} ocean {} sky {} clouds {} distort {} envmap {} merc_gen_lod {} shadows {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "compact_textures {} sprite_alpha_discard {} "
@@ -405,7 +399,7 @@ std::string CtrSettings::summary() const {
       "fog_start {:.2f} overlap {} frame_pacing {} fps_cap {} ocean_texture_rate {} "
       "defer_flush {} render_watchdog {} stats_period {:.0f}s"
       "{}{}{}{}{}{}",
-      draw_distance, lod_distance, detail_scale,
+      draw_distance, detail_scale,
       fmt::format("{:.0f}m ({})", shrub_distance, floor_text()),
       fmt::format("{:.2f}", shrub_scale),
       !(tie_distance_scale > 0) ? std::string("none") : fmt::format("{:.1f}", tie_distance_scale),

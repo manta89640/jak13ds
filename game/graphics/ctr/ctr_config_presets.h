@@ -183,6 +183,8 @@ static const char* const ctr_cfg_removed[] = {
     "gpu_micro_ident", "cmd_dump", "cpu_bench",
     /* GPU backend phase B */
     "raw_cmds",
+    /* far mode and the dormant hold gone; tfrag tiers by the tfrag geomorph */
+    "lod_distance", "far_level_distance", "dormant_levels",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

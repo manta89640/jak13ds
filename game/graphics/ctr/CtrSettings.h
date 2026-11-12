@@ -22,10 +22,6 @@ struct CtrSettings {
   float fog_start = 0.6f;
   // the game's own distance fog (like the PC renderer)
   bool fog = true;
-  // tfrag: the detailed version up to this distance, the coarse one beyond (meters, 0 = always
-  // detailed, as the PS2: its tfrag has no distance LOD). Needs .c3l files with both versions
-  // (ctr_level_converter --far-lod).
-  float lod_distance = 0.f;
   // multiplies the draw distance of small and medium objects (set by the converter)
   float detail_scale = 1.f;
   // (AI-assisted) c3l files with chunk kinds (c3l::Chunk::kind; older files: detail_scale only):

@@ -947,7 +947,7 @@ struct BspHeader {
   DrawableInlineArrayAmbient ambients;
   //  (unk-data-4 float :offset-assert 160)
   //  (unk-data-5 float :offset-assert 164)
-  // jak 1: the tfrag subdivide distances close / far (game units, 0: the defaults)
+  // jak 1 / jak 2: the tfrag subdivide distances close / far (game units, 0: the defaults)
   float subdivide_close = 0, subdivide_far = 0;
   //  (adgifs adgif-shader-array :offset-assert 168)
   AdgifShaderArray adgifs;

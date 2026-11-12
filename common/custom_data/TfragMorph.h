@@ -7,9 +7,9 @@
  *
  * A tfragment has three geometries: base (.fr3 geometry 2), level0 (geometry 1: base plus
  * "interpolated" level0 points) and level1 (geometry 0: level0 plus level1 points). With the
- * level's subdivide distances close and far (bsp-header unk-data-4 / 5, 0: 30 m / 70 m;
- * update-subdivide-settings!) the meters m4 = close, m3 = close + 0.5 s, m2 = m3 + s, m1 = m2 + 2 s,
- * m0 = far, s = (far - close) / 7. draw-inline-array-tfrag picks a fragment's geometry by the view
+ * level's subdivide distances close and far (bsp-header unk-data-4 / 5, Jak II subdivide-close /
+ * subdivide-far, 0: 30 m / 70 m; update-subdivide-settings!) the meters m4 = close,
+ * m3 = close + 0.5 s, m2 = m3 + s, m1 = m2 + 2 s, m0 = far, s = (far - close) / 7. draw-inline-array-tfrag picks a fragment's geometry by the view
  * depth of its sphere's nearest point: base beyond m0, level0 beyond m1, else level1. The VU program
  * moves each interpolated point by its own view depth w (tfrag-dists k0s / k1s): a level0 point
  * from where it is (w <= m1) to the midpoint of its two parents (w >= m0), a level1 point the same

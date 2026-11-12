@@ -197,6 +197,61 @@ constexpr u32 kStreamStreak = 2;
 // the title's read back reads at most this much per job (what it read is kept)
 constexpr u64 kDetailJobBytes = 2u * 1024 * 1024;
 
+// a merc model's vertices by bone (each vertex under every bone it has weight on): the bounds
+// CtrMercRenderer::model_off_screen tests; none if a vertex has no weight
+void merc_bone_spheres(CtrMercModelData& md,
+                       const std::vector<c3l::MercVertex>& verts,
+                       const std::vector<u16>& indices) {
+  md.bone_spheres.clear();
+  float lo[256][3], hi[256][3];
+  bool any[256] = {};
+  std::vector<std::pair<u8, u16>> uses;  // (bone, vertex)
+  for (const auto* ds : {&md.draws, &md.gen_draws}) {
+    for (const auto& d : *ds) {
+      for (u32 k = d.first_index; k < d.first_index + d.index_count && k < indices.size(); k++) {
+        const u16 v = indices[k];
+        if (v >= verts.size()) {
+          continue;
+        }
+        bool weighted = false;
+        for (int j = 0; j < 3; j++) {
+          if (verts[v].weights[j]) {
+            weighted = true;
+            const u8 b = d.palette[verts[v].bones[j] % c3l::kMercPaletteSize];
+            uses.push_back({b, v});
+            for (int c = 0; c < 3; c++) {
+              const float p = verts[v].pos[c];
+              lo[b][c] = any[b] ? std::min(lo[b][c], p) : p;
+              hi[b][c] = any[b] ? std::max(hi[b][c], p) : p;
+            }
+            any[b] = true;
+          }
+        }
+        if (!weighted) {
+          return;
+        }
+      }
+    }
+  }
+  float r2[256] = {};
+  for (const auto& [b, v] : uses) {
+    float d2 = 0;
+    for (int c = 0; c < 3; c++) {
+      const float d = verts[v].pos[c] - 0.5f * (lo[b][c] + hi[b][c]);
+      d2 += d * d;
+    }
+    r2[b] = std::max(r2[b], d2);
+  }
+  for (int b = 0; b < 256; b++) {
+    if (any[b]) {
+      md.bone_spheres.push_back({(u8)b,
+                                 {0.5f * (lo[b][0] + hi[b][0]), 0.5f * (lo[b][1] + hi[b][1]),
+                                  0.5f * (lo[b][2] + hi[b][2])},
+                                 std::sqrt(r2[b]) + 1.f});
+    }
+  }
+}
+
 // what a chunk is, for the lines about parts not made
 std::string chunk_section(const c3l::Chunk& ch) {
   switch (ch.kind) {
@@ -326,7 +381,6 @@ LevelMem level_mem(const CtrLevelData& lev) {
             vec_bytes(lev.blerc_targets) + vec_bytes(lev.blerc_dests) +
             vec_bytes(lev.outside_cache) + vec_bytes(lev.mesh_index_first) +
             vec_bytes(lev.mesh_index_end) + vec_bytes(lev.chunk_state) +
-            vec_bytes(lev.lod_cell_sphere) +
             vec_bytes(lev.stream_units) + vec_bytes(lev.chunk_unit) +
             vec_bytes(lev.group_unit_first) + vec_bytes(lev.group_unit_count) +
             vec_bytes(lev.group_units) + vec_bytes(lev.unit_group_first) +
@@ -1509,12 +1563,6 @@ bool chunk_hideable(const CtrLevelData& lev, size_t ci) {
 // ones for them, for a level load, a repair or the stream arena. A level's load holds its other
 // chunks and the ones needed then.
 namespace {
-// (AI-assisted, title-popin) what is in view and moving away keeps its nearer version / stays drawn
-// up to this many times its distance (with the 10% hysteresis out of view): it goes when it is out
-// of view or small on screen, instead of where the camera happens to cross the distance. On the
-// title camera's flight (host, Oct 17) most switches of tie versions, tfrag tiers and distance
-// limits in view were of things moving away.
-constexpr float kHoldInView = 1.5f;
 // (AI-assisted, fable1) c3l v14 shrubs: a chunk's max_dist is its PS2 distance class, the middle of
 // the prototype's fade (x + w) / 2 (shrub_ps2_dists.inc: full detail up to x, the fading version
 // up to w). The PS2 shows a shrub out to w and the PC without a limit; the 3DS drew a run up to
@@ -2100,10 +2148,10 @@ bool title_needed(const CtrLevelData& lev, size_t ci) {
   if (ch.kind == c3l::CHUNK_KIND_VISTA || ch.lod_tier == 3) {
     return true;
   }
-  // decide_dist's largest: its own limit (held in view), at most the draw distance's with 10%
+  // decide_dist's largest: its own limit, at most the draw distance's, with 10%
   const float own = ch.kind == c3l::CHUNK_KIND_SHRUB || ch.kind == c3l::CHUNK_KIND_TIE
                         ? dist_limit(lev, ch)
-                        : ch.max_dist * s.detail_scale * kHoldInView;
+                        : ch.max_dist * s.detail_scale * 1.1f;
   float reach = draw > 0 ? draw * 1.1f : 0.f;
   if (own > 0) {
     reach = reach > 0 ? std::min(reach, own) : own;
@@ -6079,7 +6127,6 @@ void make_cull_clusters(CtrLevelData& lev) {
     if (cl.flags & CtrLevelData::kClPlain) {
       continue;
     }
-    cl.lod_a = 0;
     for (u32 ci = cl.first; ci < cl.first + cl.count; ci++) {
       const auto& ch = lev.chunks[ci];
       const int k = ch.kind == c3l::CHUNK_KIND_TIE ? 0 : (ch.kind == c3l::CHUNK_KIND_SHRUB ? 1 : 2);
@@ -6089,14 +6136,7 @@ void make_cull_clusters(CtrLevelData& lev) {
       } else {
         cl.flags |= CtrLevelData::kClNoOwn << k;
       }
-      if (ch.lod_tier == 1 || ch.lod_tier == 2) {
-        cl.flags |= CtrLevelData::kClTier12;
-        const double dx = ch.lod_center[0] - cl.c[0], dy = ch.lod_center[1] - cl.c[1],
-                     dz = ch.lod_center[2] - cl.c[2];
-        cl.lod_a = std::max(cl.lod_a, (float)std::sqrt(dx * dx + dy * dy + dz * dz));
-      }
     }
-    cl.lod_a = cl.lod_a * 1.0001f + 16.f;
   }
   lev.vista_chunks.clear();
   for (u32 ci = 0; ci < n; ci++) {
@@ -7534,6 +7574,7 @@ bool CtrLevels::load_file(const fs::path& path,
             const float extent = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], 1.f});
             md.gen_err = c3l::kMercGenLodErrorMax * extent * m.scale;
           }
+          merc_bone_spheres(md, mverts, mindices);
           md.mesh = ctr_gpu_skinned_mesh_create(mverts.data(), m.vertex_count, mindices.data(),
                                                 end - first);
           while (md.mesh < 0 &&
@@ -11121,10 +11162,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   const CtrSettings& settings = ctr_settings();
   // the fixed detail floor (CtrDetail.h)
+  m_levels->loaded(&m_loaded);
+  bool jak2_title = false;
+  for (const auto* l : m_loaded) {
+    jak2_title = jak2_title || (m_jak2_slot >= 0 && l->name == "title");
+  }
   ctr_detail::Floor dfl = ctr_detail::floor_of(
-      settings.tie_lod_px, settings.lod_distance, settings.tie_distance_scale,
-      settings.draw_distance, g_game_version == GameVersion::Jak1,
-      g_game_version == GameVersion::Jak2);
+      settings.tie_lod_px, settings.tie_distance_scale, settings.draw_distance,
+      g_game_version == GameVersion::Jak1, g_game_version == GameVersion::Jak2, jak2_title);
 #ifndef __3DS__
   static const char* const tie_far_env = getenv("CTR_TIE_FAR_M");  // (host pricing: meters)
   if (tie_far_env && dfl.tie_far > 0) {
@@ -11265,7 +11310,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
 #endif
   // fog (ctr_gpu_set_mesh_fog): the game's (tfrag3.vert), and towards the draw distance
   const float draw_dist = settings.draw_distance * 4096.f;
-  const float lod_dist = dfl.lod_distance * 4096.f;
   m_level_draws++;
   bool j2_hidden = false;  // (AI-assisted, j2-mem) Jak II: its string is all zero this frame
   // (AI-assisted) the game's visibility string for this level (bucket of level 1 or 0). Ties are
@@ -11448,7 +11492,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   };
   bool dist_cfg = true;  // decide_dist: the config's limit would draw it
   // (AI-assisted, streaming) a chunk's distance decision (draw distance, its own limit, 10%
-  // hysteresis, kept while in view and moving away): the chunk loop's,
+  // hysteresis): the chunk loop's,
   // and the near chunks' (before the tie LOD groups, which need them). Updates the chunk's state.
   if (m_shrub_lim.size() < lev.chunks.size()) {
     m_shrub_lim.resize(lev.chunks.size());
@@ -11531,15 +11575,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         const float f = was_in ? 1.1f : 1.f;
         dist_ok = within(max_dist, f);
         state |= kChunkDecided;
-        // (AI-assisted, title-popin) in view and moving away: drawn up to kHoldInView x its own
-        // distance (not beyond the draw distance). (AI-assisted, titlemove) not shrubs: they
-        // follow the PS2's distances (the user: "small things like shrubs pop in when i walk close,
-        // but if i walk away they stay"); their runs are culled by distance one by one too
-        // (emit_chunk)
-        if (was_in && !dist_ok && d > 0 && (base_dist <= 0 || d < base_dist) &&
-            ch.kind != c3l::CHUNK_KIND_SHRUB && sphere_in_view(cam, ch.bsphere)) {
-          dist_ok = within(limit_with(d * kHoldInView), 1.f);
-        }
         if (pop_log_on() && was_in != dist_ok && sphere_in_view(cam, ch.bsphere)) {
           (dist_ok ? g_pop.chunk_in : g_pop.chunk_out)[ch.kind & 3]++;
           lg::info("[popC] f={} {} ci={} kind={} {} d={:.1f} lim={:.1f} r={:.1f}", rs.frame_idx,
@@ -12624,31 +12659,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const float lim = vista_dist + ch.bsphere[3];
     m_vista_src[ci] = (vista_dist <= 0 || dx * dx + dy * dy + dz * dz < lim * lim) && !bits_hide(ci);
   };
-  // (AI-assisted, title-popin) the cell spheres of tiers 1 / 2 (lod_cell_sphere), once per load
-  if (lev.lod_cell_sphere.size() != lev.chunks.size() * 4) {
-    lev.lod_cell_sphere.assign(lev.chunks.size() * 4, 0.f);
-    std::map<std::tuple<float, float, float>, float> radius;
-    for (const auto& ch : lev.chunks) {
-      if (ch.lod_tier == 1 || ch.lod_tier == 2) {
-        float d2 = 0;
-        for (int c = 0; c < 3; c++) {
-          d2 += (ch.bsphere[c] - ch.lod_center[c]) * (ch.bsphere[c] - ch.lod_center[c]);
-        }
-        float& r = radius[{ch.lod_center[0], ch.lod_center[1], ch.lod_center[2]}];
-        r = std::max(r, std::sqrt(d2) + ch.bsphere[3]);
-      }
-    }
-    for (size_t ci = 0; ci < lev.chunks.size(); ci++) {
-      const auto& ch = lev.chunks[ci];
-      if (ch.lod_tier == 1 || ch.lod_tier == 2) {
-        float* cs = &lev.lod_cell_sphere[ci * 4];
-        cs[0] = ch.lod_center[0];
-        cs[1] = ch.lod_center[1];
-        cs[2] = ch.lod_center[2];
-        cs[3] = radius[{ch.lod_center[0], ch.lod_center[1], ch.lod_center[2]}];
-      }
-    }
-  }
   const c3l::Chunk* const chunks = lev.chunks.data();
   u8* const chunk_state = lev.chunk_state.data();
   const int* const meshes = lev.meshes.data();
@@ -12659,8 +12669,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // (AI-assisted, j2cull) the chunks cluster by cluster (CtrLevelData::CullCluster). A cluster
   // beyond the distance limit of each of its members (their largest limit this frame, by kind: the
   // limits decide_dist works out), whose members were all beyond theirs last frame (state bit 2
-  // clear, decided before, no dormant hold; tiers 1 / 2: the coarse version
-  // chosen and the cell beyond 0.9 x lod_distance) needs none of their decisions: each would come
+  // clear, decided before, no dormant hold) needs none of their decisions: each would come
   // out "beyond, as before" (not drawn, nothing changed) and only a vista source to mark. Its test
   // has margins for float rounding: where it can't tell, the members are decided one by one.
   auto lim_d = [&](float d) { return d > 0 ? (draw_dist > 0 ? std::min(draw_dist, d) : d) : draw_dist; };
@@ -12719,22 +12728,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     if (!(d2 > reach * reach)) {
       return false;
     }
-    if (f & CtrLevelData::kClTier12) {
-      if (!(lod_dist > 0)) {
-        return false;
-      }
-      const float lr = (cl.lod_a + 0.9f * lod_dist) * 1.0002f + 256.f;
-      if (!(d2 > lr * lr)) {
-        return false;
-      }
-    }
     // last frame's decisions: all beyond
     for (u32 ci = cl.first; ci < cl.first + cl.count; ci++) {
       const u8 st = chunk_state[ci];
       if ((st & 4) || !(st & kChunkDecided) || (hold_since && hold_since[ci])) {
-        return false;
-      }
-      if ((chunks[ci].lod_tier == 1 || chunks[ci].lod_tier == 2) && (st & 3) != 2) {
         return false;
       }
     }
@@ -12823,54 +12820,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
       continue;
     }
-    // (AI-assisted) The detail and distance decisions get 10% hysteresis from last frame's, and
-    // are made for every chunk every frame (off screen too): with hard cutoffs, turning the camera
-    // around Jak or standing at a threshold made whole cells of objects pop in and out. The two
-    // versions of a cell share lod_center and see the same decisions: exactly one is drawn.
+    // The distance decisions get 10% hysteresis from last frame's, made for every chunk every
+    // frame (off screen too). Tfrag tier 1 always (its geomorph is the coarse version), never tier 2.
     u8& state = chunk_state[ci];
-    bool lod_ok = true;
-    if (ch.lod_tier == 1 || ch.lod_tier == 2) {
-      // detailed version up close, coarse version further away
-      const u8 last = state & 3;
-      const float f = last == 1 ? 1.1f : (last == 2 ? 0.9f : 1.f);
-      const float dx = ch.lod_center[0] - cx, dy = ch.lod_center[1] - cy,
-                  dz = ch.lod_center[2] - cz;
-      const float d2 = dx * dx + dy * dy + dz * dz;
-      int in_view = -1;
-      auto near_with = [&](float ld) {
-        const float lim = ld * f;
-        bool nr = ld <= 0 || d2 < lim * lim;
-        // (AI-assisted, title-popin) a cell in view moving away keeps its detailed version up to
-        // kHoldInView x lod_distance (both versions test the same cell sphere: one is drawn)
-        if (!nr && last == 1) {
-          if (in_view < 0) {
-            in_view = sphere_in_view(cam, &lev.lod_cell_sphere[ci * 4]);
-          }
-          const float hl = ld * kHoldInView;
-          nr = in_view && d2 < hl * hl;
-        }
-        return nr;
-      };
-      bool near = near_with(lod_dist);
-#ifndef __3DS__
-      // host A/B, env CTR_TIER_AB: on odd frames every cell's coarse tier
-      static const bool tier_ab = getenv("CTR_TIER_AB") != nullptr;
-      if (tier_ab && (rs.frame_idx & 1)) {
-        near = false;
-      }
-#endif
-      if (pop_log_on() && last && last != (near ? 1 : 2) && ch.lod_tier == 1 &&
-          sphere_in_view(cam, &lev.lod_cell_sphere[ci * 4])) {
-        lg::info("[popT] f={} {} ci={} tier {} d={:.1f} r={:.1f}", rs.frame_idx, lev.name, ci,
-                 near ? "2 -> 1" : "1 -> 2", std::sqrt(d2) / 4096.f,
-                 lev.lod_cell_sphere[ci * 4 + 3] / 4096.f);
-      }
-      if (last && last != (near ? 1 : 2)) {
-        m_pop_why[ci] = 1 + ctr_pop::kTier;
-      }
-      state = (u8)((state & ~3) | (near ? 1 : 2));
-      lod_ok = near == (ch.lod_tier == 1);
-    }
+    const bool lod_ok = ch.lod_tier != 2;
     // (AI-assisted) lowres_vista: the low resolution tfrag is far scenery (vista_distance)
     const bool vista_chunk = lowres_vista && ch.lod_tier == 3;
     const bool dist_ok = decide_dist(ci, ch, state, vista_chunk);

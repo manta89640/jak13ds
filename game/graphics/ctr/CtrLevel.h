@@ -60,7 +60,7 @@ enum Cause : u8 {
   kFar,    // (none: a neighbour level is drawn by its string, not by a far mode)
   kShrub,  // a shrub's fade jumped
   kVista,  // the vista distance
-  kTier,   // a tfrag cell switched tier 1 / 2 (lod_distance)
+  kTier,   // (none: tfrag tier 1 always, its geomorph is the coarse version)
   kHold,   // a group kept far in view by a hold
   kUnit,   // a group's near data beyond its near chunk's limit, or not read
   kOther,  // a mesh came or went, the dormant hold, the low resolution tier's rules
@@ -109,6 +109,15 @@ struct CtrMercModelData {
   // models whose vertices are rewritten (blend shapes, mod): the mesh's indices, for the copies of
   // the instances drawn after the first in a frame (CtrMercRenderer)
   std::vector<u16> indices;
+  // per bone its vertices' sphere (quantized model units; empty: not known), and how far blend
+  // shapes moved a vertex from the file's position at most (CtrMercRenderer::model_off_screen)
+  struct BoneSphere {
+    u8 bone;
+    float c[3];
+    float r;
+  };
+  std::vector<BoneSphere> bone_spheres;
+  mutable float blerc_reach = 0.f;
 };
 
 // The PS2's shine distance of Jak 1's envmapped ties (draw-inline-array-instance-tie): an instance
@@ -291,13 +300,10 @@ struct CtrLevelData {
   u64 repair_retry_frame = 0;  // after a repair that left parts out: not before this frame
   u8 repair_failures = 0;      // repairs in a row that made nothing (longer waits)
   // (AI-assisted) last frame's decisions, for hysteresis (CtrTfragRenderer::draw_level): per chunk
-  // bits 0-1 detailed/coarse (1 near, 2 far, 0 not decided yet), bit 2 within its draw distance,
+  // bit 2 within its draw distance,
   // bit 3 shrub runs faded, bit 4 its distance decided at least once
   std::vector<u8> chunk_state;
   std::vector<u16> lod_switch_at;  // per tie LOD group: the frame (u16) it last switched version
-  // (AI-assisted, title-popin) per chunk of tiers 1/2: a sphere around its lod_center holding both
-  // versions of the cell (the same for both: their in-view tests agree), x y z r
-  std::vector<float> lod_cell_sphere;
   // Jak II: the game's visibility string hid the level whole at its last draw
   bool hidden = false;
   // the frame its string showed it again after hiding it (a reveal); CtrLevels::note_late_in_view
@@ -319,14 +325,13 @@ struct CtrLevelData {
   struct CullCluster {
     float c[3];          // center
     float a;             // the members' largest |center - c| + radius
-    float lod_a;         // tiers 1 / 2 (chunks): the largest |lod_center - c|
     float raw[3];        // chunks: the members' largest max_dist by kind (tie, shrub, other); LOD
                          // groups: raw[0] the largest lod_error, raw[1] the largest dist
     u32 first;
     u32 count : 24;
     u32 flags : 8;       // kCl*
   };
-  static constexpr u8 kClPlain = 1, kClTier12 = 2, kClHas = 4, kClNoOwn = 32;  // kClHas << kind
+  static constexpr u8 kClPlain = 1, kClHas = 4, kClNoOwn = 32;  // kClHas << kind
   std::vector<CullCluster> chunk_clusters, lod_clusters;
   std::vector<u32> vista_chunks;  // the CHUNK_KIND_VISTA chunks, in index order
   // ctr_pop: per chunk the frames it was last chosen / drawn, the chunks drawn last frame, those

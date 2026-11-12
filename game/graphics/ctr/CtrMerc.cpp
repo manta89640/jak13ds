@@ -425,11 +425,12 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
               "{} draws ({} shine draws, {} "
               "over their opaque base draw's triangles: foldable), {} with back faces culled "
               "({} not: mirroring bone), {} palette bones not sent, {} draws with fog, {} "
-              "instances with rewritten vertices over the copies' limits",
+              "instances with rewritten vertices over the copies' limits, {} off screen",
               m_name, m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.gen_lod,
               m_stats.draws, m_stats.env_drawn,
               m_stats.env_foldable, m_stats.culled,
-              m_stats.mirrored, m_stats.unsent_bones, m_stats.fogged, m_stats.vtx_shared);
+              m_stats.mirrored, m_stats.unsent_bones, m_stats.fogged, m_stats.vtx_shared,
+              m_stats.off_screen);
     m_stats = Stats();
   }
 }
@@ -594,6 +595,14 @@ void CtrMercRenderer::apply_blerc(const CtrLevelData& lev,
     s16 q[3];
     for (int c = 0; c < 3; c++) {
       q[c] = (s16)std::clamp((int)std::lround(p[c] * inv_scale), -32767, 32767);
+    }
+    float d2 = 0;
+    for (int c = 0; c < 3; c++) {
+      const float d = q[c] - bv.base[c] * inv_scale;
+      d2 += d * d;
+    }
+    if (d2 > model.blerc_reach * model.blerc_reach) {
+      model.blerc_reach = std::sqrt(d2) + 1.f;
     }
     for (u32 d = 0; d < bv.dest_count && bv.first_dest + d < lev.blerc_dests.size(); d++) {
       const u32 vi = lev.blerc_dests[bv.first_dest + d];
@@ -994,6 +1003,62 @@ void CtrMercRenderer::apply_mod(const CtrMercModelData& model,
     m_mod_frames++;
   }
   m_mod_ms += ctr_gpu_time_ms() - t0;
+}
+
+namespace {
+// an upper bound of the squared spectral norm of the bone's 3x3 (rows t[0..2])
+float norm2_bound(const math::Vector4f* t) {
+  float g[3][3];
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      g[i][j] = t[0][i] * t[0][j] + t[1][i] * t[1][j] + t[2][i] * t[2][j];
+    }
+  }
+  float m = 0.f;
+  for (int i = 0; i < 3; i++) {
+    m = std::max(m, std::abs(g[i][0]) + std::abs(g[i][1]) + std::abs(g[i][2]));
+  }
+  return m;
+}
+}  // namespace
+
+bool CtrMercRenderer::model_off_screen(const CtrMercModelData& model,
+                                       const CtrMercMat* const* bones) const {
+  // a vertex under bone b is t + M p, p in b's sphere (c, r): within |M| (r + blend shape reach)
+  // of t + M c (a blend of bones: within their hull); |M|^2 <= norm2_bound
+  if (model.bone_spheres.empty() || !model.mod.empty()) {
+    return false;
+  }
+  const float s = model.scale;
+  const float* x = m_clip;
+  const float* y = m_clip + 4;
+  const float* w = m_clip + 12;
+  float planes[5][4];
+  for (int c = 0; c < 4; c++) {
+    planes[0][c] = w[c] - x[c];
+    planes[1][c] = w[c] + x[c];
+    planes[2][c] = w[c] - y[c];
+    planes[3][c] = w[c] + y[c];
+    planes[4][c] = w[c];
+  }
+  for (const auto& pl : planes) {
+    const float g = std::sqrt(pl[0] * pl[0] + pl[1] * pl[1] + pl[2] * pl[2]);
+    bool outside = true;
+    for (size_t k = 0; k < model.bone_spheres.size() && outside; k++) {
+      const auto& bs = model.bone_spheres[k];
+      const math::Vector4f* t = bones[bs.bone]->tmat;
+      float q[3];
+      for (int c = 0; c < 3; c++) {
+        q[c] = t[3][c] + s * (bs.c[0] * t[0][c] + bs.c[1] * t[1][c] + bs.c[2] * t[2][c]);
+      }
+      const float v = -(pl[0] * q[0] + pl[1] * q[1] + pl[2] * q[2]) + pl[3];
+      outside = v + g * s * (bs.r + model.blerc_reach) * std::sqrt(norm2_bound(t)) < 0.f;
+    }
+    if (outside) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // (AI-assisted, far-fog) whether the game's fog reaches more than half a step (0.5 / 255) anywhere on
@@ -1504,6 +1569,10 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       ((model->name.size() >= 6 && !model->name.compare(0, 6, "eichar")) || model->keira_rig)) {
     const math::Vector4f& t = bones[slots[0]]->tmat[3];
     m_levels->stream_note_target(t.x(), t.y(), t.z(), rs.frame_idx);
+  }
+  if (!hud_model && model_off_screen(*model, pal_bones)) {
+    m_stats.off_screen++;
+    return;
   }
   const std::vector<c3l::MercDraw>* draws = &model->draws;
   if (!model->gen_draws.empty() && model->gen_err > 0.f && cs.merc_gen_lod && !hud_model &&

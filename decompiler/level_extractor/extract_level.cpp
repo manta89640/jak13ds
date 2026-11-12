@@ -180,7 +180,7 @@ level_tools::BspHeader extract_bsp_from_level(const ObjectFileDB& db,
   level_tools::BspHeader bsp_header;
   bsp_header.read_from_file(bsp_file.linked_data, db.dts, db.version());
   ASSERT((int)bsp_header.drawable_tree_array.trees.size() == bsp_header.drawable_tree_array.length);
-  if (db.version() != GameVersion::Jak1) {
+  if (db.version() > GameVersion::Jak2) {
     tfrag_morph = nullptr;
   }
   std::vector<u8> tfrag_morph_trees;

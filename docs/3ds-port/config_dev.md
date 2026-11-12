@@ -123,13 +123,12 @@ text_min_height = 9        # the smallest capital letter height, in pixels of th
 draw_distance = 500        # meters; level chunks further away are not drawn (0 = no limit)
 fog_start = 0.6            # the extra fog towards draw_distance starts at this fraction of it
 fog = on                   # the game's own distance fog
-lod_distance = 0           # meters; detailed tfrag up to here, the coarse version beyond (0 = always detailed, the default: the PS2 has no tfrag distance LOD). A cell is 200 m: its center at 180 m can hold ground under the camera, drawn coarse until it switches (host A/B: env CTR_TIER_AB, odd frames every cell coarse; CTR_POP_LOG's [popT] lines: switches in view). (AI-assisted, title-popin) A cell in view whose detailed version is drawn keeps it up to 1.5 x lod_distance while the camera moves away (the switch happened in view: a cliff on the title changed shape); out of view at lod_distance as before. Tie and shrub chunks in view moving away likewise stay up to 1.5 x their own distance (not past draw_distance). (AI-assisted, titlemove) Not shrubs: they go at their distance, run by run (performance.md "Title flight pops, shrub distances")
 detail_scale = 1           # multiplies the draw distance of small and medium objects and shrubs (all of them, also with the two keys below). (AI-assisted, levellod) 0.1-4 (0 drew every tie LOD group far)
 shrub_distance = 50        # (AI-assisted) meters; shrubs (grass, bushes, flowers) up to here (0 = the converter's 100 m). They are most of the GPU's work in village2, rolling, ogre and swamp (200-300k triangles within 100 m)
 tie_distance_scale = 1.5   # 1.5 (Jak 1 and Jak II default): small ties drawn to 150 m, medium to 450 m (the converter's 100 / 300 m x this), the big ones without a limit; none: no limit, as the PS2 (geometry 3 beyond the far-plane). A tie chunk is drawn whole up to its limit and fades over the next tenth of it (with its vista copy fading in first where it has one): no hysteresis, nothing held. At least 0.05, as shrub_scale. Jak 1 was none until auto_detail's rings: the host title flight draws ~1.4k triangles more at none than at 1.5 and ~1.4k less at 1.0
-                           # the fixed detail floor (CtrDetail.h, no key): beyond 40 m shrub fade bands at half their distance, tie chunks with a vista copy drawn by it from 150 m (both games)
+                           # the fixed detail floor (CtrDetail.h, no key): beyond 40 m shrub fade bands at half their distance, tie chunks with a vista copy drawn by it from 150 m (both games; 120 m on the Jak II title screen)
 shrub_scale = 1            # 1: the PS2's distances. (AI-assisted) .c3l v14 files (current converter): each shrub chunk carries its prototype's PS2 distance class (the middle of the PS2's fade-out: the Snowy fort wall ropes 155 m, rope ties 90 m, grass 70 m, flowers 50 m; big bushes the PS2 shows as billboards 70 m). (AI-assisted, fable1, Oct 24) A shrub run (a visibility node: up to 8 instances) is drawn up to its own limit between 0.55 and 1.0 of 1.3 x that class distance x this x detail_scale (the PS2's near plane to its far plane, by a hash of the run: the shrubs thin out over the PS2's fade zone instead of a patch coming in at once; the PS2 fades its "trans" version there, the PC draws every shrub without a limit). 1 = the PS2's far plane. shrub_distance / shrub_distance_max only apply to older files. Log: [ctr] auto detail ... shrubs N m (v14 files: xK) Each run fades out (blend FIX with alpha (w - d) / (w - x), w = the limit, x = 0.55 w; drawn after the opaque level draws) instead of the hashed per-run cut.
-                           # shrub_distance, tie_distance_scale and the far mode ties need .c3l files with chunk kinds (the current converter); with older files only detail_scale applies
+                           # shrub_distance and tie_distance_scale need .c3l files with chunk kinds (the current converter); with older files only detail_scale applies
 
 # ---- what is drawn ----
 merc = on                  # characters and objects
@@ -203,8 +202,8 @@ vfp_vector = on            # (AI-assisted, vfpvec, Nov 11) pc-new-bones-mtx-calc
 - **Real New 3DS (default):** the staged file (or none). If the frame rate is low, run once with
   `gpu_profile = on` and look for `[ctr] gpu profile: all X ms, level Y, merc Z, sprites ...` in
   the log: it shows which group costs the GPU the most. Then:
-  - level expensive: lower `shrub_scale` (e.g. 0.6; older levels: `shrub_distance`, e.g. 35), `draw_distance` (e.g. 300) and
-    `lod_distance` (e.g. 120), or `detail_scale = 0.7`;
+  - level expensive: lower `shrub_scale` (e.g. 0.6; older levels: `shrub_distance`, e.g. 35), `draw_distance` (e.g. 300),
+    or `detail_scale = 0.7`;
   - sprites expensive: `particles = reduced`;
   - turn off `distort` or `envmap` to see what they cost.
   Keep `mipmaps = on` and `vram_textures = auto`: without them the GPU reads full size textures

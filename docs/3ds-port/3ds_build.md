@@ -835,7 +835,7 @@ PC it runs with `gk --ctr-gfx`.
 The level extractor writes `<level>.tiemorph` (the PS2's tie geomorph, `c3l_format.md` "The
 PS2's tie geomorph") next to each `.fr3`; the converter reads it from there (or
 `--tie-morph-dir DIR`). Levels converted without it switch their ties as before. It also writes
-`<level>.tfragmorph` (Jak 1: the PS2's tfrag geomorph, "The PS2's tfrag geomorph"), read the same
+`<level>.tfragmorph` (Jak 1 and Jak II: the PS2's tfrag geomorph, "The PS2's tfrag geomorph"), read the same
 way (`--tfrag-morph-dir DIR`); without it the tfrag is geometry 0 everywhere, as before.
 
 ```sh
@@ -853,7 +853,6 @@ platform/3ds/tools/run_emu.sh --seconds 150
   | `draw_distance` | 500 | meters; level chunks further away are not drawn, fog hides the cut (0 = off) |
   | `fog_start` | 0.6 | the extra fog starts at this fraction of the draw distance |
   | `fog` | on | the game's own distance fog |
-  | `lod_distance` | 200 | meters; near tfrag version up to here, coarse beyond (0 = always near) |
   | `detail_scale` | 1 | multiplies the draw distance of small and medium tie objects and shrubs |
   | `shrub_distance` | 50 | (AI-assisted) meters; shrubs up to here (0 = the converter's 100 m); c3l files with chunk kinds |
   | `tie_distance_scale` | 1.5 | (AI-assisted) multiplies the converter's distance of small and medium ties; c3l files with chunk kinds |
