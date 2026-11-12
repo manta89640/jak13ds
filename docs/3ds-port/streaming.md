@@ -545,8 +545,10 @@ K chunks with a draw distance (KB) not needed now come by need`.
 at most 1.14 MB in the city, 1.53 MB in the sewer; on hardware the slums need 1.6-2.1 MB on
 average, up to 3.2 MB. With the tie geomorph (c3l-j2 converted with `--tie-morph`) the host
 route needs 2.7-3.7 MB on average per stop at ps2_lod_scale 0.8 (3.0-4.6 MB at 1.0). Jak II's
-arena is fixed at 3072 KB (`kJak2StreamKb`, `stream_kb` overrides the size): no growth segments,
-so it never trades memory back and forth with the chunks by need. Jak 1 keeps 4096 and its growth.
+arena is fixed at 2048 KB (`kJak2StreamKb`, `stream_kb` overrides the size): no growth segments,
+so it never trades memory back and forth with the chunks by need. (At 3072 KB Azahar showed the
+chunks by need short with ctysluma + ctyindb loaded: 46 passes, tie holes; a near chunk that
+doesn't fit only leaves its group's far version drawn, a chunk by need that doesn't fit is a hole.) Jak 1 keeps 4096 and its growth.
 
 Host switches: `CTR_SOFT_NO_RASTER=1` (no pixels: long memory runs ~10x faster),
 `CTR_MEM_LOG_EVERY=N` (the `[ctr] memory` line every N frames; it is also logged every stats
