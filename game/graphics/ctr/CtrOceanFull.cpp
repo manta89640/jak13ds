@@ -32,6 +32,9 @@ constexpr int kTexSize = 128;  // (AI-assisted) original 32 x 32 quads of 4 x 4 
 constexpr int kGrid = 32;      // wave vertices per side (the 33rd row / column repeats the first)
 
 
+// ocean-3ds-static-packet (ocean-mid.gc): 27 quadwords
+constexpr u32 kStaticPacketBytes = 27 * 16;
+
 bool is_vu_end_tag(const DmaTag& tag, const VifCode& v0, const VifCode& v1) {
   return tag.qwc == 2 && tag.kind == DmaTag::Kind::CNT && v0.kind == VifCode::Kind::NOP &&
          v1.kind == VifCode::Kind::DIRECT;
@@ -725,6 +728,9 @@ CtrOceanFull::CtrOceanFull()
 }
 
 CtrOceanFull::~CtrOceanFull() {
+  if (m_static_mesh >= 0) {
+    ctr_gpu_mesh_delete(m_static_mesh);
+  }
   if (m_wave_rt >= 0) {
     ctr_gpu_rt_delete(m_wave_rt);  // (m_tex with it)
   } else {
@@ -870,6 +876,7 @@ void CtrOceanFull::frame_stats(const CtrRenderState& rs) {
     m_tex_ms = m_mid_ms = m_near_ms = m_max_frame_ms = 0;
     m_batch->vertices = m_batch->triangles = m_batch->draws = m_batch->dropped = 0;
     m_batch->rejected = 0;
+    m_static_tiles = m_static_tris = m_static_frames = 0;
   }
   m_frames++;
   if (m_frames == 450 && m_mid_runs + m_near_runs) {
@@ -878,11 +885,13 @@ void CtrOceanFull::frame_stats(const CtrRenderState& rs) {
         "[ctr] ocean full ({}): render thread {:.2f} ms/frame (texture {:.2f} in {:.0f}% of "
         "frames, far+mid {:.2f}, near {:.2f}; max {:.2f}), {:.0f} vertices, {:.0f} triangles, "
         "{:.1f} draws per frame ({:.1f} with the sky reflection, its texture made in {:.0f}% of "
-        "frames); mid in {:.0f}%, near in {:.0f}% of frames{}{}{}",
+        "frames); mid in {:.0f}%, near in {:.0f}% of frames; static ocean {:.1f} tiles, {:.0f} "
+        "triangles per frame{}{}{}",
         g_levels, (m_tex_ms + m_mid_ms + m_near_ms) / n, m_tex_ms / n,
         100.0 * m_tex_updates / n, m_mid_ms / n, m_near_ms / n, m_max_frame_ms,
         m_batch->vertices / n, m_batch->triangles / n, m_batch->draws / n,
         m_batch->env_draws / n, 100.0 * m_refl_updates / n, 100.0 * m_mid_runs / n, 100.0 * m_near_runs / n,
+        m_static_tiles / n, m_static_tris / n,
         m_failed ? fmt::format(", {} unexpected DMA", m_failed) : "",
         m_batch->dropped ? fmt::format(", {} dropped (no vertex memory)", m_batch->dropped) : "",
         m_batch->rejected ? fmt::format(", {} transition pieces refused", m_batch->rejected)
@@ -964,7 +973,7 @@ void CtrOceanFull::render_mid_and_far(DmaFollower& dma, CtrRenderState& rs) {
   m_batch->set_env(-1);  // (AI-assisted, j1ocean) until the constants name it (ocean_env)
   m_rs = &rs;
   const int env_draws0 = m_batch->env_draws;
-  read_far(dma);
+  read_far(dma, rs, st);
   bool ok = true;
   if (dma.current_tag_vifcode0().kind == VifCode::Kind::BASE) {
     ok = m_mid->run(dma, m_batch.get());
@@ -989,14 +998,448 @@ void CtrOceanFull::render_mid_and_far(DmaFollower& dma, CtrRenderState& rs) {
  * The far ocean (OceanMidAndFar::handle_ocean_far): the GS register setup (ocean-init-buffer),
  * then direct GIF transfers.
  */
-void CtrOceanFull::read_far(DmaFollower& dma) {
+void CtrOceanFull::read_far(DmaFollower& dma, CtrRenderState& rs, const ctr_draw_state& st) {
   dma.read_and_advance();  // ocean-init-buffer's A+D registers (the state is fixed above)
   while (dma.current_tag().kind == DmaTag::Kind::CNT &&
          dma.current_tag_vifcode0().kind == VifCode::Kind::NOP) {
     auto data = dma.read_and_advance();
     if (data.vifcode1().kind == VifCode::Kind::DIRECT) {
       m_batch->far_gif(data.data, data.size_bytes);
+    } else if (data.vifcode1().kind == VifCode::Kind::PC_PORT &&
+               data.size_bytes == kStaticPacketBytes) {
+      // the static ocean before the mid tiles the game still sends (they draw over its edges)
+      m_batch->end();
+      draw_static(data.data, rs);
+      m_batch->begin(st, rs.fog_color);
+      draw_far(data.data);
     }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// the static ocean (the mid tiles 192 m and more away)
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+// a mid tile: 8 x 8 squares of 96 m; the map: 6 x 6 tiles from start-corner; ocean-colors: 49
+// rows of 52 colors (a row per 96 m in z)
+constexpr float kSquare = 393216.f, kTile = 8 * kSquare;
+constexpr int kColorsPerRow = 52;
+// mesh units: a tile's grid point (r, c) at (c, r) * kTileUnit, kTileScale game units each
+constexpr int kTileUnit = 2048;
+constexpr float kTileScale = kSquare / kTileUnit;
+
+struct StaticVert {
+  s16 pos[3];
+  s16 pad;
+  s16 st[2];
+  u8 rgba[4];
+};
+static_assert(sizeof(StaticVert) == 16);
+
+// same as make_new_cam_mat (background_common.cpp, CtrLevel.cpp make_cam_mat)
+void cam_mat(const float* rot, const float* persp, float fog, float hvdf_z, float out[4][4]) {
+  const float pxx = fog * persp[0] / 256.f;
+  const float pyy = -fog * persp[5] / 128.f;
+  float pzz = fog * persp[10] / 8388608.f;
+  const float pzw = persp[11];
+  pzz += (hvdf_z / 8388608.f - 1.f) * pzw;
+  const float scale[3] = {pxx, pyy, pzz};
+  memset(out, 0, sizeof(float) * 16);
+  for (int r = 0; r < 3; r++) {
+    for (int c = 0; c < 3; c++) {
+      out[r][c] = rot[4 * r + c] * scale[c];
+    }
+    out[r][3] = rot[4 * r + 2] * pzw;
+  }
+  out[3][2] = fog * persp[14] / 8388608.f;
+}
+
+}  // namespace
+
+/*!
+ * The meshes of one ocean map: per tile its 9 x 9 grid points (y 0, the map's height comes with
+ * the matrix), the texture repeating per square like the mid program's, the map's colors; the
+ * squares its mid mask leaves out (land) left out.
+ */
+void CtrOceanFull::build_static(const u8* mem, u32 colors, u32 indices, u32 masks) {
+  if (m_static_mesh >= 0) {
+    ctr_gpu_mesh_delete(m_static_mesh);
+    m_static_mesh = -1;
+  }
+  std::vector<StaticVert> v(36 * 81);
+  std::vector<u16> idx;
+  idx.reserve(36 * 8 * 8 * 6 * 2);
+  for (int t = 0; t < 36; t++) {
+    const int tz = t / 6, tx = t % 6;
+    for (int r = 0; r < 9; r++) {
+      for (int c = 0; c < 9; c++) {
+        StaticVert& o = v[81 * t + 9 * r + c];
+        o.pos[0] = (s16)(c * kTileUnit);
+        o.pos[1] = 0;
+        o.pos[2] = (s16)(r * kTileUnit);
+        o.pad = 0;
+        o.st[0] = (s16)(c * 1024);
+        o.st[1] = (s16)(r * 1024);
+        memcpy(o.rgba, mem + colors + 4 * ((8 * tz + r) * kColorsPerRow + 8 * tx + c), 4);
+      }
+    }
+    m_static_count[t][0] = m_static_count[t][1] = 0;
+    s16 mid_index;
+    memcpy(&mid_index, mem + indices + 2 * t, 2);
+    if (mid_index < 0) {
+      continue;
+    }
+    u8 mask[8];
+    memcpy(mask, mem + masks + 8 * (u32)mid_index, 8);
+    const u16 base = (u16)(81 * t);
+    auto square = [&](int r, int c, int n) {
+      const u16 a = (u16)(base + 9 * r + c), b = (u16)(a + n), d = (u16)(a + 9 * n),
+                e = (u16)(d + n);
+      idx.insert(idx.end(), {a, d, b, b, d, e});
+    };
+    auto left_out = [&](int r, int c) { return (mask[r] >> c) & 1; };
+    // whole
+    m_static_first[t][0] = (u32)idx.size();
+    for (int r = 0; r < 8; r++) {
+      for (int c = 0; c < 8; c++) {
+        if (!left_out(r, c)) {
+          square(r, c, 1);
+        }
+      }
+    }
+    m_static_count[t][0] = (u32)idx.size() - m_static_first[t][0];
+    // coarse: a 2 x 2 block as one square when none of its squares is left out
+    m_static_first[t][1] = (u32)idx.size();
+    for (int r = 0; r < 8; r += 2) {
+      for (int c = 0; c < 8; c += 2) {
+        if (!left_out(r, c) && !left_out(r, c + 1) && !left_out(r + 1, c) &&
+            !left_out(r + 1, c + 1)) {
+          square(r, c, 2);
+          continue;
+        }
+        for (int rr = r; rr < r + 2; rr++) {
+          for (int cc = c; cc < c + 2; cc++) {
+            if (!left_out(rr, cc)) {
+              square(rr, cc, 1);
+            }
+          }
+        }
+      }
+    }
+    m_static_count[t][1] = (u32)idx.size() - m_static_first[t][1];
+  }
+  if (!idx.empty()) {
+    m_static_mesh = ctr_gpu_mesh_create(v.data(), (int)v.size(), idx.data(), (int)idx.size());
+  }
+}
+
+/*!
+ * ocean-3ds-static-packet: the camera (planes, -, -, hvdf offset, fog, position, camera-rot,
+ * perspective: CtrBackgroundCamera's layout), start-corner, far-color, the map's colors, mid
+ * indices and mid masks, the map (Jak II: its spheres), then the tiles drawn here (bit 6 z + x)
+ * and those drawn coarse. The far ocean stays the game's (its quads reach the horizon: points at
+ * infinity, which a mesh beyond the far plane can't).
+ */
+void CtrOceanFull::draw_static(const u8* packet, CtrRenderState& rs) {
+  const float* q = (const float*)packet;
+  const float* hvdf = q + 4 * 12;
+  const float* fogv = q + 4 * 13;
+  const float* trans = q + 4 * 14;
+  const float* rot = q + 4 * 15;
+  const float* persp = q + 4 * 19;
+  const float* start = q + 4 * 23;
+  u32 w[8];
+  memcpy(w, packet + 16 * 25, sizeof(w));
+  const u64 static_mask = (u64)w[4] | ((u64)w[5] << 32);
+  const u64 coarse_mask = (u64)w[6] | ((u64)w[7] << 32);
+  // a new map (or level): the meshes again
+  const u32 key[5] = {w[0], w[1], w[2], w[3], 0};
+  u32 sum = 0;
+  for (int i = 0; i < 49 * kColorsPerRow; i += 37) {
+    u32 c;
+    memcpy(&c, rs.ee_mem + w[0] + 4 * i, 4);
+    sum = sum * 31 + c;
+  }
+  u32 key2[5];
+  memcpy(key2, key, sizeof(key));
+  key2[4] = sum;
+  if (memcmp(key2, m_static_key, sizeof(key2)) != 0) {
+    memcpy(m_static_key, key2, sizeof(key2));
+    build_static(rs.ee_mem, w[0], w[1], w[2]);
+  }
+
+  const CtrSettings& settings = ctr_settings();
+  float R[4][4];
+  cam_mat(rot, persp, fogv[0], hvdf[2], R);
+  const float y_scale = ctr_gs_y_scale();
+  auto make_clip = [&](const double origin[3], float scale, float* m) {
+    const double d[3] = {origin[0] - trans[0], origin[1] - trans[1], origin[2] - trans[2]};
+    for (int c = 0; c < 4; c++) {
+      double t = 0;
+      for (int i = 0; i < 3; i++) {
+        t += (double)R[i][c] * d[i];
+      }
+      if (c < 3) {
+        t += (double)R[3][c];
+      }
+      float m0 = -R[0][c] * scale, m1 = -R[1][c] * scale, m2 = -R[2][c] * scale, m3 = (float)-t;
+      if (c == 1) {
+        m0 *= y_scale;
+        m1 *= y_scale;
+        m2 *= y_scale;
+        m3 *= y_scale;
+      }
+      m[4 * c + 0] = m0;
+      m[4 * c + 1] = m1;
+      m[4 * c + 2] = m2;
+      m[4 * c + 3] = m3;
+    }
+  };
+  // the game's fog (as the level meshes'), no haze
+  float fog0[4] = {0.f, 255.f, 255.f, -1.f / 255.f};
+  const float fog1[4] = {0.f, 1.f, 0.f, 0.f};
+  if (settings.fog) {
+    fog0[0] = hvdf[3];
+    fog0[1] = fogv[1];
+    fog0[2] = fogv[2];
+  }
+  ctr_gpu_set_mesh_fog(fog0, fog1, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
+  ctr_draw_state st;
+  memset(&st, 0, sizeof(st));
+  st.tex = m_tex;
+  st.tcc = 1;
+  st.filter = 1;
+  st.blend = CTR_BLEND_OFF;
+  st.atest = CTR_TEST_ALWAYS;
+  st.ztest = CTR_TEST_ALWAYS;
+  st.zwrite = 1;
+  float clip[16];
+  if (m_static_mesh >= 0) {
+    for (int t = 0; t < 36; t++) {
+      if (!((static_mask >> t) & 1)) {
+        continue;
+      }
+      const int k = (coarse_mask >> t) & 1;
+      if (!m_static_count[t][k]) {
+        continue;
+      }
+      const double o[3] = {start[0] + (t % 6) * kTile, start[1], start[2] + (t / 6) * kTile};
+      make_clip(o, kTileScale, clip);
+      ctr_gpu_draw_mesh(&st, clip, m_static_mesh, (int)m_static_first[t][k],
+                        (int)m_static_count[t][k]);
+      m_static_tiles++;
+      m_static_tris += (int)m_static_count[t][k] / 3;
+    }
+  }
+  m_static_frames++;
+}
+
+namespace {
+
+//! a far ocean polygon's vertex: clip scaled position, s t q, color (render-ocean-quad's)
+struct FarVert {
+  float p[4], st[4], c[4];
+};
+constexpr int kFarPolyMax = 12;
+
+/*!
+ * clip-polygon-against-positive / -negative-hyperplane (render-ocean-quad's): inside when
+ * !(w < x) (neg: !(x < -w)) for x the position's component comp. in[n] = in[0]; out the same.
+ */
+int far_clip(const FarVert* in, int n, FarVert* out, int comp, bool neg, bool* clipped) {
+  int count = 0;
+  auto a_of = [neg](const FarVert& v) { return neg ? -v.p[3] : v.p[3]; };
+  auto outside = [neg](float a, float x) { return neg ? x < a : a < x; };
+  auto lerp = [](const FarVert& from, const FarVert& to, float t) {
+    FarVert r;
+    for (int i = 0; i < 4; i++) {
+      r.p[i] = from.p[i] + (to.p[i] - from.p[i]) * t;
+      r.st[i] = from.st[i] + (to.st[i] - from.st[i]) * t;
+      r.c[i] = from.c[i] + (to.c[i] - from.c[i]) * t;
+    }
+    return r;
+  };
+  const FarVert* prev = &in[0];
+  float pa = a_of(*prev), px = prev->p[comp];
+  bool prev_out = outside(pa, px);
+  for (int e = 1; e <= n && count < kFarPolyMax - 2; e++) {
+    const FarVert* next = &in[e];
+    const float na = a_of(*next), nx = next->p[comp];
+    const bool next_out = outside(na, nx);
+    if (!prev_out) {
+      out[count++] = *prev;
+      if (next_out) {
+        const float fp = pa - px, fn = na - nx;
+        out[count++] = lerp(*next, *prev, fn / (fn - fp));
+        *clipped = true;
+      }
+    } else if (!next_out) {
+      const float fp = pa - px, fn = na - nx;
+      out[count++] = lerp(*prev, *next, fp / (fp - fn));
+      *clipped = true;
+    }
+    prev = next;
+    pa = na;
+    px = nx;
+    prev_out = next_out;
+  }
+  if (count > 0) {
+    out[count] = out[0];
+  }
+  return count;
+}
+
+}  // namespace
+
+/*!
+ * The far ocean (render-ocean-far and render-ocean-quad of ocean.gc / native_ocean.cpp, here on
+ * the render thread): the four strips of 48 quads of 96 m from the map's edges out 1440 m to
+ * points at infinity (w 0), the four corners, by the camera's facing (the strips it leaves out).
+ * Each quad through camera-temp, clipped at x, y = +-w of the hmge scaled position, then as the
+ * GS saw it: Q = pfog0 / w (or 1 / w of the clipped one, times inv-hmge), x y z times Q plus the
+ * hvdf offset, the fog clamped to fog-min .. fog-max.
+ */
+void CtrOceanFull::draw_far(const u8* packet) {
+  const float* q = (const float*)packet;
+  const float* hmge = q + 4 * 4;
+  const float* inv_hmge = q + 4 * 5;
+  const float* m = q + 4 * 8;  // camera-temp rows
+  const float* hvdf = q + 4 * 12;
+  const float* fogv = q + 4 * 13;
+  const float* start = q + 4 * 23;
+  const float* far_color = q + 4 * 24;
+  u32 facing;
+  memcpy(&facing, fogv + 3, 4);
+  if (!(facing & 0x80000000u)) {
+    return;  // (the game draws it: no far ocean in this packet)
+  }
+  const float fog_q = fogv[0], fog_lo = fogv[1], fog_hi = fogv[2];
+  auto quad = [&](const float pos[4][4], const float stq[4][2]) {
+    FarVert a[kFarPolyMax], b[kFarPolyMax];
+    float tp[4][4];
+    u32 out_all = 15;
+    for (int v = 0; v < 4; v++) {
+      for (int i = 0; i < 4; i++) {
+        tp[v][i] = m[i] * pos[v][0] + m[4 + i] * pos[v][1] + m[8 + i] * pos[v][2] +
+                   m[12 + i] * pos[v][3];
+        a[v].p[i] = tp[v][i] * hmge[i];
+        a[v].c[i] = far_color[i];
+      }
+      a[v].st[0] = stq[v][0];
+      a[v].st[1] = stq[v][1];
+      a[v].st[2] = 1.f;
+      a[v].st[3] = 1.f;
+      const float w = a[v].p[3];
+      out_all &= (u32)(w < a[v].p[0]) | ((u32)(w < a[v].p[1]) << 1) |
+                 ((u32)(a[v].p[0] < -w) << 2) | ((u32)(a[v].p[1] < -w) << 3);
+    }
+    if (out_all) {
+      return;
+    }
+    a[4] = a[0];
+    bool clipped = false;
+    int n = far_clip(a, 4, b, 0, false, &clipped);
+    if (n) n = far_clip(b, n, a, 1, false, &clipped);
+    if (n) n = far_clip(a, n, b, 0, true, &clipped);
+    if (n) n = far_clip(b, n, a, 1, true, &clipped);
+    if (n < 3) {
+      return;
+    }
+    if (!clipped) {
+      for (int v = 0; v < 4; v++) {
+        memcpy(a[v].p, tp[v], 16);
+      }
+    }
+    ctr_ocean_full_vertex o[kFarPolyMax];
+    for (int v = 0; v < n; v++) {
+      const FarVert& f = a[v];
+      float p[4], st[3];
+      float qq;
+      if (clipped) {
+        qq = 1.f / f.p[3];
+        for (int i = 0; i < 4; i++) {
+          p[i] = f.p[i] * inv_hmge[i];
+        }
+        st[0] = f.st[0];
+        st[1] = f.st[1];
+        st[2] = f.st[2];
+      } else {
+        qq = fog_q / f.p[3];
+        memcpy(p, f.p, 16);
+        st[0] = f.st[0];
+        st[1] = f.st[1];
+        st[2] = f.st[2];
+      }
+      for (int i = 0; i < 3; i++) {
+        p[i] = p[i] * qq;
+      }
+      for (int i = 0; i < 4; i++) {
+        p[i] = p[i] + hvdf[i];
+      }
+      p[2] = std::max(p[2], 0.f);
+      p[3] = std::min(std::max(p[3], fog_lo), fog_hi);
+      ctr_ocean_full_vertex& g = o[v];
+      g.x = (float)((u32)(s32)(p[0] * 16.f) & 0xffff);
+      g.y = (float)((u32)(s32)(p[1] * 16.f) & 0xffff);
+      g.z = (float)(((u32)(s32)(p[2] * 16.f) >> 4) & 0xffffff);
+      g.q = std::max(st[2] * qq, 1e-12f);
+      g.s = st[0] * qq;
+      g.t = st[1] * qq;
+      g.fog = kOceanFog.amount[((u32)(s32)(p[3] * 16.f) >> 4) & 0xff];
+      g.r = (u8)(s32)f.c[0];
+      g.g = (u8)(s32)f.c[1];
+      g.b = (u8)(s32)f.c[2];
+      g.a = (u8)(s32)f.c[3];
+      g.es = g.et = 0.f;
+    }
+    m_batch->gs_fan(o, n);
+  };
+
+  const float x0 = start[0], y = start[1], z0 = start[2];
+  constexpr float kOut = 5898240.f;  // 1440 m
+  const float x1 = x0 + 48 * kSquare, z1 = z0 + 48 * kSquare;
+  const float st_a[4][2] = {{0, 0}, {1, 0}, {1, 15}, {0, 15}};
+  const float st_c[4][2] = {{0, 0}, {15, 0}, {15, 1}, {0, 1}};
+  const float st_k[4][2] = {{0, 0}, {15, 0}, {15, 15}, {0, 15}};
+  for (int i = 0; i < 48; i++) {
+    const float a = x0 + i * kSquare, b = a + kSquare;
+    if (!(facing & 2)) {
+      const float pos[4][4] = {{a, y, z0 - kOut, 0}, {b, y, z0 - kOut, 0}, {b, y, z0, 1}, {a, y, z0, 1}};
+      quad(pos, st_a);
+    }
+    if (!(facing & 4)) {
+      const float pos[4][4] = {{a, y, z1, 1}, {b, y, z1, 1}, {b, y, z1 + kOut, 0}, {a, y, z1 + kOut, 0}};
+      quad(pos, st_a);
+    }
+  }
+  for (int i = 0; i < 48; i++) {
+    const float a = z0 + i * kSquare, b = a + kSquare;
+    if (!(facing & 16)) {
+      const float pos[4][4] = {{x0 - kOut, y, a, 0}, {x0, y, a, 1}, {x0, y, b, 1}, {x0 - kOut, y, b, 0}};
+      quad(pos, st_c);
+    }
+    if (!(facing & 8)) {
+      const float pos[4][4] = {{x1, y, a, 1}, {x1 + kOut, y, a, 0}, {x1 + kOut, y, b, 0}, {x1, y, b, 1}};
+      quad(pos, st_c);
+    }
+  }
+  if (!(facing & (2 | 16))) {
+    const float pos[4][4] = {{x0 - kOut, y, z0 - kOut, 0}, {x0, y, z0 - kOut, 0}, {x0, y, z0, 1}, {x0 - kOut, y, z0, 0}};
+    quad(pos, st_k);
+  }
+  if (!(facing & (2 | 8))) {
+    const float pos[4][4] = {{x1, y, z0 - kOut, 0}, {x1 + kOut, y, z0 - kOut, 0}, {x1 + kOut, y, z0, 0}, {x1, y, z0, 1}};
+    quad(pos, st_k);
+  }
+  if (!(facing & (4 | 16))) {
+    const float pos[4][4] = {{x0 - kOut, y, z1, 0}, {x0, y, z1, 1}, {x0, y, z1 + kOut, 0}, {x0 - kOut, y, z1 + kOut, 0}};
+    quad(pos, st_k);
+  }
+  if (!(facing & (4 | 8))) {
+    const float pos[4][4] = {{x1, y, z1, 1}, {x1 + kOut, y, z1, 0}, {x1 + kOut, y, z1 + kOut, 0}, {x1, y, z1 + kOut, 0}};
+    quad(pos, st_k);
   }
 }
 

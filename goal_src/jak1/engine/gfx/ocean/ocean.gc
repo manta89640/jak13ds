@@ -38,6 +38,11 @@
 
 (def-mips2c render-ocean-quad (function (inline-array ocean-vertex) dma-buffer symbol))
 
+;; og:preserve-this 3DS static ocean (ocean-mid.gc)
+(#when TARGET_3DS
+  (define-extern ocean-3ds-static-packet (function dma-buffer symbol none))
+  (define-extern *ocean-3ds-static-on* symbol))
+
 ;; (vertices (-> (scratchpad-object terrain-context) work background dma-area ocean-vertex))
 
 (defun render-ocean-far ((arg0 dma-buffer) (arg1 int))
@@ -486,7 +491,12 @@
                (gp-1 (-> s5-0 base)))
           (draw-ocean-texture s5-0 *ocean-verts* #t)
           (ocean-init-buffer s5-0)
-          (draw-ocean-far s5-0)
+          ;; og:preserve-this 3DS: the far ocean and the far mid tiles are the renderer's
+          (#if TARGET_3DS
+            (if *ocean-3ds-static-on*
+                (ocean-3ds-static-packet s5-0 (not *ocean-mid-off*))
+                (draw-ocean-far s5-0))
+            (draw-ocean-far s5-0))
           (when (not *ocean-mid-off*)
             (draw-ocean-mid s5-0))
           (ocean-end-buffer s5-0)
