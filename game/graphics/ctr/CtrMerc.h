@@ -144,12 +144,12 @@ class CtrMercRenderer : public CtrBucketRenderer {
   // the same model in the bucket's previous frame (within kInstMatch). Was keyed by the bone
   // matrices' DMA address, which moves with everything allocated before it in the frame: the
   // state was lost (or another instance's taken), and a map node was made at every move.
-  static constexpr u8 kInstUnknown = 2;
+  static constexpr u8 kInstUnknown = 0xff;
   struct InstState {
     const void* model;
     float pos[3];
     u8 world;      // pos is in world space
-    u8 low;        // merc_gen_lod: drawn with the generated low LOD
+    u8 low;        // merc_gen_lod: drawn with the generated low LOD (1) or its coarse copy (2)
     u8 used;       // (previous frame) taken over already
   };
   std::vector<InstState> m_inst_prev, m_inst_cur;  // prev: sorted by model

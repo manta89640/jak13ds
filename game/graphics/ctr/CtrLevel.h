@@ -96,6 +96,9 @@ struct CtrMercModelData {
   // fewer triangles; empty: none. CtrMercRenderer draws them far away (config merc_gen_lod)
   std::vector<c3l::MercDraw> gen_draws;
   float gen_err = 0.f;  // gen_draws' simplification error, model units (c3l::merc_gen_lod_error)
+  // the coarse copy (c3l::kMercGenLod2Suffix) for where its larger error is under a pixel too
+  std::vector<c3l::MercDraw> gen2_draws;
+  float gen2_err = 0.f;
   // blend shapes (faces): CtrLevelData::blerc_verts[blerc_first, + blerc_count)
   u32 blerc_first = 0, blerc_count = 0;
   mutable bool blerc_moved = false;  // vertices not in the base pose (CtrMercRenderer)

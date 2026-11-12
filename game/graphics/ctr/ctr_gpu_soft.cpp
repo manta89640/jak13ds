@@ -318,6 +318,7 @@ struct DrawRec {
   int prog = 0, instr = 0, bufs = 0, tex = -1, blend = 0, ztest = 0, zwrite = 0, atest = 0;
   int bind = 0, stchg = 0;
   double idx = 0, vmiss = 0, tri_in = 0, tri_setup = 0, px = 0, px_z = 0, px_u2 = 0;
+  double tkb16 = 0;  // KB of texture tiles missed by the 16-tile cache
 };
 DrawRec rec;
 FILE* rec_file() {
@@ -330,7 +331,7 @@ FILE* rec_file() {
       f = fopen(p, "w");
       if (f) {
         fputs("frame,bucket,prog,instr,bufs,idx,vmiss,tri_in,tri_setup,px,px_z,px_u2,tex,tw,th,"
-              "fmt,mask,blend,ztest,zwrite,atest,bind,stchg\n",
+              "fmt,mask,blend,ztest,zwrite,atest,bind,stchg,tkb16\n",
               f);
       }
     }
@@ -457,10 +458,11 @@ void rec_flush() {
     fmt = t.format;
     mask = t.mask_format;
   }
-  fprintf(f, "%d,%s,%d,%d,%d,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+  fprintf(f,
+          "%d,%s,%d,%d,%d,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.1f\n",
           g_soft.frame, rec.bucket.c_str(), rec.prog, rec.instr, rec.bufs, rec.idx, rec.vmiss,
           rec.tri_in, rec.tri_setup, rec.px, rec.px_z, rec.px_u2, rec.tex, tw, th, fmt, mask,
-          rec.blend, rec.ztest, rec.zwrite, rec.atest, rec.bind, rec.stchg);
+          rec.blend, rec.ztest, rec.zwrite, rec.atest, rec.bind, rec.stchg, rec.tkb16);
 }
 // an indexed draw: its indices and the vertices it uses (each shaded once at best)
 void tb_verts(const uint16_t* idx, int n) {
@@ -906,6 +908,10 @@ void tb_tex_frag(const ctr_draw_state& st, int tex, float s, float t) {
         b->tmiss[m][f]++;
         if (tx.mask_format >= 0 && tx.mask_format < kTbFmt - 1) {
           b->tmiss[m][tx.mask_format]++;
+        }
+        if (m == 1) {
+          static const double kTileKB[kTbFmt] = {128, 128, 32, 64, 256, 64, 32, 128, 256};
+          rec.tkb16 += kTileKB[f] / 1024.0;
         }
         at = kSize[m] - 1;
       }
@@ -2418,9 +2424,18 @@ void ctr_gpu_rt_uv(int tex, float lx, float ly, float* s, float* t) {
   *t = 1.f - ly / r->lh;
 }
 
-// (level 0 only: the soft backend samples no mip levels)
+// (level 0 only: the soft backend samples no mip levels; the statistics count the 3DS's levels,
+// down to 8 x 8)
 int ctr_gpu_rt_create_mipmapped(int size) {
-  return ctr_gpu_rt_create(size, size, size);
+  const int tex = ctr_gpu_rt_create(size, size, size);
+  if (tex >= 0) {
+    int levels = 1;
+    while ((size >> levels) >= 8) {
+      levels++;
+    }
+    g_soft.textures[tex].levels = levels;
+  }
+  return tex;
 }
 
 int ctr_gpu_rt_draw_grid(int tex, const ctr_draw_state* state, const ctr_vertex* verts, int n) {
@@ -2550,7 +2565,16 @@ int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int /*s
 }
 
 int ctr_gpu_tex_create_mipmapped(int w, int h, const uint8_t* rgba) {
-  return ctr_gpu_tex_create(w, h, rgba);  // (the software renderer samples the first level)
+  const int tex = ctr_gpu_tex_create(w, h, rgba);  // (the software renderer samples the first level)
+  if (tex >= 0) {
+    // the statistics count the 3DS's levels (C3D_TexInitMipmap: down to 8 x 8)
+    int levels = 1;
+    while ((std::min(w, h) >> levels) >= 8) {
+      levels++;
+    }
+    g_soft.textures[tex].levels = levels;
+  }
+  return tex;
 }
 
 void ctr_gpu_tex_update(int handle, const uint8_t* rgba) {
@@ -2873,7 +2897,7 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
     return;
   }
   const auto& m = g_soft.meshes[mesh];
-  softstats::tb_prog(10, m.col_off ? 2 : 1);  // ctr_mesh_opt
+  softstats::tb_prog(7, m.col_off ? 2 : 1);  // ctr_mesh_opt (the fog table)
   soft_mesh_tris(state, clip, soft_verts(m.verts.data(), m.col_off), m.indices.data(), first_index,
                  index_count);
 }
@@ -3268,7 +3292,7 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
     memcpy(at, pos, sizeof(pos));
   }
   g_soft_cur_mesh = mesh;
-  softstats::tb_prog(16, m.col_off ? 3 : 2);
+  softstats::tb_prog(13, m.col_off ? 3 : 2);
   soft_mesh_tris(state, matrix->m, sv, m.indices.data(), first_index, index_count);
 }
 int ctr_gpu_wind_ready(void) {
@@ -3316,7 +3340,7 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
     }
   }
   g_soft_cur_mesh = mesh;
-  softstats::tb_prog(18, 3);  // (the color targets: a third buffer)
+  softstats::tb_prog(15, 3);  // (the color targets: a third buffer)
   const std::string keep = softstats::cur_name;
   if (softstats::enabled()) {
     ctr_gpu_soft_bucket((keep + "+morph").c_str());
@@ -3368,7 +3392,7 @@ void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix
     }
   }
   g_soft_cur_mesh = mesh;
-  softstats::tb_prog(27, m.col_off ? 3 : 2);
+  softstats::tb_prog(24, m.col_off ? 3 : 2);
   const std::string keep = softstats::cur_name;
   if (softstats::enabled()) {
     ctr_gpu_soft_bucket((keep + "+tmorph").c_str());

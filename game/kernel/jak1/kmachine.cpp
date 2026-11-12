@@ -64,6 +64,7 @@ bool ctr_level_ready(const char* name);  // game/graphics/ctr/CtrRenderer.cpp
 #endif
 bool ctr_arrival_ready();  // game/graphics/ctr/CtrRenderer.cpp
 double ctr_frame_ms_left();  // game/graphics/ctr/CtrRenderer.cpp
+double ctr_frame_work_ms();  // game/graphics/ctr/CtrRenderer.cpp
 
 namespace jak1 {
 
@@ -692,6 +693,19 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("pc-3ds-load-time-for?", +[](u32 us) -> u64 {
     return load_budget_for(us / 1000.0) ? s7.offset + true_symbol_offset(g_game_version)
                                         : s7.offset;
+  });
+  // entity.gc actors-update (TARGET_3DS): the frame's load in the PS2's timer ticks per vblank, for
+  // the actor heaps' compaction steps (as Jak II). Hosts: 0 (the port's count) unless
+  // CTR_FRAME_RUN_TIME sets one.
+  make_function_symbol_from_c("pc-3ds-frame-run-time", +[]() -> u64 {
+#ifndef __3DS__
+    static const int fixed =
+        getenv("CTR_FRAME_RUN_TIME") ? atoi(getenv("CTR_FRAME_RUN_TIME")) : 0;
+    return (u64)std::clamp(fixed, 0, 30000);
+#else
+    constexpr double kTicksPerMs = 9765.0 * 59.8261 / 1000.0;
+    return (u64)std::clamp(ctr_frame_work_ms() * kTicksPerMs / 2.0, 0.0, 30000.0);
+#endif
   });
   // target-continue keeps its blackout until the renderer has ring 0 in view (ctr renderer only)
   make_function_symbol_from_c("pc-3ds-arrival-ready?", +[]() -> u64 {

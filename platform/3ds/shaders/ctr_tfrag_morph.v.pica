@@ -5,6 +5,7 @@
 ; buffer: c3l::TfragMorphVertex). The uniforms before tband are ctr_mesh_opt's, at the same places.
 ; Every output component is written exactly once (platform/3ds/tools/check_shaders.py).
 
+; the fog: one dph with clip[4], the fog table row (fog_lut_update: the amount per clip w on unit 1)
 .fvec clip[6]       ; as ctr_mesh_opt.v.pica
 .fvec scales
 .fvec fog1
@@ -41,14 +42,11 @@
   mad r3.xyz, r1.yyyy, inb1.xyzz, r3.xyzz
   add r3.xyz, inpos.xyzz, r3.xyzz
   ; from here ctr_mesh_opt on the moved position r3 (dph reads its xyz)
-  dph r0.x, r3, clip[5]
-  dph r0.y, r3, clip[4]
+  dph outtc.zw, r3, clip[4]
   dph outpos.x, r3, clip[0]
   dph outpos.y, r3, clip[1]
-  max r0.xy, fog1.xyxy, r0.xyxy
   dph outpos.z, r3, clip[2]
   mul outtc.xy, scales.xxxx, intex.xyyy
-  max outtc.zw, -r0.xxxx, r0.yyyy
   dph outpos.w, r3, clip[3]
   ; the color: c + f1 * (m - c) + f0 * (t - m)
   mov r4.xyz, inm.xyzz

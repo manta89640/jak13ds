@@ -337,6 +337,20 @@ u64 render_ocean_quad_impl(const NativeArgs& args) {
     gload_q(q.c, src + 48 * v + 32);
   }
   poly_a[4] = poly_a[0];
+  // all four outside one of the clip planes: the clipping leaves nothing (only the scratchpad
+  // copies, which nothing reads, would differ)
+  {
+    u32 out_all = 15;
+    for (int v = 0; v < 4; v++) {
+      const float* q = poly_a[v].p;
+      const float w = q[3], nw = -q[3];
+      out_all &= (u32)(w < q[0]) | ((u32)(w < q[1]) << 1) | ((u32)(q[0] < nw) << 2) |
+                 ((u32)(q[1] < nw) << 3);
+    }
+    if (out_all) {
+      return args.st;
+    }
+  }
   // (the mips2c stores: stq and colors, then the positions)
   for (int v = 0; v < 5; v++) {
     gstore_q(t4 + 48 * v + 16, poly_a[v].st);

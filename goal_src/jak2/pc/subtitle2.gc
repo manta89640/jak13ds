@@ -472,6 +472,15 @@
       (false! (-> self have-subtitles?))
       (return 0))
 
+  ;; og:preserve-this 3DS: hint subtitles off (the default) and no movie: nothing is drawn, so the
+  ;; lines aren't measured either (the city's ambient speech every frame)
+  (#when TARGET_3DS
+    (when (and (not (-> self movie-mode?)) (not (-> *pc-settings* hinttitles?)))
+      (false! (-> self have-subtitles?))
+      (set-action! *gui-control* (gui-action hidden) (-> self gui-id)
+                  (gui-channel none) (gui-action none) (the-as string #f) (the-as (function gui-connection symbol) #f) (the-as process #f))
+      (return 0)))
+
   ;; font has already been set up in movie mode
   (unless (-> self movie-mode?)
     ;; set up our font to the initial parameters
@@ -710,6 +719,10 @@
 
     ;; get subtitles
     (cond
+      ;; og:preserve-this 3DS: nothing to show without hint subtitles (draw-subtitles)
+      ((#if TARGET_3DS (and (not (-> self movie-mode?)) (not (-> *pc-settings* hinttitles?))) #f)
+        (clear-queue self)
+        )
       ((not (-> self movie-mode?))
         ;; get rid of invalid gui entries
         (update-gui-connections self)

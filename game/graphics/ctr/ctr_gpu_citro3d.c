@@ -103,6 +103,7 @@ static int gx_begin(void);
 static void gx_end(void);
 static int gx_lost(void);
 static void raw_gas_flags_clear(void);
+static void gx_queue_enlarge(void);
 void ctr_linear_lock(void);
 void ctr_linear_unlock(void);
 
@@ -139,6 +140,8 @@ static int linear_room_for_tex(int w, int h, int mipmapped) {
 #define linearAlloc safe_linear_alloc
 #define vramAlloc safe_vram_alloc
 
+/* the GX queue's entries (citro3d makes 32; 32 bytes each) */
+#define GX_QUEUE_ENTRIES 256
 /* (AI-assisted) gxCmdQueueWait's timeout is in system ticks (268 MHz), not nanoseconds */
 #define GX_WAIT_MS(ms) ((s64)(ms) * (s64)(SYSCLOCK_ARM11 / 1000))
 
@@ -370,6 +373,12 @@ static struct {
   C3D_Tex fog_tex;        /* 64x8: alpha ramp 0..1 along s, fog color */
   uint32_t fog_tex_rgb;
   int fog_tex_valid;
+  /* the level meshes' fog table (fog_lut_update): A8, the fog per clip w at s = lut_k * w + lut_c */
+  C3D_Tex lut_tex;
+  int lut_valid;
+  float lut_k, lut_c;
+  uint32_t lut_gen;      /* changes with lut_k / lut_c (never 0) */
+  uint32_t last_clip_lut; /* the clip uniform's rows 4-5: the fog table row (1) or the fog rows */
   DVLB_s* clip_dvlb; /* immediate draws in clip space (ctr_clip.v.pica) */
   DVLB_s* clip2_dvlb; /* the same with two texture coordinates (ctr_clip2.v.pica: clouds) */
   DVLB_s* etie_dvlb;      /* (AI-assisted, j2water2) ctr_etie.v.pica (Jak II) */
@@ -454,6 +463,9 @@ static struct {
   int pending_delete_count;
   void* pending_staging[MAX_STAGING]; /* linear buffers of queued VRAM texture copies */
   int pending_staging_count;
+  /* the previous frame's staging buffers: their copies may still be queued behind the GPU's frame */
+  void* held_staging[MAX_STAGING];
+  int held_staging_count;
   int screen_tex; /* texture slot of ctr_gpu_copy_screen (-1: not made yet), 256x512 RGBA8 */
   int screen_tex_vram; /* (AI-assisted) it is in VRAM (a kept copy that found no linear memory) */
   int screen_tex_pinned; /* ctr_gpu_screen_copy_pin */
@@ -589,14 +601,29 @@ static int16_t s_tex_mask[MAX_TEXTURES], s_mask_of[MAX_TEXTURES];
 /* the masks units 1 and 2 hold (unit 1: NULL while it has the fog ramp) */
 static const C3D_Tex* s_tex1_mask;
 static const C3D_Tex* s_tex2_mask;
+static const void* s_tex1_lut; /* the fog table copy unit 1 holds (NULL: another texture) */
+/* the level meshes' fog tables (fog_lut_update): a copy per fog set, kept while a frame may read it */
+#define FOG_LUT_N 512
+#define FOG_LUT_COPIES 8
+static struct {
+  void* data;
+  float key[6];
+  float k, c;
+  int last_frame;
+} s_fog_lut[FOG_LUT_COPIES];
+static int s_fog_lut_cur = -1;
+static int s_fog_lut_full_logged;
+
 /* every unit-1 bind but bind_mask's: unit 1 no longer holds a mask */
 static void tex1_bind(C3D_Tex* t) {
   C3D_TexBind(1, t);
   s_tex1_mask = NULL;
+  s_tex1_lut = NULL;
 }
 /* units 1 and 2 emptied outside the draws (self-test, bench): no cached binding holds */
 static void tex_units_forget(void) {
   s_tex1_mask = NULL;
+  s_tex1_lut = NULL;
   s_tex2_mask = NULL;
   g.ocean_tex2_bound = 0;
 }
@@ -663,10 +690,20 @@ static int reserve_mesh_slot(void) {
  * delete, so a slot waits one more frame (2 -> 4 -> freed). Not 3: that is a slot or pool the
  * loader thread is still filling (the pool loop looks at every pool, not a delete list). */
 static void vram_freed(void);
+/* hold 2 (the frame begin waited only for frame N - 2): staging buffers wait one more frame too */
 static void process_pending_deletes(int hold) {
   ctr_linear_lock();
-  for (int i = 0; i < g.pending_staging_count; i++) {
-    linearFree(g.pending_staging[i]);
+  for (int i = 0; i < g.held_staging_count; i++) {
+    linearFree(g.held_staging[i]);
+  }
+  g.held_staging_count = 0;
+  if (hold == 2) {
+    memcpy(g.held_staging, g.pending_staging, sizeof(void*) * (size_t)g.pending_staging_count);
+    g.held_staging_count = g.pending_staging_count;
+  } else {
+    for (int i = 0; i < g.pending_staging_count; i++) {
+      linearFree(g.pending_staging[i]);
+    }
   }
   g.pending_staging_count = 0;
   int kept = 0;
@@ -1303,6 +1340,7 @@ int ctr_gpu_init(void) {
     return -1;
   }
   apt_gate_install(); /* (AI-assisted, gpu-home) after C3D_Init: its hook runs before citro3d's */
+  gx_queue_enlarge(); 
   g.top = create_top_target();
   if (!g.top) {
     return -2;
@@ -1334,6 +1372,15 @@ int ctr_gpu_init(void) {
     C3D_TexSetWrap(&g.fog_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
     g.fog_tex_valid = 1;
     g.fog_tex_rgb = 0xffffffff; /* force the first fill */
+  }
+  if (!g.lut_valid && C3D_TexInit(&g.lut_tex, FOG_LUT_N, 8, GPU_A8)) {
+    C3D_TexSetFilter(&g.lut_tex, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap(&g.lut_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    s_fog_lut[0].data = g.lut_tex.data;
+    memset(s_fog_lut[0].key, 0xff, sizeof(s_fog_lut[0].key));
+    s_fog_lut[0].last_frame = -1000;
+    g.lut_gen = 1;
+    g.lut_valid = 1;
   }
   g.clip_dvlb = DVLB_ParseFile((u32*)ctr_clip_shbin, (u32)ctr_clip_shbin_size);
   shaderProgramInit(&g.ps->clip);
@@ -2358,6 +2405,9 @@ static void pres_queue_frame(void) {
   }
   s_pres.buf_state[b] = 1;
   s_pres.buf_wait_ms += (double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0);
+  if (s_bd.frame) {
+    bd_transfer_mark(); /* frame overlap: the queue runs */
+  }
   C3D_FrameSplit(GX_CMDLIST_FLUSH); /* the draws first */
   {
     const C3D_FrameBuf* fb = &g.top->frameBuf;
@@ -2402,6 +2452,115 @@ void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* drop
 }
 
 
+
+/* ---------------- frame overlap (with the pipeline and steady pacing) ----------------
+ * The pipeline's frame end used to wait for the GX queue to empty (C3D_FrameBegin: frame N - 1 and
+ * the parts of N already sent), stop it, and only then hand N's command list over with
+ * GX_CMDLIST_FLUSH: the GSP cleans the whole list (130-260 KB) from the CPU cache before the GPU
+ * starts on it, while the GPU sits idle. On: the queue keeps running and the list is queued
+ * behind frame N - 1; the next frame begin waits for frame N - 1 (whose command and vertex buffers
+ * it reuses) with the steady pacing fence instead. libctru's queue only empties its entry list
+ * (gxCmdQueueClear, a panic while it runs) when it is idle, and holds 32 entries: an idle queue
+ * is emptied before new entries, a full running one waited for (overlap2_room). */
+static u32 s_buf_frame[2]; /* mode 2: the frame drawn from s_cmdbufs / s_vbufs [k] (0: none) */
+static int s_end_mode2;    /* the last pipelined frame end was mode 2 (deletes at the begin) */
+static float s_begin_wait_ms;
+static u32* s_fin_list;    /* the frame's closed command list (pipeline_close_list) */
+static u32 s_fin_words;
+
+/* it needs the fence (frame_pacing = steady) */
+static int overlap2_on(void) {
+  return s_pres.on;
+}
+
+/* before adding n entries to the GX queue (mode 2); returns the milliseconds waited (a full
+ * running queue drained: counted in s_ov2_drains). The queue has
+ * GX_QUEUE_ENTRIES (ctr_gpu_init) instead of citro3d's 32: a GPU-bound scene filled 32 in 3-4
+ * frames (6-8 entries each), and each drain left the GPU idle while the next frame was built. */
+static u32 s_ov2_drains;
+static float overlap2_room(int n) {
+  gxCmdQueue_s* q = &__C3D_Context.gxQueue;
+  float ms = 0.0f;
+  if (!gx_begin()) {
+    return ms;
+  }
+  const int idle = gxCmdQueueWait(q, 0);
+  if (idle || q->numEntries + n >= q->maxEntries) {
+    if (!idle) {
+      const u64 t0 = svcGetSystemTick();
+      diag_rt("frame_overlap2: waiting for room in the GX queue");
+      gxCmdQueueWait(q, -1);
+      ms = (float)((double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0));
+      s_ov2_drains++;
+    }
+    gxCmdQueueStop(q);
+    gxCmdQueueClear(q);
+  }
+  gxCmdQueueRun(q); /* active (an added entry starts it); no-op while it runs */
+  gx_end();
+  return ms;
+}
+
+/* ctr_gpu_init: GX_QUEUE_ENTRIES instead of citro3d's 32 (overlap2_room),
+ * resized while it is empty and idle (libctru reads maxEntries at each add; citro3d's C3D_Fini
+ * frees the array) */
+static void gx_queue_enlarge(void) {
+  gxCmdQueue_s* q = &__C3D_Context.gxQueue;
+  if (gxCmdQueueWait(q, 0) && q->numEntries == 0 && q->maxEntries < GX_QUEUE_ENTRIES) {
+    gxCmdEntry_s* e = (gxCmdEntry_s*)realloc(q->entries, GX_QUEUE_ENTRIES * sizeof(gxCmdEntry_s));
+    if (e) {
+      q->entries = e;
+      q->maxEntries = GX_QUEUE_ENTRIES;
+    }
+  }
+}
+
+/* mode 2: until frame id is done (its fence landed: its draws, transfer and everything before);
+ * returns the milliseconds waited */
+static float overlap2_wait_frame(u32 id) {
+  if (!id) {
+    return 0.0f;
+  }
+  gxCmdQueue_s* q = &__C3D_Context.gxQueue;
+  const u64 t0 = svcGetSystemTick();
+  diag_rt("frame_overlap2: waiting for the frame before last (fence)");
+  for (;;) {
+    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)s_pres.fence, 16);
+    if ((s32)(*(volatile u32*)s_pres.fence - id) >= 0) {
+      break;
+    }
+    if (gxCmdQueueWait(q, 0)) {
+      if (q->lastEntry >= q->numEntries) {
+        break; /* nothing left to run (the queue was emptied after the frame finished) */
+      }
+      if (!gx_begin()) {
+        break;
+      }
+      gxCmdQueueRun(q);
+      gx_end();
+    }
+    gspWaitForAnyEvent();
+  }
+  return (float)((double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0));
+}
+
+/* frame_overlap2: the rest of the frame's command list closed as C3Di_SplitFrame does (the
+ * framebuffer flush and the early depth clear after its draws): s_fin_list, s_fin_words (0:
+ * nothing left). GSP cleans it from the CPU cache when it takes it (GX_CMDLIST_FLUSH). */
+static void pipeline_close_list(void) {
+  s_fin_list = NULL;
+  s_fin_words = 0;
+  if (!gpuCmdBufOffset) {
+    return;
+  }
+  if (__C3D_Context.flags & C3DiF_DrawUsed) {
+    __C3D_Context.flags &= ~(u32)C3DiF_DrawUsed;
+    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
+    GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
+  }
+  GPUCMD_Split(&s_fin_list, &s_fin_words);
+}
 
 /* (AI-assisted) Jak II's menu: the next frame begin clears only the depth */
 static int s_skip_color_clear; /* ctr_gpu_set_skip_color_clear, for the next frame begin */
@@ -2470,14 +2629,29 @@ static void pipeline_frame_begin(u32 clear) {
     g.screenshot_state = 0;
   }
   s_k ^= 1;
+  s_begin_wait_ms = 0.0f;
+  if (overlap2_on()) {
+    /* frame overlap: the frame before the last one drew from these buffers;
+     * then the deletes (as the frame end does in the other modes; not twice after one of those) */
+    s_begin_wait_ms = overlap2_wait_frame(s_buf_frame[s_k]);
+    if (!gx_lost()) {
+      s_buf_frame[s_k] = 0;
+      if (s_end_mode2) {
+        process_pending_deletes(2);
+      }
+    }
+  }
   /* the frame's first GPU work in one piece: all of it queued, or the frame abandoned */
   if (gx_lost() || !gx_begin()) {
     return;
   }
   c3d_frame_abort();
-  /* the queue runs what this frame begin adds (stopped after the HOME Menu or sleep: citro3d's
-   * frame begin at the frame end would clear the clear and the VRAM copies unrun) */
-  gxCmdQueueRun(&__C3D_Context.gxQueue);
+  if (overlap2_on()) {
+    s_begin_wait_ms += overlap2_room(8); /* room for the begin's entries; also runs the queue */
+  } else {
+    /* the queue runs what this frame begin adds (stopped after the HOME Menu or sleep) */
+    gxCmdQueueRun(&__C3D_Context.gxQueue);
+  }
   GPUCMD_SetBuffer(s_cmdbufs[s_k], PIPE_CMD_BYTES / 4, 0);
   g.cmd_base = gpuCmdBuf;
   g.cmd_flushed_words = 0;
@@ -2512,6 +2686,7 @@ static void pipeline_frame_begin(u32 clear) {
   set_top_viewport();
   frame_state_reset();
   g.cur.color_clear_skipped = s_skip_color_clear;
+  g.cur.gpu_wait_ms = s_begin_wait_ms; /* frame overlap (after the reset) */
   gx_end();
 }
 
@@ -2526,6 +2701,9 @@ static void pipeline_submit(void) {
   u32* list;
   u32 words;
   GPUCMD_Split(&list, &words);
+  if (overlap2_on()) {
+    g.cur.gpu_wait_ms += overlap2_room(4); /* this list and a copy or two after it */
+  }
   if (words) {
     gt_note_submit();
     GX_ProcessCommandList(list, words * 4, GX_CMDLIST_FLUSH);
@@ -2775,7 +2953,19 @@ void ctr_gpu_frame_end(void) {
   if (!bd) {
     g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base + g.cmd_flushed_words) * 4);
   }
-  if (s_pipeline) {
+  /* frame_overlap2: 0 the frame end waits for the GPU, 2 no wait (the list queued
+   * behind the frame the GPU draws) */
+  const int ov2 = s_pipeline && overlap2_on() ? 2 : 0;
+  if (ov2 == 2) {
+    pipeline_close_list();
+    g.cur.gpu_wait_ms += overlap2_room(5); /* the list, the transfer(s) and the fence */
+    if (s_fin_words) {
+      gt_note_submit();
+      GX_ProcessCommandList(s_fin_list, s_fin_words * 4, GX_CMDLIST_FLUSH);
+    }
+    s_buf_frame[s_k] = (u32)g.frame_no;
+    s_end_mode2 = 1;
+  } else if (s_pipeline) {
     /* wait for the previous frame (and this one's parts sent so far), then submit the rest of
      * this frame from our buffer with citro3d (display transfer, buffer swap) */
     u32* buf = gpuCmdBuf;
@@ -2790,6 +2980,8 @@ void ctr_gpu_frame_end(void) {
     C3D_FrameDrawOn(g.top);
     set_top_viewport();
     gt_note_submit();
+    s_buf_frame[s_k] = 0;
+    s_end_mode2 = 0;
   }
   if (s_pres.on) {
     diag_rt("frame_end: present queue (wait for a free screen buffer)");
@@ -2800,11 +2992,13 @@ void ctr_gpu_frame_end(void) {
   diag_rt("frame_end: C3D_FrameEnd (submit)");
   gt_note_first(); /* (AI-assisted) without the pipeline the queue starts here (or at a partial) */
   gt_note_submit();
-  if (bd) {
+  if (bd && (ov2 != 2 || !s_pres.on)) {
     bd_transfer_mark(); /* (AI-assisted, gpu-rt) the queue (stopped) runs the transfer from here */
   }
-  C3D_FrameEnd(GX_CMDLIST_FLUSH);
-  s_c3d_open = 0;
+  if (ov2 != 2) {
+    C3D_FrameEnd(GX_CMDLIST_FLUSH);
+    s_c3d_open = 0;
+  }
   if (bd) {
     /* (AI-assisted, gpu-rt) the transfer and the fence (steady pacing) */
     bd_frame_end(s_pres.on ? 2 : 1);
@@ -2857,6 +3051,8 @@ void ctr_gpu_frame_end(void) {
     }
   }
   gm_vsh_flush();
+  g.cur.queue_drains = (int)s_ov2_drains;
+  s_ov2_drains = 0;
   g.last = g.cur;
   apt_gate_leave(); /* (AI-assisted, gpu-home) the frame's GPU work is all queued */
 }
@@ -3019,6 +3215,9 @@ static int queue_texture_copy(void* in, void* out, u32 size) {
   }
   if (!gx_begin()) {
     return 0;
+  }
+  if (overlap2_on()) {
+    s_begin_wait_ms += overlap2_room(1);
   }
   /* (the pipeline's frame begin: the queue runs the frame before; nothing of this one is built) */
   GX_TextureCopy((u32*)in, 0, (u32*)out, 0, size, 8);
@@ -3755,7 +3954,7 @@ static void apt_gate_hook(APT_HookType type, void* param) {
   const int timed_out = s_apt.busy;
   s_apt.timeouts += (u32)timed_out;
   LightLock_Unlock(&s_apt.lock);
-  /* what is queued */
+  /* what is queued (the queue keeps running between frames) */
   gxCmdQueueWait(&__C3D_Context.gxQueue, GX_WAIT_MS(1000));
   printf("[ctr] %s: frames stopped (%.1f ms%s; %lu frames abandoned unsent so far)\n",
          type == APTHOOK_ONSLEEP ? "sleep" : "HOME Menu",
@@ -4286,6 +4485,9 @@ static void bind_mask(TexSlot* m, const C3D_Tex* color, int unit) {
   }
   C3D_TexBind(unit, t);
   *cur = t;
+  if (unit == 1) {
+    s_tex1_lut = NULL;
+  }
   s_mask_data[unit] = t->data;
   s_mask_param[unit] = t->param;
   s_mask_lod[unit] = t->lodParam;
@@ -4426,6 +4628,13 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) 
     C3D_TexEnvSrc(env1, C3D_Alpha, GPU_PREVIOUS, GPU_TEXTURE1, 0);
     C3D_TexEnvOpAlpha(env1, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_R, GPU_TEVOP_A_SRC_ALPHA);
     C3D_TexEnvFunc(env1, C3D_Alpha, GPU_MODULATE);
+  } else if (mesh == 1 && g.lut_valid) {
+    /* fog: rgb = mix(previous, fog color, the fog table's amount) */
+    C3D_TexEnvSrc(env1, C3D_RGB, GPU_CONSTANT, GPU_PREVIOUS, GPU_TEXTURE1);
+    C3D_TexEnvOpRgb(env1, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR,
+                    GPU_TEVOP_RGB_SRC_ALPHA);
+    C3D_TexEnvFunc(env1, C3D_RGB, GPU_INTERPOLATE);
+    C3D_TexEnvColor(env1, g.fog_abgr);
   } else if ((mesh == 1 || mesh == 6) && g.fog_tex_valid) {
     /* fog: rgb = mix(previous, fog color, fog amount) with the amount from the fog ramp texture
      * (texcoord1 from the mesh shader; bound on unit 1 at frame begin) */
@@ -4596,8 +4805,15 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) 
    * stage 2 (the ocean's), its amount from texture unit 1 (ctr_skin_opt's texcoord1) */
   const int merc_fog = mesh == 2 && (st->tcc & CTR_TCC_FOG) && g.fog_tex_valid;
   /* unit 1 back to the fog ramp after an alpha mask, for the draws that read it */
-  const int need_ramp = mesh == 1 || mesh == 6 || (mesh == 7 && smask < 0) || merc_fog;
-  if (need_ramp && s_tex1_mask && g.fog_tex_valid) {
+  const int need_lut = mesh == 1 && g.lut_valid;
+  const int need_ramp =
+      (mesh == 1 && !g.lut_valid) || mesh == 6 || (mesh == 7 && smask < 0) || merc_fog;
+  if (need_lut && s_tex1_lut != g.lut_tex.data) {
+    C3D_TexBind(1, &g.lut_tex);
+    s_tex1_mask = NULL;
+    s_tex1_lut = g.lut_tex.data;
+    g.cur.tex_binds++;
+  } else if (need_ramp && (s_tex1_mask || s_tex1_lut) && g.fog_tex_valid) {
     tex1_bind(&g.fog_tex);
   }
   if (s_tex2_mask && mesh != 6 && mesh != 7 && !(smask >= 0 && mesh == 2)) {
@@ -4605,7 +4821,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) 
   }
   if (g.fog_tex_valid) {
     C3Di_Context* tctx = &__C3D_Context;
-    const int need1 = need_ramp || (smask >= 0 && mesh != 2);
+    const int need1 = need_ramp || need_lut || (smask >= 0 && mesh != 2);
     const int is_off = !(tctx->texConfig & BIT(1));
     (void)need1;
     if (is_off) {
@@ -5801,6 +6017,9 @@ int ctr_gpu_rt_draw_grid(int tex, const ctr_draw_state* state, const ctr_vertex*
 
   /* after the draws, in the GPU's queue: the levels into place */
   const int bd = s_pipeline && s_bd.frame;
+  if (s_pipeline && !bd && overlap2_on()) {
+    g.cur.gpu_wait_ms += overlap2_room(levels);
+  }
   u8* level = (u8*)g.textures[tex].tex.data + (size_t)dim * (size_t)dim * 4u;
   for (int l = 1; l < levels; l++) {
     const int d = dim >> l;
@@ -6161,10 +6380,11 @@ static void mesh_scales_set(int atlas) {
  * encoding of every level geometry draw, so that neighbouring chunks and every program meet
  * exactly), when the matrix changes. words: 18, or 15 without the game fog's row (df programs). */
 static void raw_mesh_matrix(const ctr_mesh_matrix* matrix, u32 words) {
-  if (g.last_mesh_valid && g.last_clip_id == matrix->id) {
+  if (g.last_mesh_valid && g.last_clip_id == matrix->id && !g.last_clip_lut) {
     return;
   }
   g.last_clip_id = matrix->id;
+  g.last_clip_lut = 0;
   /* the fog rows are made once per matrix and fog (fog_gen) */
   ctr_mesh_matrix* mm = (ctr_mesh_matrix*)matrix;
   if (mm->fog_gen != g.fog_gen) {
@@ -6175,6 +6395,31 @@ static void raw_mesh_matrix(const ctr_mesh_matrix* matrix, u32 words) {
     mm->fog_gen = g.fog_gen;
   }
   raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, matrix->f24, words, 0));
+  g.last_mesh_valid = 1;
+}
+
+/* the matrix and the fog table row (the level mesh programs' clip[0..4]), when they change */
+static void raw_mesh_matrix_lut(const ctr_mesh_matrix* matrix) {
+  if (g.last_mesh_valid && g.last_clip_id == matrix->id && g.last_clip_lut) {
+    return;
+  }
+  g.last_clip_id = matrix->id;
+  g.last_clip_lut = 1;
+  ctr_mesh_matrix* mm = (ctr_mesh_matrix*)matrix;
+  if (mm->lut_gen != g.lut_gen) {
+    const float* w = matrix->m + 12;
+    float row[4];
+    for (int k = 0; k < 4; k++) {
+      row[k] = g.lut_k * w[k];
+    }
+    row[0] += g.lut_c;
+    raw_pack_f24(row, mm->lut24);
+    mm->lut_gen = g.lut_gen;
+  }
+  u32 v[15];
+  memcpy(v, matrix->f24, 12 * sizeof(u32));
+  memcpy(v + 12, mm->lut24, 3 * sizeof(u32));
+  raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, v, 15, 0));
   g.last_mesh_valid = 1;
 }
 
@@ -6240,7 +6485,7 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
                  tex_mask(tex_res(state->tex)) >= 0;
   /* (AI-assisted) shader_opt with the game fog off: the programs with only the draw distance fog */
   const int df = g.ps->df_ok && g.fog_df;
-  use_program(fa ? (df ? PROG_MESH_DF_FA : PROG_MESH_FA) : (df ? PROG_MESH_DF : PROG_MESH));
+  use_program(fa ? (df ? PROG_MESH_DF_FA : PROG_MESH_FA) : PROG_MESH);
   /* (AI-assisted) c3l v15 atlas draws (CTR_TCC_ST_ATLAS): texture coordinates in 1/32768. The
    * draws are sorted by texture, so an atlas's draws come one after another: two writes per run */
   {
@@ -6267,7 +6512,11 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
     PR_ADD(PR_MESH_SYNC, t);
     t = PR_T();
     /* the draw distance fog's row only with the game fog off: the df programs don't read the other */
-    raw_mesh_matrix(matrix, df ? 15 : 18);
+    if (fa) {
+      raw_mesh_matrix(matrix, df ? 15 : 18);
+    } else {
+      raw_mesh_matrix_lut(matrix);
+    }
     PR_ADD(PR_MESH_MTX, t);
     t = PR_T();
     raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
@@ -6346,7 +6595,7 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
     }
   }
   raw_sync();
-  raw_mesh_matrix(matrix, 18);
+  raw_mesh_matrix_lut(matrix);
   if (g.wind_rows_id != rows_id || !rows_id) {
     g.wind_rows_id = rows_id;
     raw_unif_xyzw(g.ps->uloc_wind, rows, row_count);
@@ -6403,7 +6652,11 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
       raw_vertex_buffers_n(3, w);
     }
     raw_sync();
-    raw_mesh_matrix(matrix, 18);
+    if (fa) {
+      raw_mesh_matrix(matrix, 18);
+    } else {
+      raw_mesh_matrix_lut(matrix);
+    }
     u32* p = raw_ptr();
     if (!g.morph_slot_id[0]) {
       g.morph_slot_id[0] = 1;
@@ -6476,7 +6729,11 @@ void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix
       raw_vertex_buffers_n(3, w);
     }
     raw_sync();
-    raw_mesh_matrix(matrix, 18);
+    if (fa) {
+      raw_mesh_matrix(matrix, 18);
+    } else {
+      raw_mesh_matrix_lut(matrix);
+    }
     if (g.tmorph_unif_id != unif_id) {
       g.tmorph_unif_id = unif_id;
       u32 v[8]; /* w z y x, per vector */
@@ -7291,6 +7548,118 @@ static void mesh_fog_uniforms(const float fog0[4], const float fog1[4], float ou
   out1[3] = 0.0f;
 }
 
+/* the fog table: the amount the old fog rows, clamps, max and ramp gave, per clip w where it changes */
+
+/* the old ramp's alpha (0..1) at amount a: 64 texels x * 255 / 63, linear, clamped */
+static float fog_ramp_alpha(float a) {
+  const float u = a * 64.0f - 0.5f;
+  if (!(u > 0.0f)) {
+    return 0.0f;
+  }
+  if (u >= 63.0f) {
+    return 1.0f;
+  }
+  const int i = (int)u;
+  const float t0 = (float)(i * 255 / 63), t1 = (float)((i + 1) * 255 / 63);
+  return (t0 + (t1 - t0) * (u - (float)i)) / 255.0f;
+}
+
+/* the fog amount at clip w, as ctr_mesh_opt's fog rows and clamps gave it */
+static float fog_amount(const float f0[4], const float f1[4], float w) {
+  float a = f0[0] * w + f0[2], b = f0[1] * w + f0[3];
+  a = a > f1[0] ? a : f1[0];
+  b = b > f1[1] ? b : f1[1];
+  return -a > b ? -a : b;
+}
+
+static void fog_lut_update(void) {
+  if (!g.lut_valid) {
+    return;
+  }
+  const float key[6] = {g.fog0[0], g.fog0[1], g.fog0[2], g.fog0[3], g.fog1[0], g.fog1[1]};
+  if (s_fog_lut_cur >= 0 && words_equal(s_fog_lut[s_fog_lut_cur].key, key, 6)) {
+    return;
+  }
+  int pick = -1, write = 0;
+  for (int i = 0; i < FOG_LUT_COPIES && pick < 0; i++) {
+    if (s_fog_lut[i].data && words_equal(s_fog_lut[i].key, key, 6)) {
+      pick = i;
+    }
+  }
+  for (int i = 0; i < FOG_LUT_COPIES && pick < 0; i++) {
+    if (i != s_fog_lut_cur && s_fog_lut[i].data && s_fog_lut[i].last_frame < g.frame_no - 3) {
+      pick = i;
+      write = 1;
+    }
+  }
+  for (int i = 0; i < FOG_LUT_COPIES && pick < 0; i++) {
+    if (!s_fog_lut[i].data) {
+      ctr_linear_lock();
+      s_fog_lut[i].data = linearAlloc(FOG_LUT_N * 8);
+      ctr_linear_unlock();
+      if (s_fog_lut[i].data) {
+        pick = i;
+        write = 1;
+      }
+      break;
+    }
+  }
+  if (pick < 0) {
+    if (!s_fog_lut_full_logged) {
+      s_fog_lut_full_logged = 1;
+      printf("[ctr] fog table: no free copy, the last one kept\n");
+    }
+    return;
+  }
+  if (s_fog_lut_cur >= 0) {
+    s_fog_lut[s_fog_lut_cur].last_frame = g.frame_no;
+  }
+  s_fog_lut[pick].last_frame = g.frame_no;
+  s_fog_lut_cur = pick;
+  if (write) {
+    /* where the amount changes: each term's ends within the ramp's range, clipped to w >= 0 */
+    const float* f0 = g.fog0;
+    const float* f1 = g.fog1;
+    float lo = 1e30f, hi = 0.0f;
+    const float ends[6][2] = {{f0[0], f0[2] - f1[0]}, {f0[0], f0[2] + 1.0f}, {f0[0], f0[2]},
+                              {f0[1], f0[3] - f1[1]}, {f0[1], f0[3] - 1.0f}, {f0[1], f0[3]}};
+    for (int e = 0; e < 6; e++) {
+      if (ends[e][0] != 0.0f) {
+        float w = -ends[e][1] / ends[e][0];
+        w = w > 0.0f ? w : 0.0f;
+        lo = w < lo ? w : lo;
+        hi = w > hi ? w : hi;
+      }
+    }
+    if (!(hi > lo) || !(hi < 1e9f)) {
+      lo = 0.0f;
+      hi = 1.0f;
+    }
+    /* texel 0's center at lo, the last one's at hi */
+    const float step = (hi - lo) / (FOG_LUT_N - 1);
+    s_fog_lut[pick].k = 1.0f / (step * FOG_LUT_N);
+    s_fog_lut[pick].c = 0.5f / FOG_LUT_N - lo * s_fog_lut[pick].k;
+    memcpy(s_fog_lut[pick].key, key, sizeof(key));
+    uint8_t* dst = (uint8_t*)s_fog_lut[pick].data;
+    for (int x = 0; x < FOG_LUT_N; x++) {
+      const float a = fog_ramp_alpha(fog_amount(f0, f1, lo + step * (float)x));
+      const uint8_t v = (uint8_t)(a * 255.0f + 0.5f);
+      for (int y = 0; y < 8; y++) {
+        dst[(x / 8) * 64 + morton8((u32)x & 7, (u32)y & 7)] = v;
+      }
+    }
+    cache_flush_frame(dst, FOG_LUT_N * 8);
+    s_tex1_lut = NULL; /* (a rebind clears the texture cache) */
+  }
+  g.lut_tex.data = s_fog_lut[pick].data;
+  if (g.lut_k != s_fog_lut[pick].k || g.lut_c != s_fog_lut[pick].c) {
+    g.lut_k = s_fog_lut[pick].k;
+    g.lut_c = s_fog_lut[pick].c;
+    g.lut_gen = g.lut_gen + 1 ? g.lut_gen + 1 : 1;
+  }
+  g.last_state_valid = 0;
+}
+
 void ctr_gpu_set_mesh_fog(const float fog0_in[4], const float fog1[4], uint8_t r, uint8_t gr,
                           uint8_t b) {
   /* (AI-assisted) the same inputs as the last call that set the uniforms (the level renderers of
@@ -7319,6 +7688,7 @@ void ctr_gpu_set_mesh_fog(const float fog0_in[4], const float fog1[4], uint8_t r
    * are equal (config.ini fog = off: 0, 255, 255, -1/255), and no fog when that constant is <= 0
    * (half a step of the fog ramp's 255 for rounding) */
   g.fog_df = fog0[1] == fog0[2] && 1.0f + fog0[3] * fog0[1] <= 0.5f / 255.0f;
+  fog_lut_update();
   /* (AI-assisted) new fog rows with the next matrix upload, the clamps now */
   g.last_mesh_valid = 0;
   if (is_mesh_prog(g.cur_prog)) {
@@ -7631,6 +8001,9 @@ void ctr_gpu_linear_account_get(ctr_gpu_linear_account* out) {
   }
   for (int i = 0; i < g.pending_staging_count; i++) {
     out->staging += lin_size(g.pending_staging[i]);
+  }
+  for (int i = 0; i < g.held_staging_count; i++) {
+    out->staging += lin_size(g.held_staging[i]);
   }
   for (int i = 0; i < MAX_MESHES; i++) {
     const MeshSlot* m = &g.meshes[i];

@@ -247,6 +247,106 @@
                   (< r2 (vector-vector-distance-squared (-> dc origin) (-> *target* control trans)))))
            (not (anim-lod-may-show? dc))))))
 
+;; og:preserve-this 3DS logic LOD (always on). An enemy or platform that is
+;; out of view (not drawn last frame, its sphere grown by LOGIC_LOD_VIEW outside the view) and
+;; LOGIC_LOD_DIST or more (plus its bounds) from the camera and Jak runs its trans, code and post
+;; on every other frame only (staggered by pid). The frame after a wait it runs with the display's
+;; rates over both frames (twice the time ratio, the old counters two frames back), so it moves,
+;; animates and counts time as if it had run both. Never twice in a row; never Jak's processes,
+;; movies, or while the game lags (time ratio over 2).
+(#when TARGET_3DS
+  ;; on (logic-lod-set!, for A/B tests)
+  (define *pc-3ds-logic-lod* #t)
+  (defconstant LOGIC_LOD_DIST (meters 20))
+  (defconstant LOGIC_LOD_VIEW (meters 4))
+  ;; per frame (stats for a debugger or a REPL): processes that waited
+  (define *logic-lod-wait-count* 0)
+  (define *logic-lod-wait-frame* -1)
+  (define *logic-lod-saved-ratio* 1.0)
+  (define *logic-lod-saved-base* (the-as time-frame 0))
+  (define *logic-lod-saved-game* (the-as time-frame 0))
+
+  (defun logic-lod-begin ()
+    "The display's rates over the last two frames, for one process."
+    (let ((disp *display*))
+      (set! *logic-lod-saved-ratio* (-> disp time-ratio))
+      (set! *logic-lod-saved-base* (-> disp old-base-frame-counter))
+      (set! *logic-lod-saved-game* (-> disp old-game-frame-counter))
+      (set! (-> disp old-base-frame-counter)
+            (- (-> disp old-base-frame-counter) (- (-> disp base-frame-counter) (-> disp old-base-frame-counter))))
+      (set! (-> disp old-game-frame-counter)
+            (- (-> disp old-game-frame-counter) (- (-> disp game-frame-counter) (-> disp old-game-frame-counter))))
+      (set-time-ratios disp (* 2.0 *logic-lod-saved-ratio*)))
+    (none))
+
+  (defun logic-lod-end ()
+    "Back to this frame's rates."
+    (let ((disp *display*))
+      (set-time-ratios disp *logic-lod-saved-ratio*)
+      (set! (-> disp old-base-frame-counter) *logic-lod-saved-base*)
+      (set! (-> disp old-game-frame-counter) *logic-lod-saved-game*))
+    (none))
+
+  (defun logic-lod-wait? ((proc process))
+    "May proc wait this frame (out of view, far from the camera and Jak)?"
+    (and *target*
+         (>= 2.0 (-> *display* time-ratio))
+         (not (logtest? (-> *kernel-context* prevent-from-run) (process-mask movie)))
+         (type-type? (-> proc type) process-drawable)
+         (let* ((pd (the-as process-drawable proc))
+                (dc (-> pd draw)))
+           (and (nonzero? dc)
+                (nonzero? (-> pd root))
+                (!= (ppointer->process (-> pd parent)) *target*)
+                (not (logtest? (-> dc status) (draw-status was-drawn)))
+                (let* ((r (+ (-> dc bounds w) LOGIC_LOD_DIST))
+                       (r2 (* r r)))
+                  (and (< r2 (vector-vector-distance-squared (-> pd root trans) (-> *math-camera* trans)))
+                       (< r2 (vector-vector-distance-squared (-> pd root trans) (-> *target* control trans)))))
+                (let ((s (new 'stack-no-clear 'sphere)))
+                  (vector+! s (-> dc origin) (-> dc bounds))
+                  (set! (-> s r) (+ (-> dc bounds w) LOGIC_LOD_VIEW))
+                  (not (sphere-in-view-frustum? s)))))))
+
+  (defun logic-lod-check ((this process-tree))
+    "The kernel's question (gkernel.gc logic-lod-run): 0 run, 1 wait, 2 run over two frames."
+    (let ((proc (the-as process this)))
+      (if (or (not *pc-3ds-logic-lod*) (not (logtest? (-> proc mask) (process-mask enemy platform))))
+        (return 0))
+      (let* ((bits *logic-lod-skipped*)
+             (idx (logand (-> proc pid) #xffff))
+             (byte (shr idx 3))
+             (bit (ash 1 (logand idx 7))))
+        (cond
+          ((logtest? (-> bits byte) bit)
+           (logclear! (-> bits byte) bit)
+           (if (>= 2.0 (-> *display* time-ratio)) 2 0))
+          ((and (logtest? (+ *logic-lod-frame* (-> proc pid)) 1) (logic-lod-wait? proc))
+           (logior! (-> bits byte) bit)
+           (when (!= *logic-lod-wait-frame* *logic-lod-frame*)
+             (set! *logic-lod-wait-frame* *logic-lod-frame*)
+             (set! *logic-lod-wait-count* 0))
+           (+! *logic-lod-wait-count* 1)
+           1)
+          (else 0)))))
+
+  (defun logic-lod-waited? ((proc process))
+    "Did proc wait this frame (logic LOD)?"
+    (let ((idx (logand (-> proc pid) #xffff)))
+      (and *logic-lod-skipped* (logtest? (-> *logic-lod-skipped* (shr idx 3)) (ash 1 (logand idx 7))))))
+
+  (defun logic-lod-set! ((on int))
+    "Logic and particle LOD on (1) or off (0), for A/B tests (pad script: call logic-lod-set! 0)."
+    (set! *pc-3ds-logic-lod* (nonzero? on))
+    0)
+
+  (let ((bits (the-as (pointer uint8) (malloc 'global 8192))))
+    (mem-set32! bits 2048 0)
+    (set! *logic-lod-skipped* bits))
+  (set! *logic-lod-begin* logic-lod-begin)
+  (set! *logic-lod-end* logic-lod-end)
+  (set! *logic-lod-hook* logic-lod-check))
+
 (defun execute-math-engine ()
   (#when PC_PORT
     (with-dma-buffer-add-bucket ((debug-buf (-> (current-frame) global-buf)) (bucket-id debug-no-zbuf))
@@ -266,7 +366,8 @@
           (let ((h (-> skipped i)))
             (when (not (anim-lod-queued? gp-0 h))
               (let ((proc (handle->process h)))
-                (if proc (do-joint-math! (the-as process-drawable proc)))))))
+                ;; a process the logic LOD held this frame asks again next frame
+                (if (and proc (not (logic-lod-waited? proc))) (do-joint-math! (the-as process-drawable proc)))))))
         (set! (-> skipped length) 0)))
     (countdown (s5-0 (-> gp-0 length))
       (let ((a0-1 (handle->process (-> gp-0 s5-0))))

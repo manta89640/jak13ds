@@ -553,6 +553,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.blend_states += gs.blend_states;
   m_timing.prog_switches += gs.prog_switches;
   m_timing.gpu_wait_ms += gs.gpu_wait_ms;
+  m_timing.queue_drains += gs.queue_drains;
   m_timing.gpu_busy_ms += gs.gpu_busy_ms;
   m_timing.gpu_busy_frames += gs.gpu_busy_frames;
   m_timing.gpu_active_ms += gs.gpu_active_ms;
@@ -626,7 +627,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
           "[ctr] render ms/frame over {} frames: wait-gpu {:.2f}, build {:.2f}, submit {:.2f} "
           "(cpu total {:.2f}; gpu-wait {:.2f}); gpu {:.2f} (draw {:.2f}, busy {}); {:.0f} "
           "triangles, {:.0f} draws, {:.0f} texture binds, {:.0f} KB commands (peak {:.0f} of {} KB); "
-          "vertex buffer peak {} of {} KB{}{}{}",
+          "vertex buffer peak {} of {} KB{}{}{}{}",
           m_timing.frames, m_timing.begin_ms / n, m_timing.build_ms / n, m_timing.end_ms / n,
           (m_timing.begin_ms + m_timing.build_ms + m_timing.end_ms) / n,
           m_timing.gpu_wait_ms / n, m_timing.gpu_ms / n, m_timing.gpu_draw_ms / n, busy,
@@ -649,6 +650,9 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
           m_timing.color_clears_skipped
               ? fmt::format(", {} frames without the color clear (menu screen copy)",
                             m_timing.color_clears_skipped)
+              : std::string(),
+          m_timing.queue_drains
+              ? fmt::format(", {} GX queue drains (queue full)", m_timing.queue_drains)
               : std::string());
       // gpu_model features (docs/3ds-port/gpu_model.md)
       lg::info("[ctr] gpumodel hw: {:.0f} vertex program kinstr, {:.1f} program switches, {:.1f} "
@@ -1200,8 +1204,24 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   }
 #ifdef __3DS__
   ctr_boot_mark("8 GPU ready (first top screen frame drawn)");
-  if (ctr_settings().pica_bench) {
-    // (AI-assisted) the GPU microbenchmark, before anything else uses the GPU
+  bool run_bench = ctr_settings().pica_bench;
+  if (run_bench && ctr_settings().pica_bench_once) {
+    // the marker goes to the card before the bench: a hang in a test can't repeat at the next boot
+    const char* marker = "sdmc:/3ds/jak1/data/log/bench_once.txt";
+    if (FILE* f = fopen(marker, "r")) {
+      fclose(f);
+      run_bench = false;
+      lg::info("[ctr] pica_bench = once: already run (data/log/bench_once.txt)");
+    } else if (FILE* w = fopen(marker, "w")) {
+      fputs("pica_bench = once ran at this boot\n", w);
+      fclose(w);
+    } else {
+      run_bench = false;
+      lg::info("[ctr] pica_bench = once: no marker file, not run");
+    }
+  }
+  if (run_bench) {
+    // the GPU microbenchmark, before anything else uses the GPU
     lg::info("[ctr] pica_bench: GPU microbenchmark before the game starts");
     ctr_boot_mark("8b pica_bench (a hang here: see data/log/bench.txt)");
     const int stopped = ctr_gpu_bench_run();

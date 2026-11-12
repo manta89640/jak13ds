@@ -137,6 +137,8 @@ int ctr_thread_stacks_check(char* line, unsigned int line_size);
 void ctr_thread_name_current(const char* name);
 /* The app's share of core 1 in percent (APT_SetAppCpuTimeLimit: 80, 30 if refused, 0: none). */
 int ctr_core1_share(void);
+/* One line: the first core 1 share's result and whether core 3 takes a thread (New 3DS). */
+void ctr_core_probe(char* out, unsigned int size);
 /* Ask for a share of core 1 (if not done yet); returns the share in percent (0: refused). */
 int ctr_core1_enable(void);
 

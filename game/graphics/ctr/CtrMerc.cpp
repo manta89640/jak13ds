@@ -1613,7 +1613,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     return;
   }
   const std::vector<c3l::MercDraw>* draws = &model->draws;
-  if (!model->gen_draws.empty() && model->gen_err > 0.f && cs.merc_gen_lod && !hud_model &&
+  if ((!model->gen_draws.empty() || !model->gen2_draws.empty()) && cs.merc_gen_lod && !hud_model &&
       i > 0 && slots[0] < 128) {
     // The converter's simplified copy (below a model's lowest game LOD, not c3l::merc_gen_lod_exempt) while
     // its simplification error projects to under 0.75 px on the top screen; full detail again
@@ -1638,11 +1638,17 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     }
     const float s = std::sqrt(col);
     const float d = w - grad * model->scale * 32767.f * s;
+    // the coarsest copy whose error projects under 0.75 px (1 px for the one drawn last frame)
     InstState& g = inst_now();
-    const float limit = g.low == 1 ? 1.f : 0.75f;
-    g.low = d > 0.f && model->gen_err * s * focal < limit * d;
+    const float px = d > 0.f ? s * focal / d : INFINITY;
+    auto fits = [&](float err, int level) {
+      return err > 0.f && err * px < (g.low == level ? 1.f : 0.75f);
+    };
+    g.low = !model->gen2_draws.empty() && fits(model->gen2_err, 2)
+                ? 2
+                : (!model->gen_draws.empty() && fits(model->gen_err, 1) ? 1 : 0);
     if (g.low) {
-      draws = &model->gen_draws;
+      draws = g.low == 2 ? &model->gen2_draws : &model->gen_draws;
       m_stats.gen_lod++;
 #ifndef __3DS__
       // (AI-assisted) per model statistics: the generated low LOD on its own line

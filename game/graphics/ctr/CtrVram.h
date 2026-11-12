@@ -102,7 +102,10 @@ class CtrVram {
    * Get the texture for a TEX0 register value, decoding it from VRAM if needed.
    * Returns nullptr if the format is not supported.
    */
-  const CtrTexture* get_texture(u64 tex0);
+  const CtrTexture* get_texture(u64 tex0, bool mips = false);
+  // get_texture's mips: an entry of its own with mip levels (world sprites: minified without them
+  // they miss the GPU's texture cache at nearly every pixel)
+  static constexpr u64 kMipKeyBit = 1ull << 61;
 
   /*!
    * Decode a texture to RGBA8 (row-major, top row first) without creating a GPU texture.

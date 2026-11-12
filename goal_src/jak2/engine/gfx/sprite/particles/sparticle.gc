@@ -646,6 +646,34 @@
 
 ;; ERROR: Unsupported inline assembly instruction kind - [mfc0 gp, Count]
 ;; ERROR: Unsupported inline assembly instruction kind - [mfc0 v1, Count]
+;; og:preserve-this 3DS particle LOD (with the logic LOD; native_sparticle.cpp sp_lod_2d): far 2d
+;; particles are updated on every 2nd frame (beyond SP_LOD_FAR and behind the camera every 4th),
+;; over the frames they stand for
+(#when TARGET_3DS
+  (define-extern *pc-3ds-logic-lod* symbol)
+  (defconstant SP_LOD_DIST (meters 25))
+  (defconstant SP_LOD_FAR (meters 60))
+  (defconstant SP_LOD_BEHIND (meters 8))
+  ;; camera position, camera forward, then frame (int), on, squared distance, depth behind, then
+  ;; the squared distance of every 4th frame
+  (define *sp-lod-work* (new 'global 'matrix))
+  (define *sp-lod-frame* 0)
+  (defun sp-lod-setup ()
+    (let ((w *sp-lod-work*))
+      (+! *sp-lod-frame* 1)
+      (set! (-> w vector 0 quad) (-> *math-camera* trans quad))
+      (set! (-> w vector 1 quad) (-> *math-camera* inv-camera-rot vector 2 quad))
+      (set! (-> w vector 2 x) (the-as float *sp-lod-frame*))
+      (set! (-> w vector 2 y) (if *pc-3ds-logic-lod* 1.0 0.0))
+      (set! (-> w vector 2 z) (* SP_LOD_DIST SP_LOD_DIST))
+      (set! (-> w vector 2 w) SP_LOD_BEHIND)
+      (set! (-> w vector 3 x) (* SP_LOD_FAR SP_LOD_FAR))
+      )
+    0
+    (none)
+    )
+  )
+
 (defun process-particles ()
   (local-vars (v1-53 int) (gp-0 int))
   (with-pp
@@ -692,6 +720,9 @@
           )
         )
       (clear-sprite-aux-list)
+      (#when TARGET_3DS
+        (sp-lod-setup)
+        )
       (sp-process-particle-system *sp-particle-system-2d* 0 *sprite-array-2d*)
       (sp-process-particle-system *sp-particle-system-2d* 1 *sprite-array-2d*)
       (sp-process-particle-system *sp-particle-system-3d* 0 (the-as sprite-array-2d *sprite-array-3d*))
