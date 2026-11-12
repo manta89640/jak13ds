@@ -379,8 +379,9 @@ std::string level_mem_text(const LevelMem& m) {
 }
 
 // (AI-assisted, j2-mem) the stream arena's first segment (KB): config stream_kb, else Jak II's
-// own (its near chunks needed at once in Haven City: docs/3ds-port/streaming.md "Jak II")
-constexpr u32 kJak2StreamKb = 1536;
+// own (its near chunks needed at once in Haven City: docs/3ds-port/streaming.md "Jak II"). Jak II's
+// arena is fixed at it: no growth to compete with the chunks by need
+constexpr u32 kJak2StreamKb = 2048;
 u32 ctr_stream_kb() {
   const auto& s = ctr_settings();
   return s.stream_kb_set || !ctr_is_jak2() ? (u32)s.stream_kb : kJak2StreamKb;
@@ -1559,11 +1560,12 @@ void CtrLevels::unload_detail(CtrLevelData& lev) {
 // A level the game's visibility string hides whole for kDormantFrames level draws is dormant: it
 // wants no near chunks, and its tie chunks with a draw distance that the string hides are needed
 // only within kNeedDormMeters ("Residency by need"). One not back when the string shows the level
-// again isn't drawn; once its mesh comes it stays hidden while in view, at most
-// kDormantHoldFrames.
+// again isn't drawn; once its mesh comes it fades in (kArriveFrames).
 namespace {
 constexpr u32 kDormantFrames = 90;  // 3 s at 30 fps
-constexpr u32 kDormantHoldFrames = 120;
+// a dormant chunk's arrival in view: faded in over this many frames (chunk_hold_since)
+constexpr u32 kArriveFrames = 8;
+constexpr u32 kArrived = 0x80000000u;
 // a chunk the visibility string hides whole when it is zero: visibility runs, each with an id
 bool chunk_hideable(const CtrLevelData& lev, size_t ci) {
   const auto& ch = lev.chunks[ci];
@@ -1625,31 +1627,27 @@ constexpr u64 kNeedLoadDefault = 4u * 1024 * 1024;  // a load whose size isn't k
 constexpr u64 kNeedLoadMargin = 512 * 1024;
 constexpr u64 kNeedFillRoom = 8u * 1024 * 1024;     // with this much to spare: the rest too
 constexpr u32 kNeedShortPasses = 4;
-// chunks by need are read and kept out to these distance factors (the old auto_detail range's far
-// end, where its memory cap stayed; the drawn limits are never beyond them)
-constexpr float kNeedShrubScale = 1.f, kNeedShrubMeters = 120.f, kNeedTieScale = 3.f;
-// a chunk's largest draw distance (game units), with the 10% hysteresis (draw_level's
-// decide_dist); 0: none (drawn at any distance: kept)
-float dist_limit(const CtrLevelData& lev, const c3l::Chunk& ch) {
+// a shrub or tie chunk's drawn limit (game units, 0: none), as decide_dist draws it: shrubs
+// out to kShrubFarK x their PS2 class, ties to their own limit (a vista copy stands in nearer)
+float drawn_limit(const c3l::Chunk& ch, bool shrub_ps2) {
   const auto& s = ctr_settings();
-  float d = 0;
-  // (AI-assisted, levellod) as decide_dist draws them: v14 shrubs out to kShrubFarK x their class
-  // (fable1), ties held in view up to kHoldInView x their distance (more than the 10% hysteresis):
-  // without those, chunks still drawn were left out at load or freed by make_room
-  float k = 1.1f;
   if (ch.kind == c3l::CHUNK_KIND_SHRUB) {
-    if (lev.shrub_ps2_dist) {
-      d = ch.max_dist * kShrubFarK * std::max(kNeedShrubScale, s.shrub_scale) * s.detail_scale;
-    } else if (s.shrub_distance > 0) {
-      d = std::max(kNeedShrubMeters, s.shrub_distance) * 4096.f * s.detail_scale;
-    } else {
-      d = ch.max_dist * s.detail_scale;
+    if (shrub_ps2) {
+      return ch.max_dist * kShrubFarK * s.shrub_scale * s.detail_scale;
     }
-  } else if (ch.kind == c3l::CHUNK_KIND_TIE) {
-    d = ch.max_dist * std::max(kNeedTieScale, s.tie_distance_scale) * s.detail_scale;
-    k = std::max(k, kHoldInView);
+    return s.shrub_distance > 0 ? s.shrub_distance * 4096.f * s.detail_scale
+                                : ch.max_dist * s.detail_scale;
   }
-  return d > 0 ? d * k : 0.f;
+  if (ch.kind == c3l::CHUNK_KIND_TIE) {
+    return ch.max_dist * s.tie_distance_scale * s.detail_scale;
+  }
+  return 0.f;
+}
+// a chunk's largest draw distance (game units) with its hysteresis or fade band; 0: none (drawn
+// at any distance: kept)
+float dist_limit(const CtrLevelData& lev, const c3l::Chunk& ch) {
+  const float d = drawn_limit(ch, lev.shrub_ps2_dist);
+  return d > 0 ? d * std::max(1.1f, ctr_detail::kFadeBand) : 0.f;
 }
 // a chunk distance freeing may free: a shrub or tie (not a near chunk) with a draw distance
 bool dist_frees(const CtrLevelData& lev, size_t ci) {
@@ -1668,24 +1666,13 @@ float dist_d2(const c3l::Chunk& ch, const float pos[][3], int np) {
   }
   return d2;
 }
-// a managed chunk's reach from its sphere's surface: its draw limit at the kNeed factors with the
-// hysteresis or fade band it goes by
+// a managed chunk's reach from its sphere's surface: its drawn limit (within the draw distance)
+// with the hysteresis or fade band it goes by
 float need_reach(const CtrLevelData& lev, const c3l::Chunk& ch) {
   const auto& s = ctr_settings();
-  float d = 0;
-  if (ch.kind == c3l::CHUNK_KIND_SHRUB) {
-    if (lev.shrub_ps2_dist) {
-      d = ch.max_dist * kShrubFarK * std::max(kNeedShrubScale, s.shrub_scale) * s.detail_scale;
-    } else if (s.shrub_distance > 0) {
-      d = std::max(kNeedShrubMeters, s.shrub_distance) * 4096.f * s.detail_scale;
-    } else {
-      d = ch.max_dist * s.detail_scale;
-    }
-  } else {
-    d = ch.max_dist * std::max(kNeedTieScale, s.tie_distance_scale) * s.detail_scale;
-  }
+  float d = drawn_limit(ch, lev.shrub_ps2_dist);
   if (!(d > 0)) {
-    return dist_limit(lev, ch);
+    return 0.f;
   }
   if (s.draw_distance > 0) {
     d = std::min(d, s.draw_distance * 4096.f);
@@ -1803,7 +1790,7 @@ void CtrLevels::need_scan(const float pos[kNeedPos][3], int np, u64 frame) {
   constexpr float kM = 4096.f;
   m_need_have.clear();
   m_need_want.clear();
-  m_dst.resident = m_dst.managed = 0;
+  m_dst.resident = m_dst.managed = m_dst.wanted = 0;
   for (auto& [name, lp] : m_levels) {
     CtrLevelData& lev = *lp;
     const size_t n = lev.chunks.size();
@@ -1842,6 +1829,7 @@ void CtrLevels::need_scan(const float pos[kNeedPos][3], int np, u64 frame) {
       // within its draw distance by the last draw's decision
       const bool in_range = drawn && !hidden && (lev.chunk_state[ci] & 4);
       m_dst.managed += bytes;
+      m_dst.wanted += e < kNeedReadMeters * kM ? bytes : 0;
       if (fl == 0) {
         m_dst.resident += bytes;
         if (!in_range) {
@@ -9295,7 +9283,7 @@ void CtrLevels::stream_update(u64 frame) {
     // least this unit's and kSegment; at most kMaxSegment, or the largest block the heap has):
     // few, large segments. While a level loads only when the heap keeps kLoadRoom more (the
     // load's memory first; a load that runs short makes room, freeing the growth).
-    if (!mem && evicted < su.bytes) {
+    if (!mem && evicted < su.bytes && !jak2) {
       // (AI-assisted, streammem) the room of the parts jobs in flight too (parts_reserve)
       const u32 grow_reserve =
           reserve + (level_loading ? kLoadRoom : std::max(kGrowHeadroom, parts_reserve));
@@ -10042,19 +10030,21 @@ void CtrLevels::stream_log() {
 #endif
   log_memory();
   if (m_dst.managed) {
-    lg::info("[ctr] chunks by need: {} of {} KB there; {} freed for room ({} KB; {} KB for a load "
-             "out of memory), {} reads of {} chunks ({} KB needed, {} KB to fill), {} passes "
-             "short of room (at most {} KB within their draw distance or of a load waiting)",
-             m_dst.resident / 1024, m_dst.managed / 1024, m_dst.freed_chunks,
+    lg::info("[ctr] chunks by need: {} of {} KB there ({} KB within reach); {} freed for room ({} "
+             "KB; {} KB for a load out of memory), {} reads of {} chunks ({} KB needed, {} KB to "
+             "fill), {} passes short of room (at most {} KB within their draw distance or of a load "
+             "waiting)",
+             m_dst.resident / 1024, m_dst.managed / 1024, m_dst.wanted / 1024, m_dst.freed_chunks,
              m_dst.freed_bytes / 1024, m_dst.load_bytes / 1024, m_dst.read_jobs,
              m_dst.read_chunks, m_dst.read_bytes / 1024, m_dst.fill_bytes / 1024,
              m_dst.short_passes, m_dst.short_max / 1024);
   }
   {
-    const u64 resident = m_dst.resident, managed = m_dst.managed;
+    const u64 resident = m_dst.resident, managed = m_dst.managed, wanted = m_dst.wanted;
     m_dst = DistStats();
     m_dst.resident = resident;
     m_dst.managed = managed;
+    m_dst.wanted = wanted;
   }
   const auto as = CtrStreamArena::get().stats();
   const double now = ctr_gpu_time_ms();
@@ -10225,8 +10215,16 @@ bool outside_detail(const CtrLevelData& l, const float* s, float margin) {
 
 // (AI-assisted, j2intro / title3) the screen is black this frame (ctr_level_set_screen_black)
 bool g_screen_black = false;
-// the factor on the PS2's tie and tfrag LOD distances (its switches and geomorph bands)
-constexpr float kPs2LodScale = 1.f;
+// the factor on the PS2's tie and tfrag LOD distances (its switches and geomorph bands), per game
+float ps2_lod_scale() {
+#ifndef __3DS__
+  static const char* const env = getenv("CTR_PS2_LOD_SCALE");  // (host pricing)
+  if (env) {
+    return (float)atof(env);
+  }
+#endif
+  return ctr_is_jak2() ? 0.8f : 1.f;
+}
 
 // (AI-assisted, title-popin) a sphere against the view's four planes (the chunk test of emit_chunk)
 CTR_HOT bool sphere_in_view(const CtrBackgroundCamera& cam, const float* s) {
@@ -11306,10 +11304,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   const CtrSettings& settings = ctr_settings();
   // the fixed detail floor (CtrDetail.h)
-  const ctr_detail::Floor dfl = ctr_detail::floor_of(
+  ctr_detail::Floor dfl = ctr_detail::floor_of(
       settings.tie_lod_px, settings.lod_distance, settings.tie_distance_scale,
       settings.draw_distance, g_game_version == GameVersion::Jak1,
       g_game_version == GameVersion::Jak2);
+#ifndef __3DS__
+  static const char* const tie_far_env = getenv("CTR_TIE_FAR_M");  // (host pricing: meters)
+  if (tie_far_env && dfl.tie_far > 0) {
+    dfl.tie_far = (float)atof(tie_far_env);
+  }
+#endif
   {
     const u32 taken = g_pop.taken;  // (AI-assisted, title3: CTR_POP_LOG; taken since the last draw)
     g_pop = PopLog();
@@ -11983,8 +11987,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // the distance factor: with shape errors the floor's tie_lod_px pixels; older files: half the
     // PS2 distance
     const float k0 = settings.tie_lod ? settings.detail_scale : 0.f;
-    // the PS2's distances (the floor, the geomorph's planes, older files' switch) x kPs2LodScale
-    const float k0p = k0 * kPs2LodScale;
+    // the PS2's distances (the floor, the geomorph's planes, older files' switch) x ps2_lod_scale
+    const float k0p = k0 * ps2_lod_scale();
     const float k = by_error ? k0 * focal / std::max(dfl.tie_lod_px, 0.25f) : 0.5f * k0p;
     // (AI-assisted, lodnear) the PS2 floor: by screen-space error alone (4 px of the 400-wide top
     // screen) half of the groups switched to geometry 3 nearer than their PS2 far-plane, some at
@@ -12090,9 +12094,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
 #endif
         const u8 v_nat = v;  // (ctr_pop: by distance alone)
         bool gone = false;   // its near data left (not: beyond its near chunk's distance, far mode)
-        bool held_now = false;
         bool covered = false;
         if (v < 2 && has_units) {
+          // data presence only stops an upgrade: absent near data draws the far version, and its
+          // arrival starts at that surface (the units' morph floor)
           bool ok = g < lev.group_unit_count.size() && lev.group_unit_count[g] > 0;
           bool late = false;
           const u32* gu = ok ? &lev.group_units[lev.group_unit_first[g]] : nullptr;
@@ -12101,7 +12106,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             late = late || lev.unit_ok[gu[j]] == 3;
           }
           gone = late;
-          bool keep_far = (st & 4) != 0 && !g_screen_black;
           if (!ok) {
             v = 2;
             if (late && !j2_hidden) {
@@ -12120,28 +12124,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                   lev.stream_units[gu[j]].late_seen = frame32p;
                 }
               }
-              if (!keep_far && !g_screen_black && seen) {
-                keep_far = true;
-                lev.lod_hold_since[g] = (u32)rs.frame_idx;
-              }
-            }
-          } else if (keep_far) {
-            // its data came: its units begin at the far version's surface (their morph floor);
-            // units without moving vertices: kept far while in view (at most kHoldFrames)
-            bool morphs = true;
-            for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
-              morphs = morphs && lev.chunk_morphs(lev.stream_units[gu[j]].chunk);
-            }
-            if (!morphs && sphere_in_view(cam, lg.bsphere) &&
-                (u32)rs.frame_idx - lev.lod_hold_since[g] < kHoldFrames) {
-              v = 2;
-              held_groups++;
-              held_now = true;
-            } else {
-              keep_far = false;
             }
           }
-          st = (u8)(st & ~4) | (keep_far ? 4 : 0);
           // (ctr_pop: a switch under a unit's morph in, or after its morph out, doesn't show)
           for (u32 j = 0; gu && j < lev.group_unit_count[g]; j++) {
             const auto& su = lev.stream_units[gu[j]];
@@ -12167,11 +12151,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           pop(far_flip  ? ctr_pop::kFar
               : !forced ? ctr_pop::kLate
               : gone     ? ctr_pop::kEvict
-              : held_now ? ctr_pop::kHold
                          : ctr_pop::kUnit,
               lg.bsphere, forced ? "morph group far" : "morph group near", (u32)g);
         }
-        st = (u8)((st & 4) | 2 | (v < 2 ? 1 : 0) | (v == 1 ? 8 : 0) | (forced ? 16 : 0));
+        st = (u8)(2 | (v < 2 ? 1 : 0) | (v == 1 ? 8 : 0) | (forced ? 16 : 0));
         near += v < 2;
         continue;
       }
@@ -12382,7 +12365,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   if (tf_on) {
     const float wv[3] = {-R[0][3], -R[1][3], -R[2][3]};
     const float wl = std::sqrt(wv[0] * wv[0] + wv[1] * wv[1] + wv[2] * wv[2]);
-    const float k = settings.detail_scale * kPs2LodScale * wl;
+    const float k = settings.detail_scale * ps2_lod_scale() * wl;
     const float w2 = lev.tf_dists[0] * k, w1 = lev.tf_dists[1] * k, w0 = lev.tf_dists[2] * k;
     m_tf_band[0] = 1.f / (w0 - w1);
     m_tf_band[1] = 1.f / (w1 - w2);
@@ -13226,25 +13209,34 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         (m_copy_fade[ci] < kRunOpaque || m_tie_fade[ci] < kRunOpaque)) {
       vista_source(ci);  // (its vista copy with the chunk, in the band)
     }
-    // (AI-assisted, j2-mem) dormant levels: a tie chunk without its mesh within its distance in
-    // view stays hidden while in view once it came (at most kDormantHoldFrames from then)
+    // (AI-assisted, j2-mem) dormant levels: a tie chunk seen without its mesh within its distance
+    // fades in over kArriveFrames once it comes (chunk_hold_since: the frame it was seen missing,
+    // then its arrival frame | kArrived)
     if (dorm && ch.lod_tier == 0 && !far_level) {
-      u32& hold = lev.chunk_hold_since[ci];
+      u32& since = lev.chunk_hold_since[ci];
       if (!dist_ok) {
-        hold = 0;
-      } else if (meshes[ci] < 0 ? lev.dormant_freed(ci) && !lev.dormant : hold != 0) {
-        // (while dormant the string hides it anyway: no hold)
+        since = 0;
+      } else if (meshes[ci] < 0 ? lev.dormant_freed(ci) && !lev.dormant : since != 0) {
+        // (while dormant the string hides it anyway)
         const bool seen = !string_hides(ci, ch) && sphere_in_view(cam, ch.bsphere);
         if (meshes[ci] < 0) {
-          hold = seen ? (hold ? hold : frame32) : 0;
+          since = seen ? (since && !(since & kArrived) ? since : frame32 & ~kArrived) : 0;
           m_levels->stream_check().dorm_missing += seen;
           m_late_in_view += seen;  // (AI-assisted, j2intro)
-        } else if (seen && !g_screen_black && frame32 - hold < kDormantHoldFrames) {
-          // (AI-assisted, j2intro: not while the screen is black: nobody saw it missing)
-          continue;
+        } else if (!(since & kArrived) && (!seen || g_screen_black)) {
+          since = 0;  // (nobody saw it missing)
         } else {
-          m_levels->stream_check().dorm_switch_in_view += seen;
-          hold = 0;
+          if (!(since & kArrived)) {
+            since = (frame32 & ~kArrived) | kArrived;
+            m_levels->stream_check().dorm_switch_in_view++;
+          }
+          const u32 age = (frame32 - since) & ~kArrived;
+          if (age >= kArriveFrames) {
+            since = 0;
+          } else {
+            const u8 a = (u8)(((age + 1) * (kRunOpaque / 8) / kArriveFrames) * 8);
+            m_tie_fade[ci] = std::min(m_tie_fade[ci], a);
+          }
         }
       }
     }

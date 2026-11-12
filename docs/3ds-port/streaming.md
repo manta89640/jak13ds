@@ -478,9 +478,9 @@ needed 5.6 MB free to come back and stayed away while two districts were loaded.
 
 **Managed chunks**: shrub and tie chunks of tier 0 with a draw distance, not near chunks
 (`dist_frees`). Each is resident (`chunk_dormant` 0, a mesh), absent (`kDistFreed`) or being read
-(`kDistReading`). Its **reach** is its draw limit with ties x3 and v14 shrubs x1 (older files 120 m;
-`kNeedTieScale` ...: the old auto_detail range's far end, never less than drawn), times 1.1 (the
-hysteresis a shrub goes by, the fade band of a tie), plus its radius; its
+(`kDistReading`). Its **reach** is its drawn limit (`drawn_limit`: ties x tie_distance_scale, v14
+shrubs x kShrubFarK x shrub_scale, as decide_dist draws them), times 1.1 (the hysteresis a shrub goes
+by, the fade band of a tie), plus its radius; its
 **excess** `e` is how far the nearest position is beyond that reach. The positions: the camera
 now, 1 s and 2 s ahead at its speed, Jak, and while the game is black the continue point's
 camera. A dormant level's ties that the visibility string hides have a reach of at most 45 m; a
@@ -533,8 +533,8 @@ if that was not enough, the whole arena at the second try. The arena then comes 
 **Dormant levels** (config `dormant_levels`): a level whose visibility string is all zero for 90
 level draws is dormant: no near chunks are wanted (stream_k 0), and its hidden ties are needed
 only within 45 m (above). When the string shows it again their reach is their own; one not back
-yet within its distance in view is not drawn, and once its mesh comes it stays hidden while in
-view, at most 120 frames from when that began.
+yet within its distance in view is not drawn, and once its mesh comes it fades in over 8 frames
+(the tie fade path), with no hold.
 
 Log, every stats period: `[ctr] chunks by need: R of M KB there; N freed for room (KB; KB for a
 load out of memory), J reads of K chunks (KB needed, KB to fill), P passes short of room (at
@@ -543,9 +543,12 @@ K chunks with a draw distance (KB) not needed now come by need`.
 
 **Arena size.** The near chunks needed at once on jak2_route.pad: 0.25-1.0 MB on average per stop,
 at most 1.14 MB in the city, 1.53 MB in the sewer; on hardware the slums need 1.6-2.1 MB on
-average, up to 3.2 MB. Jak II's first segment is 1536 KB (`kJak2StreamKb`, `stream_kb` overrides it:
-the chunks within their draw distance come before more near chunks); the growth rule adds segments above the floor
-(the farms and the sewer grew to 2.5 MB on the host). Jak 1 keeps 4096.
+average, up to 3.2 MB. With the tie geomorph (c3l-j2 converted with `--tie-morph`) the host
+route needs 2.7-3.7 MB on average per stop at ps2_lod_scale 0.8 (3.0-4.6 MB at 1.0). Jak II's
+arena is fixed at 2048 KB (`kJak2StreamKb`, `stream_kb` overrides the size): no growth segments,
+so it never trades memory back and forth with the chunks by need. (At 3072 KB Azahar showed the
+chunks by need short with ctysluma + ctyindb loaded: 46 passes, tie holes; a near chunk that
+doesn't fit only leaves its group's far version drawn, a chunk by need that doesn't fit is a hole.) Jak 1 keeps 4096 and its growth.
 
 Host switches: `CTR_SOFT_NO_RASTER=1` (no pixels: long memory runs ~10x faster),
 `CTR_MEM_LOG_EVERY=N` (the `[ctr] memory` line every N frames; it is also logged every stats

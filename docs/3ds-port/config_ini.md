@@ -42,7 +42,7 @@ ocean = full
 
 - **normal**: everything that is finished and works on the New 3DS (the default), with fixed
   detail cuts for a steady 30 fps: shrub fade bands beyond 40 m at half their distance, tie objects
-  beyond 150 m drawn by their simpler vista copies (both games; the fixed detail floor); Jak II
+  beyond 150 m (Jak II 120 m) drawn by their simpler vista copies (the fixed detail floor); Jak II
   also half the city's civilians and civilian vehicles (`traffic_density = 0.5`), 70% of the
   particles (`particle_density = 0.7`) and shadows at the PS2's distances (`shadows = full`).
 - **full**: `traffic_density = 1`, `particle_density = 1`.
