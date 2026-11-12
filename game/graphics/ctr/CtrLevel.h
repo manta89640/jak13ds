@@ -1562,11 +1562,10 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // A chunk crossing planes keeps it while the planes moved less (over its sphere) than its runs'
   // smallest distance to them at the evaluation (m_plane_ring: the planes of the last frames).
   struct RunCache {
-    u32 key = 0;
-    u32 nr = 0;
-    u32 shown = 0, lod_hid = 0, lt0 = 0, lt1 = 0, view_hidden = 0, view_tris = 0;
-    u32 seq = 0;
+    u32 key = 0, seq = 0;
     float margin = 0;
+    u32 lt0 = 0, lt1 = 0, view_tris = 0;
+    u16 nr = 0, shown = 0, lod_hid = 0, view_hidden = 0;
     u8 mode = 0, cross = 0;
   };
   static constexpr u32 kPlaneRing = 32;
@@ -1574,7 +1573,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u32 m_rc_seq = 0;
   std::vector<RunCache> m_run_cache;
   std::vector<u8> m_raw_shown, m_raw_nomerge, m_chk_shown, m_chk_nomerge;
-  std::vector<u16> m_raw_margin, m_chk_margin;  // per run (CtrLevel.cpp run_margin_q)
+  std::vector<u8> m_raw_margin, m_chk_margin;  // per run (CtrLevel.cpp run_margin_q)
   u64 m_rc_partial = 0, m_rc_retested = 0;
   // per chunk the version of its runs' flags (moves when they may differ from its last draw), per
   // draw the index ranges it submitted at a version (in m_dr_pool: start, count pairs)
@@ -1582,13 +1581,13 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   std::vector<u8> m_run_synced;  // per chunk: m_run_shown / m_run_nomerge hold its raw flags
   u32 m_rver_next = 0;
   struct DrawRanges {
-    u32 ver = 0, epoch = 0, at = 0, n = 0, drawn = 0;
-    u8 vista = 0;
+    u32 ver = 0;  // (0: none)
+    u16 at = 0;   // its ranges in m_dr_pool: start in the draw | count << 16
+    u8 n = 0, vista = 0;
   };
-  static constexpr size_t kDrPool = 32768;
+  static constexpr size_t kDrPool = 8192;
   std::vector<DrawRanges> m_dr_cache;
   std::vector<u32> m_dr_pool, m_dr_tmp;
-  u32 m_dr_epoch = 1;
   u64 m_dr_hits = 0, m_dr_checked = 0, m_dr_bad = 0;
   std::vector<u8> m_vis_prev, m_lod_prev, m_tf_prev;
   std::vector<u32> m_g2c_first, m_g2c, m_t2c_first, m_t2c;

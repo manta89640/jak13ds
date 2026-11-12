@@ -7039,6 +7039,13 @@ void* ctr_gpu_mesh_vertices(int mesh) {
   return m->verts;
 }
 
+const void* ctr_gpu_mesh_vertices_drawn(int mesh) {
+  if (mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1) {
+    return NULL;
+  }
+  return g.meshes[mesh].verts;
+}
+
 void* ctr_gpu_mesh_vertices_inplace(int mesh, int* vertex_count) {
   if (mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 || !g.meshes[mesh].fill_vbytes ||
       g.meshes[mesh].verts_alt) {

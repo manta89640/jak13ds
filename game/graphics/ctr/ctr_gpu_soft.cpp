@@ -3455,6 +3455,13 @@ void* ctr_gpu_mesh_vertices(int mesh) {
   return g_soft.meshes[mesh].verts.data();
 }
 
+const void* ctr_gpu_mesh_vertices_drawn(int mesh) {
+  if (!soft_mesh_ok(mesh, false)) {
+    return nullptr;
+  }
+  return g_soft.meshes[mesh].verts.data();
+}
+
 // life: the flushed bytes are what the GPU reads from now on
 void ctr_gpu_flush_range(const void* addr, unsigned int size) {
   if (!life::on() || !addr) {
