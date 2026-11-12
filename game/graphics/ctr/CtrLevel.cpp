@@ -204,7 +204,7 @@ void merc_bone_spheres(CtrMercModelData& md,
   float lo[256][3], hi[256][3];
   bool any[256] = {};
   std::vector<std::pair<u8, u16>> uses;  // (bone, vertex)
-  for (const auto* ds : {&md.draws, &md.gen_draws}) {
+  for (const auto* ds : {&md.draws, &md.gen_draws, &md.gen2_draws}) {
     for (const auto& d : *ds) {
       for (u32 k = d.first_index; k < d.first_index + d.index_count && k < indices.size(); k++) {
         const u16 v = indices[k];
@@ -358,7 +358,7 @@ LevelMem level_mem(const CtrLevelData& lev) {
       m.merc += (u64)mm.vertex_count * sizeof(c3l::MercVertex) +
                 (u64)(mm.index_end - mm.index_first) * sizeof(u16);
     }
-    m.heap += vec_bytes(mm.draws) + vec_bytes(mm.gen_draws) + sizeof(mm);
+    m.heap += vec_bytes(mm.draws) + vec_bytes(mm.gen_draws) + vec_bytes(mm.gen2_draws) + sizeof(mm);
     for (const auto& e : mm.mod) {
       m.heap += vec_bytes(e.mask) + vec_bytes(e.dests) + sizeof(e);
     }
@@ -7645,16 +7645,18 @@ bool CtrLevels::load_file(const fs::path& path,
     // (AI-assisted) generated low LODs (c3l::kMercGenLodSuffix): the model they belong to (same
     // vertices) gets their draws as gen_draws, in one mesh with its own
     // (AI-assisted, j1ocean) none for the pickups (c3l::merc_gen_lod_exempt: always full detail)
-    std::unordered_map<std::string, u32> gen_of;
+    std::unordered_map<std::string, u32> gen_of, gen2_of;
     bool any_gen = false;
-    const size_t gen_suffix_len = strlen(c3l::kMercGenLodSuffix);
     for (u32 mi = 0; mi < models.size(); mi++) {
       const std::string n(models[mi].name, strnlen(models[mi].name, sizeof(models[mi].name)));
-      if (n.size() > gen_suffix_len &&
-          n.compare(n.size() - gen_suffix_len, gen_suffix_len, c3l::kMercGenLodSuffix) == 0) {
-        any_gen = true;
-        if (!c3l::merc_gen_lod_exempt(n)) {
-          gen_of[n.substr(0, n.size() - gen_suffix_len)] = mi;
+      for (int k = 0; k < 2; k++) {
+        const char* sfx = k ? c3l::kMercGenLod2Suffix : c3l::kMercGenLodSuffix;
+        const size_t len = strlen(sfx);
+        if (n.size() > len && n.compare(n.size() - len, len, sfx) == 0) {
+          any_gen = true;
+          if (!c3l::merc_gen_lod_exempt(n)) {
+            (k ? gen2_of : gen_of)[n.substr(0, n.size() - len)] = mi;
+          }
         }
       }
     }
@@ -7712,25 +7714,33 @@ bool CtrLevels::load_file(const fs::path& path,
       // (AI-assisted) the "play as Keira" model: bound to her rig, posed from Jak's bones
       md.keira_rig = !md.name.compare(0, ctr_keira::kModelPrefixLen, ctr_keira::kModelPrefix);
       {
-        auto git = gen_of.find(md.name);
-        if (git != gen_of.end()) {
+        for (int k = 0; k < 2; k++) {
+          const auto& of = k ? gen2_of : gen_of;
+          auto git = of.find(md.name);
+          if (git == of.end()) {
+            continue;
+          }
           const auto& g = models[git->second];
           if (g.first_vertex == m.first_vertex && g.vertex_count == m.vertex_count &&
               g.first_draw + g.draw_count <= mdraws.size()) {
-            md.gen_draws.assign(mdraws.begin() + g.first_draw,
-                                mdraws.begin() + g.first_draw + g.draw_count);
-            md.gen_err = c3l::merc_gen_lod_error(g);
+            (k ? md.gen2_draws : md.gen_draws)
+                .assign(mdraws.begin() + g.first_draw, mdraws.begin() + g.first_draw + g.draw_count);
+            (k ? md.gen2_err : md.gen_err) = c3l::merc_gen_lod_error(g);
           }
+        }
+        if (md.gen2_draws.empty() || !(md.gen2_err > 0.f)) {
+          md.gen2_draws.clear();
+          md.gen2_err = 0.f;
         }
       }
       u32 first = UINT32_MAX, end = 0;
-      for (const auto* ds : {&md.draws, &md.gen_draws}) {
+      for (const auto* ds : {&md.draws, &md.gen_draws, &md.gen2_draws}) {
         for (const auto& d : *ds) {
           first = std::min<u32>(first, d.first_index);
           end = std::max<u32>(end, d.first_index + d.index_count);
         }
       }
-      for (auto* ds : {&md.draws, &md.gen_draws}) {
+      for (auto* ds : {&md.draws, &md.gen_draws, &md.gen2_draws}) {
         for (auto& d : *ds) {
           d.first_index -= first;
         }
