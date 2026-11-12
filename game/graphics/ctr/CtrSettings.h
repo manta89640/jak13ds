@@ -57,7 +57,7 @@ struct CtrSettings {
   bool distort = true;  // (AI-assisted) on (Oct 16 config cleanup; was off: square sprites on hardware, fixed)
   // the envmap shine of merc models (power cells, precursor metal): a second pass over their draws
   bool envmap = true;
-  // models with only lod0 (the yeti, ...) switch to the converter's generated low LOD
+  // models at their lowest game LOD (the yeti, ...) switch to the converter's generated low LOD
   // (c3l::kMercGenLodSuffix) where its simplification error is under a pixel on screen
   bool merc_gen_lod = true;
   // config shadows = full | off (on = full). full: the game's shadow volumes (Jak, enemies,

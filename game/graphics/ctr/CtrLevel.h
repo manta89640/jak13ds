@@ -92,7 +92,7 @@ struct CtrMercModelData {
   int mesh = -1;
   float scale = 1.f;
   std::vector<c3l::MercDraw> draws;
-  // (AI-assisted) the converter's generated low LOD (models with only lod0): the same vertices,
+  // (AI-assisted) the converter's generated low LOD (below the model's lowest game LOD): the same vertices,
   // fewer triangles; empty: none. CtrMercRenderer draws them far away (config merc_gen_lod)
   std::vector<c3l::MercDraw> gen_draws;
   float gen_err = 0.f;  // gen_draws' simplification error, model units (c3l::merc_gen_lod_error)

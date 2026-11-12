@@ -1536,7 +1536,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   const std::vector<c3l::MercDraw>* draws = &model->draws;
   if (!model->gen_draws.empty() && model->gen_err > 0.f && cs.merc_gen_lod && !hud_model &&
       i > 0 && slots[0] < 128) {
-    // The converter's simplified copy (models with only lod0, not c3l::merc_gen_lod_exempt) while
+    // The converter's simplified copy (below a model's lowest game LOD, not c3l::merc_gen_lod_exempt) while
     // its simplification error projects to under 0.75 px on the top screen; full detail again
     // above 1 px. Nearest point: the nearest bone origin less the model's reach.
     const float* cw = m_clip + 12;

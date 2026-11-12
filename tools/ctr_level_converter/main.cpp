@@ -129,10 +129,10 @@ struct Options {
   // (AI-assisted) the "play as Keira" easter egg's file (KEIRA.c3l, keira_model.h): the input is
   // the common GAME.fr3, this the village1.fr3 her model comes from
   std::string keira_from;
-  // (AI-assisted) merc models whose skeleton group has only lod0 (no -lod1 / -lod2 model in the
-  // level, e.g. the yeti): a simplified copy named <model> + c3l::kMercGenLodSuffix, with the
-  // same vertices and ~gen_lod_ratio of the triangles (meshopt_simplify per draw, the draws'
-  // borders kept), drawn by CtrMercRenderer far away (config merc_gen_lod). 0: none
+  // each merc model's lowest game LOD (the largest -lodN in the level; the yeti's lod0): a
+  // simplified copy named <model> + c3l::kMercGenLodSuffix, with the same vertices and
+  // ~gen_lod_ratio of the triangles, drawn by CtrMercRenderer where its error is under a pixel
+  // (config merc_gen_lod). 0: none
   float gen_lod_ratio = 0.3f;
   float gen_lod_error = 0.02f;  // largest error, relative to the model's size
   // the model's open edges (holes, cards) stay where they are. Off by default: with the draws
@@ -3037,7 +3037,7 @@ struct MercOut {
 };
 
 /*!
- * (AI-assisted) The simplified copy of a merc model that has only lod0 (see Options::gen_lod_ratio):
+ * (AI-assisted) The simplified copy of a merc model's lowest game LOD (see Options::gen_lod_ratio):
  * a model entry named <name> + kMercGenLodSuffix with the model's own vertices (first_vertex,
  * vertex_count) and draws of its own, appended after the model. Each draw's triangles are
  * simplified on their own with their open edges locked (the palette splits and texture seams are
@@ -3458,12 +3458,23 @@ void mark_merc_cull(const c3l::MercModel& mm,
 }
 
 void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* out) {
-  // (AI-assisted) skeleton groups with lower LODs: "<base>-lodN" with N > 0 in this level
-  std::unordered_map<std::string, bool> has_lower;
+  // per model base name its lowest detail game LOD ("<base>-lod<N>", the largest N)
+  std::unordered_map<std::string, int> lowest_lod;
+  auto lod_of = [](const std::string& name, std::string* base) {
+    const auto p = name.rfind("-lod");
+    if (p == std::string::npos || p + 4 >= name.size() ||
+        name.find_first_not_of("0123456789", p + 4) != std::string::npos) {
+      return -1;
+    }
+    *base = name.substr(0, p);
+    return std::atoi(name.c_str() + p + 4);
+  };
   for (const auto& model : group.models) {
-    const auto p = model.name.rfind("-lod");
-    if (p != std::string::npos && p + 4 < model.name.size()) {
-      has_lower[model.name.substr(0, p)] |= model.name.substr(p + 4) != "0";
+    std::string base;
+    const int lod = lod_of(model.name, &base);
+    if (lod >= 0) {
+      auto it = lowest_lod.emplace(base, lod).first;
+      it->second = std::max(it->second, lod);
     }
   }
   for (const auto& model : group.models) {
@@ -3767,19 +3778,18 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
     mark_merc_cull(mm, local_verts, cv, out);  // (AI-assisted) before the generated LOD copies
     out->verts.insert(out->verts.end(), local_verts.begin(), local_verts.end());
     out->models.push_back(mm);
-    // (AI-assisted) a generated low LOD for "<base>-lod0" without lower LODs (not with blend
-    // shapes or rewritten vertices: those move per frame)
-    // (not Jak and Daxter: always close and in view, their look stays the PS2's; (AI-assisted,
-    // j1ocean) not the pickups: power cells, scout flies, orbs always full detail; (opt-audit M6)
-    // nor the far views and Jak II's pickups and gun: c3l::merc_gen_lod_exempt)
-    const auto p = model.name.rfind("-lod0");
-    if (cv.opt.gen_lod_ratio > 0.f && p != std::string::npos && p + 5 == model.name.size() &&
+    // a generated LOD below the model's lowest game LOD ("<base>-lod<N>", the largest N; the
+    // runtime switches to it where its error is under a pixel). Not with blend shapes or
+    // rewritten vertices (those move per frame), not Jak and Daxter (always close), not
+    // c3l::merc_gen_lod_exempt (pickups, far views, Jak II's gun ...)
+    std::string base;
+    const int lod = lod_of(model.name, &base);
+    if (cv.opt.gen_lod_ratio > 0.f && lod >= 0 && lowest_lod[base] == lod &&
         model.name.rfind("eichar-", 0) != 0 && model.name.rfind("sidekick-", 0) != 0 &&
         model.name.rfind("keira-as-", 0) != 0 && !c3l::merc_gen_lod_exempt(model.name) &&
-        !has_lower[model.name.substr(0, p)] && !mm.blerc_count &&
-        out->mod_effects.size() == mod_first) {
+        !mm.blerc_count && out->mod_effects.size() == mod_first) {
       c3l::MercModel gen;
-      lg::debug("merc model {}: only lod0, generating a low LOD", model.name);
+      lg::debug("merc model {}: lowest LOD, generating a low LOD", model.name);
       if (gen_merc_lod(mm, local_verts, cv.opt, out, &gen)) {
         out->models.push_back(gen);
       }
@@ -8597,7 +8607,7 @@ int main(int argc, char** argv) {
                  "(AI-assisted) input GAME.fr3: write KEIRA.c3l, Keira's model from this "
                  "village1.fr3 for the play-as-Keira easter egg (--all makes it too)");
   app.add_option("--gen-lod", opt.gen_lod_ratio,
-                 "merc models with only lod0: a low LOD with this fraction of the triangles (0: "
+                 "merc models' lowest game LOD: a low LOD with this fraction of the triangles (0: "
                  "none)");
   app.add_option("--gen-lod-error", opt.gen_lod_error,
                  "largest error of the generated low LOD, relative to the model's size");
