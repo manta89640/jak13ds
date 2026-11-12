@@ -16,6 +16,9 @@ constexpr float kOldTieLodPx = 4.f;
 constexpr float kOldTieScale = 1.5f;      // (Jak II)
 constexpr float kShrubBandK = 0.5f;
 constexpr float kTieFarMeters = 150.f;
+// Jak II's title screen (its title level loaded, the whole title through): the logo's street view
+// is ~20k far tie triangles over budget at 150 m
+constexpr float kTieFarMetersJak2Title = 120.f;
 
 // a distance limit of the floor (0: none): never under the config's one within ring 0
 inline float ring_limit(float floor_lim, float config_lim, float near_ring) {
@@ -58,7 +61,12 @@ struct Floor {
   float shrub_far = 1.f;           // shrub fade bands beyond ring 0 x this (shrub_band)
   float tie_far = 0.f;             // tie chunks by their vista copies from this (meters, 0: never)
 };
-inline Floor floor_of(float px, float tie, float draw_distance, bool jak1, bool jak2) {
+inline Floor floor_of(float px,
+                      float tie,
+                      float draw_distance,
+                      bool jak1,
+                      bool jak2,
+                      bool jak2_title = false) {
   Floor f;
   f.on = jak1 || jak2;
   f.tie_lod_px = px;
@@ -72,7 +80,8 @@ inline Floor floor_of(float px, float tie, float draw_distance, bool jak1, bool 
     f.tie_distance_scale = (tie > 0 ? tie : draw / 100.f) > kOldTieScale ? kOldTieScale : tie;
   }
   f.shrub_far = kShrubBandK;
-  f.tie_far = draw > kTieFarMeters ? kTieFarMeters : 0.f;
+  const float tie_far = jak2_title ? kTieFarMetersJak2Title : kTieFarMeters;
+  f.tie_far = draw > tie_far ? tie_far : 0.f;
   return f;
 }
 

@@ -11345,9 +11345,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   const CtrSettings& settings = ctr_settings();
   // the fixed detail floor (CtrDetail.h)
+  m_levels->loaded(&m_loaded);
+  bool jak2_title = false;
+  for (const auto* l : m_loaded) {
+    jak2_title = jak2_title || (m_jak2_slot >= 0 && l->name == "title");
+  }
   ctr_detail::Floor dfl = ctr_detail::floor_of(
       settings.tie_lod_px, settings.tie_distance_scale, settings.draw_distance,
-      g_game_version == GameVersion::Jak1, g_game_version == GameVersion::Jak2);
+      g_game_version == GameVersion::Jak1, g_game_version == GameVersion::Jak2, jak2_title);
 #ifndef __3DS__
   static const char* const tie_far_env = getenv("CTR_TIE_FAR_M");  // (host pricing: meters)
   if (tie_far_env && dfl.tie_far > 0) {
