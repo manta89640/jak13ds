@@ -37,6 +37,11 @@ class CtrShadowJak2Renderer : public CtrBucketRenderer {
   void add_face(const u16 idx[3], bool away);
   bool reserve();
   void draw();
+  // A volume (a top vertex upload and its lists) is drawn whole or not at all: a volume missing
+  // faces leaves stencil counts behind (dark streaks). fail() marks the current one, end_volume()
+  // takes it back out if marked.
+  void fail() { m_vol_bad = true; }
+  void end_volume();
 
   float m_clip[16];  // camera space -> clip space, row major (applied by the GPU)
   // (AI-assisted, j2gpu) per upload (0 top, 1 bottom): its data, vertex count and first vertex
@@ -51,10 +56,12 @@ class CtrShadowJak2Renderer : public CtrBucketRenderer {
   bool m_reserved = false, m_full = false;
   int m_nv = 0;
   int m_cap_verts = 0, m_cap_indices = 0;  // the reservation taken this frame
+  int m_vol_nv = 0, m_vol_nf = 0, m_vol_nb = 0;  // where the current volume starts
+  bool m_vol_bad = false;
   std::vector<u16> m_back;
   u8 m_color[4] = {0x80, 0x80, 0x80, 0x80};
   int m_no_room = 0;
   struct Stats {
-    int frames = 0, faces = 0, dropped = 0, clipped = 0;
+    int frames = 0, faces = 0, dropped = 0, clipped = 0;  // dropped: whole volumes
   } m_stats;
 };
