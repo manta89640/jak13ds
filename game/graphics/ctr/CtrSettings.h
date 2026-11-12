@@ -104,6 +104,7 @@ struct CtrSettings {
   bool pica_bench = false;
   // pica_bench = once: only at the first boot (data/log/bench_once.txt marks it, written first)
   bool pica_bench_once = false;
+  std::string pica_bench_marker;  // "once", "once2", ...: data/log/bench_<marker>.txt
   // (AI-assisted) 3DS hardware features (docs/3ds-port/config_ini.md):
   // sprite and HUD textures in the smallest 3DS format that holds them (8 / 16 bits per texel)
   bool compact_textures = true;

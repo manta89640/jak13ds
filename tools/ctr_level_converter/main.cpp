@@ -171,6 +171,7 @@ struct Options {
   // (AI-assisted) meshoptimizer: triangles in vertex cache order (within each draw's visibility
   // runs, for draws whose triangle order doesn't matter), vertices in first-use order
   bool vcache = true;
+  bool strips = true;  // c3l::kDrawStrip: the draws whose order is free as triangle strips
   bool vis_vertex_groups = true;  // (AI-assisted) v18, see group_vertices_by_vis
   // (AI-assisted) v15: the triangle order for a first-in first-out post-vertex cache of this many
   // entries (c3l_opt::vcache_order), coplanar overlapping triangles kept in their order. -1 (the
@@ -395,6 +396,15 @@ struct DrawKey {
            std::tie(o.mode, o.texture, o.kind, o.env, o.cond_bin);
   }
 };
+// A tie or shrub draw mode with blending Cs * As + Cs * (1 - As) (Jak II's ties): the source color, no
+// blending (the runtime draws it so): its opaque form, so that the back face marks and the vertex
+// cache order take it
+inline u32 opaque_mode(DrawMode mode) {
+  if (mode.get_ab_enable() && mode.get_alpha_blend() == DrawMode::AlphaBlend::SRC_SRC_SRC_SRC) {
+    mode.disable_ab();
+  }
+  return mode.as_int();
+}
 // (AI-assisted, j2water2) a key made from dk: its env kept
 inline DrawKey key_like(const DrawKey& dk, u32 mode, u16 texture, u16 kind) {
   DrawKey k = dk;
@@ -1120,8 +1130,8 @@ struct Converter {
     }
     for (const auto& d : tree.static_draws) {
       const u16 tex = texture_id((s32)d.tree_tex_id);
-      note_use(tex, d.mode.as_int(), false);
-      const u32 key = key_id(DrawKey{d.mode.as_int(), tex, 2});
+      note_use(tex, opaque_mode(d.mode), false);
+      const u32 key = key_id(DrawKey{opaque_mode(d.mode), tex, 2});
       const size_t first_tri = tris.size();
       // (AI-assisted, j2vis) v20: a prototype the game hides by task state (Shrub: per draw)
       cur_proto = tree.has_per_proto_visibility_toggle
@@ -2992,8 +3002,8 @@ struct Converter {
     for (u32 di = 0; di < tree.static_draws.size() && di < last_draw; di++) {
       const auto& d = tree.static_draws[di];
       const u16 tex = texture_id(d.tree_tex_id);
-      note_use(tex, d.mode.as_int(), false);
-      u32 key = key_id(DrawKey{d.mode.as_int(), tex, 1});
+      note_use(tex, opaque_mode(d.mode), false);
+      u32 key = key_id(DrawKey{opaque_mode(d.mode), tex, 1});
       const u32 plain_key = key;
       size_t idx = d.unpacked.idx_of_first_idx_in_full_buffer;
       for (auto& g : d.vis_groups) {
@@ -3076,8 +3086,8 @@ struct Converter {
         wind_tree_first.count(cur_tree) ? wind_tree_first[cur_tree] : (u32)UINT32_MAX;
     for (const auto& d : tree.instanced_wind_draws) {
       const u16 tex = texture_id(d.tree_tex_id);
-      note_use(tex, d.mode.as_int(), false);
-      u32 key = key_id(DrawKey{d.mode.as_int(), tex, 1});
+      note_use(tex, opaque_mode(d.mode), false);
+      u32 key = key_id(DrawKey{opaque_mode(d.mode), tex, 1});
       size_t idx = 0;
       for (const auto& g : d.instance_groups) {
         // (AI-assisted) v17: the instance's levels of detail
@@ -6702,6 +6712,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     vg_copies += extra.size();
   };
   size_t vc_kept_pairs = 0;  // (AI-assisted) coplanar overlaps kept in order by vcache_order
+  // kDrawStrip: the draws made strips, their triangles and indices; the lists left, their indices
+  size_t strip_draws = 0, strip_tris = 0, strip_idx = 0, list_draws = 0, list_idx = 0;
   size_t welded_verts = 0;
   // (AI-assisted, j2water2) c3l v21: the envmapped tie base draws (c3l::EnvTieDraw), and per chunk
   // with any the normal of each vertex by its bytes (no two vertices of such a chunk have the same
@@ -7286,6 +7298,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       if (!out_draws.empty() && ch.draw_count) {
         const u32 nv = ch.vertex_count;
         u32 ri = 0;
+        // per run the triangles (their three indices) that overlap another in one plane
+        std::vector<std::set<std::array<u16, 3>>> run_fixed(runs.size());
         for (u32 di = ch.first_draw; di < ch.first_draw + ch.draw_count; di++) {
           const auto& d = out_draws[di];
           DrawMode mode;
@@ -7317,6 +7331,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                 before.resize(n / 3);
                 for (auto [a, b] : pairs) {
                   before[b].push_back(a);
+                  // (the strips keep these triangles as they are, in this order)
+                  for (u32 t : {a, b}) {
+                    run_fixed[ri].insert({(u16)in[3 * t], (u16)in[3 * t + 1], (u16)in[3 * t + 2]});
+                  }
                 }
                 vc_kept_pairs += pairs.size();
               }
@@ -7367,6 +7385,95 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
             idx += n;
           }
           vc_after.add(&out_indices[d.first_index], d.index_count, nv);
+        }
+        // c3l::kDrawStrip: each run of a draw whose order is free as a strip, where the draw gets
+        // shorter by it
+        const u32 chunk_i0 = out_draws[ch.first_draw].first_index;
+        if (opt.strips &&
+            out_draws.back().first_index + out_draws.back().index_count == out_indices.size()) {
+          auto run_strip = [&](const u16* tri, u32 n, const std::set<std::array<u16, 3>>& fixed) {
+            std::vector<unsigned int> free_t;
+            std::vector<std::array<u16, 3>> fixed_t;
+            for (u32 t = 0; t + 2 < n; t += 3) {
+              const std::array<u16, 3> k{tri[t], tri[t + 1], tri[t + 2]};
+              if (fixed.count(k)) {
+                fixed_t.push_back(k);
+              } else {
+                free_t.insert(free_t.end(), {k[0], k[1], k[2]});
+              }
+            }
+            std::vector<u16> out;
+            // a strip after what is there: stitched by repeated indices, begun at an even place
+            auto piece = [&](const unsigned int* p, size_t len) {
+              if (out.empty()) {
+                out.insert(out.end(), 2, (u16)p[0]);
+              } else {
+                out.push_back(out.back());
+                out.push_back((u16)p[0]);
+                if (out.size() & 1) {
+                  out.push_back((u16)p[0]);
+                }
+              }
+              for (size_t i = 0; i < len; i++) {
+                out.push_back((u16)p[i]);
+              }
+            };
+            if (!free_t.empty()) {
+              std::vector<unsigned int> st(meshopt_stripifyBound(free_t.size()));
+              const size_t len = meshopt_stripify(st.data(), free_t.data(), free_t.size(), nv, 0);
+              piece(st.data(), len);
+            }
+            for (const auto& k : fixed_t) {
+              const unsigned int p[3] = {k[0], k[1], k[2]};
+              piece(p, 3);
+            }
+            if (!out.empty()) {
+              out.push_back(out.back());
+              if (out.size() & 1) {
+                out.push_back(out.back());
+              }
+            }
+            return out;
+          };
+          std::vector<u16> ni;
+          u32 r2 = 0;
+          for (u32 di = ch.first_draw; di < ch.first_draw + ch.draw_count; di++) {
+            auto& d = out_draws[di];
+            DrawMode mode;
+            mode.as_int() = d.mode;
+            const bool any_order = !mode.get_ab_enable() && mode.get_depth_write_enable();
+            std::vector<std::vector<u16>> rs;
+            size_t total = 0;
+            u32 idx = d.first_index;
+            const u32 rbeg = r2;
+            for (; r2 < runs.size() && runs[r2].draw == di - ch.first_draw; r2++) {
+              if (any_order) {
+                rs.push_back(run_strip(&out_indices[idx], runs[r2].index_count, run_fixed[r2]));
+                total += rs.back().size();
+              }
+              idx += runs[r2].index_count;
+            }
+            const u32 first = chunk_i0 + (u32)ni.size();
+            if (any_order && total && total < d.index_count && idx == d.first_index + d.index_count) {
+              strip_draws++;
+              strip_tris += d.index_count / 3;
+              strip_idx += total;
+              for (size_t k = 0; k < rs.size(); k++) {
+                runs[rbeg + k].index_count = (u32)rs[k].size();
+                ni.insert(ni.end(), rs[k].begin(), rs[k].end());
+              }
+              d.kind |= c3l::kDrawStrip;
+              d.index_count = (u32)total;
+            } else {
+              list_draws++;
+              list_idx += d.index_count;
+              ni.insert(ni.end(), out_indices.begin() + d.first_index,
+                        out_indices.begin() + d.first_index + d.index_count);
+            }
+            d.first_index = first;
+          }
+          out_indices.resize(chunk_i0);
+          out_indices.insert(out_indices.end(), ni.begin(), ni.end());
         }
         if (opt.vcache) {
           const u32 i0 = out_draws[ch.first_draw].first_index;
@@ -8732,6 +8839,14 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
            level.level_name, opt.etc1_psnr, opt.etc1_block, tstats.tested, tstats.passed,
            tstats.alpha_failed, tstats.merc_face, opt.etc1_merc_min, tstats.merc,
            tstats.bytes_fallback / 1024);
+  if (strip_draws) {
+    lg::info("{}: strips: {} draws, {} tris in {} indices with the stitches ({:.3f} per triangle); {} "
+             "draws stay lists ({} indices: blended or ordered, or no shorter as strips); all "
+             "indices {:.3f} of the lists'",
+             level.level_name, strip_draws, strip_tris, strip_idx,
+             (double)strip_idx / std::max<size_t>(strip_tris, 1), list_draws, list_idx,
+             (double)(strip_idx + list_idx) / std::max<size_t>(3 * strip_tris + list_idx, 1));
+  }
   lg::info("{}: post-vertex cache: vertices shaded per triangle (meshoptimizer's model 8 / 16) "
            "{:.3f} / {:.3f}{}; FIFO 4 / 8 / 16 / 32: {}{}",
            level.level_name, vc_before.shaded8 / std::max<u64>(vc_before.tris, 1),
@@ -9207,6 +9322,8 @@ int main(int argc, char** argv) {
   app.add_option("--block-kb", block_kb, "largest compressed block (KB, raw)");
   bool no_vcache = false;
   app.add_flag("--no-vcache", no_vcache, "keep the triangle and vertex order (no meshoptimizer)");
+  bool no_strips = false;
+  app.add_flag("--no-strips", no_strips, "every draw a triangle list (no c3l::kDrawStrip)");
   bool no_vis_groups = false;
   app.add_flag("--no-vis-vertex-groups", no_vis_groups,
                "(AI-assisted, v18) keep the vertices in first use order (not grouped by visibility "
@@ -9250,6 +9367,7 @@ int main(int argc, char** argv) {
   CLI11_PARSE(app, argc, argv);
   opt.verify = !no_verify;
   opt.vcache = !no_vcache;
+  opt.strips = !no_strips;
   opt.vis_vertex_groups = !no_vis_groups;
   opt.atlas = !no_atlas;
   opt.opaque_alpha = !no_opaque_alpha;

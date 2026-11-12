@@ -1217,6 +1217,105 @@ static void b4(int experiments) {
   lin_free(idx);
 }
 
+/* ---------------- B9: one mesh as a list and as stitched strips ---------------- */
+
+#define B9_N 48    /* cells per side: 4608 triangles of 2 x 2 pixels */
+#define B9_PIECE 4 /* cells per strip (the level runs' strips are about this short) */
+#define B9_DRAWS 16
+
+/* The level meshes' case (c3l::kDrawStrip): the same on-screen triangles as an indexed list (3
+ * indices each) and as strips of B9_PIECE cells stitched the converter's way (the first index
+ * twice, each strip begun at an even place, the last index repeated): ns per triangle of both. */
+static void b9(void) {
+  if (B.dead) {
+    return;
+  }
+  const int nv = (B9_N + 1) * (B9_N + 1), list_n = B9_N * B9_N * 6;
+  VtxS* verts = (VtxS*)lin_alloc((size_t)nv * sizeof(VtxS));
+  u16* list = (u16*)lin_alloc((size_t)list_n * sizeof(u16));
+  u16* strip = (u16*)lin_alloc((size_t)list_n * sizeof(u16));
+  if (!verts || !list || !strip) {
+    bench_emit("[bench] B9 skipped=no_memory");
+    lin_free(verts);
+    lin_free(list);
+    lin_free(strip);
+    return;
+  }
+  for (int y = 0; y <= B9_N; y++) {
+    for (int x = 0; x <= B9_N; x++) {
+      VtxS* v = &verts[y * (B9_N + 1) + x];
+      memset(v, 0, sizeof(*v));
+      v->x = (s16)(-96 + 4 * x);
+      v->y = (s16)(-96 + 4 * y);
+      v->w = 1;
+      v->s = (s16)(x * 64);
+      v->t = (s16)(y * 64);
+      v->r = v->g = v->b = v->a = 255;
+    }
+  }
+  int ln = 0, sn = 0;
+  for (int y = 0; y < B9_N; y++) {
+    for (int x = 0; x < B9_N; x++) {
+      const u16 a = (u16)(y * (B9_N + 1) + x), b = (u16)(a + 1), c = (u16)(a + B9_N + 1),
+                d = (u16)(c + 1);
+      const u16 q[6] = {a, b, c, c, b, d};
+      memcpy(&list[ln], q, sizeof(q));
+      ln += 6;
+    }
+    for (int x0 = 0; x0 < B9_N; x0 += B9_PIECE) {
+      const u16 p0 = (u16)(y * (B9_N + 1) + x0);
+      if (!sn) {
+        strip[sn++] = p0;
+        strip[sn++] = p0;
+      } else {
+        strip[sn] = strip[sn - 1];
+        sn++;
+        strip[sn++] = p0;
+        if (sn & 1) {
+          strip[sn++] = p0;
+        }
+      }
+      for (int x = x0; x <= x0 + B9_PIECE; x++) {
+        strip[sn++] = (u16)(y * (B9_N + 1) + x);
+        strip[sn++] = (u16)((y + 1) * (B9_N + 1) + x);
+      }
+      strip[sn] = strip[sn - 1];
+      sn++;
+      if (sn & 1) {
+        strip[sn] = strip[sn - 1];
+        sn++;
+      }
+    }
+  }
+  GSPGPU_FlushDataCache(verts, (u32)nv * sizeof(VtxS));
+  GSPGPU_FlushDataCache(list, (u32)ln * sizeof(u16));
+  GSPGPU_FlushDataCache(strip, (u32)sn * sizeof(u16));
+  for (int st = 0; st < 2 && !B.dead; st++) {
+    const char* id = st ? "B9.mesh.strip" : "B9.mesh.list";
+    bench_start(id);
+    fb_begin(B.t0);
+    plain_state();
+    use_basic(&B.m_geo, L_SHORT);
+    vbuf(verts, L_SHORT);
+    C3Di_UpdateContext();
+    for (int d = 0; d < B9_DRAWS; d++) {
+      if (st) {
+        C3D_DrawElements(GPU_TRIANGLE_STRIP, sn, C3D_UNSIGNED_SHORT, strip);
+      } else {
+        C3D_DrawElements(GPU_TRIANGLES, ln, C3D_UNSIGNED_SHORT, list);
+      }
+    }
+    Meas m;
+    run_list(3, &m);
+    char extra[64];
+    snprintf(extra, sizeof(extra), " indices=%d", B9_DRAWS * (st ? sn : ln));
+    put_meas(id, B9_DRAWS * (ln / 3), 3, &m, extra);
+  }
+  lin_free(verts);
+  lin_free(list);
+  lin_free(strip);
+}
+
 /* ---------------- B5: attribute fetch ---------------- */
 
 static void b5_one(const char* id, const void* buf, int layout) {
@@ -1927,6 +2026,7 @@ int ctr_gpu_bench_run(void) {
     b6();
     b7_one("B7.px1", 0);
     b7_one("B7.zero", 1);
+    b9();
     b8(B.t0, "n");
     /* register settings the game never used on hardware: colour buffer reads off, the
      * post-vertex cache size */

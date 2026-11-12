@@ -2887,8 +2887,9 @@ void tod_light_table(CtrLevelData::Tod& t) {
     const u32 c = t.muls[j].color;
     const auto it = std::lower_bound(t.lent.begin(), t.lent.begin() + t.lcolors, c);
     if (it != t.lent.begin() + t.lcolors && *it == c) {
+      const u16 at = (u16)(it - t.lent.begin());  // (before the push: it may move lent)
       t.lent.push_back(nc + j);
-      t.lmul_color.push_back((u16)(it - t.lent.begin()));
+      t.lmul_color.push_back(at);
     }
   }
   if (t.lent.size() > 0xffff) {
@@ -2906,8 +2907,10 @@ void tod_light_table(CtrLevelData::Tod& t) {
     }
   }
   t.lday.assign((size_t)t.lcolors * 3, 0);
+  t.ldstamp.assign(t.lcolors, 0);
   t.lrgb.assign(t.lent.size(), 0);
   t.lchg.assign(t.lent.size(), 1);
+  t.lstamp.assign(t.lent.size(), 0);
   t.lday_ver = t.lrgb_ver = t.lprev_ver = 0;
 }
 
@@ -2917,74 +2920,82 @@ u32 tod_light_index(const CtrLevelData::Tod& t, u32 e) {
   return it != t.lent.end() && *it == e ? (u32)(it - t.lent.begin()) : ~0u;
 }
 
-// The compact table brought to version t.ver (as tod_entry_slow: per channel min(255, sum >> 6),
-// the color's alpha; a TodMul from its color's), the day sums first when a day palette moved
+// The compact table's version moved to t.ver: the weights its entries are made with (the day
+// palettes' when one of them moved), each entry made when a drawn light vertex needs it
+// (tod_light_entry)
 void tod_light_refresh(CtrLevelData::Tod& t) {
   if (t.lrgb_ver == t.ver || t.lent.empty() || !t.blended_valid) {
     return;
   }
-  const u32 nc = t.color_count, nl = t.lcolors, ns = t.lslots, stride = t.palette_count * 3;
   const u32 day_last = t.lut[t.track_mask & ~t.light_mask & 0xff];
   if (t.lday_ver != day_last || !t.lday_ver) {
     t.lday_ver = std::max<u32>(day_last, 1);
-    u32 dslot[8], wr[8], wg[8], wb[8], nd = 0;
+    t.lnd = 0;
     for (u32 k = 0; k < t.palette_count; k++) {
       const u32 p = t.palettes[k];
       if (!(t.light_mask >> p & 1) && (t.target_w[p][0] | t.target_w[p][1] | t.target_w[p][2])) {
-        dslot[nd] = k * 3;
-        wr[nd] = t.target_w[p][0];
-        wg[nd] = t.target_w[p][1];
-        wb[nd] = t.target_w[p][2];
-        nd++;
+        t.ldslot[t.lnd] = (u8)(k * 3);
+        memcpy(t.ldw[t.lnd], t.target_w[p], 3);
+        t.lnd++;
       }
     }
-    const u8* const colors = t.colors.data();
-    u32* const lday = t.lday.data();
-    for (u32 k = 0; k < nl; k++) {
-      const u8* src = colors + (size_t)t.lent[k] * stride;
-      u32 r = 0, g = 0, b = 0;
-      for (u32 d = 0; d < nd; d++) {
-        const u8* x = src + dslot[d];
-        r += wr[d] * x[0];
-        g += wg[d] * x[1];
-        b += wb[d] * x[2];
-      }
-      lday[3 * k] = r;
-      lday[3 * k + 1] = g;
-      lday[3 * k + 2] = b;
-    }
   }
-  u32 lr[8], lg_[8], lb[8];
-  for (u32 s = 0; s < ns; s++) {
-    const u32 p = t.palettes[t.lslot[s]];
-    lr[s] = t.target_w[p][0];
-    lg_[s] = t.target_w[p][1];
-    lb[s] = t.target_w[p][2];
-  }
-  const u32* const lday = t.lday.data();
-  const u8* rows = t.lrows.data();
-  u32* const lrgb = t.lrgb.data();
-  u8* const lchg = t.lchg.data();
-  for (u32 k = 0; k < nl; k++, rows += 3 * ns) {
-    u32 r = lday[3 * k], g = lday[3 * k + 1], b = lday[3 * k + 2];
-    for (u32 s = 0; s < ns; s++) {
-      r += lr[s] * rows[3 * s];
-      g += lg_[s] * rows[3 * s + 1];
-      b += lb[s] * rows[3 * s + 2];
-    }
-    const u32 rgba = std::min<u32>(255, r >> 6) | std::min<u32>(255, g >> 6) << 8 |
-                     std::min<u32>(255, b >> 6) << 16 | tod_alpha_of(t, t.lent[k]);
-    lchg[k] = rgba != lrgb[k];
-    lrgb[k] = rgba;
-  }
-  const c3l::TodMul* const muls = t.muls.data();
-  for (u32 k = nl; k < (u32)t.lent.size(); k++) {
-    const u32 rgba = tod_mul_rgb(lrgb[t.lmul_color[k - nl]], muls[t.lent[k] - nc]);
-    lchg[k] = rgba != lrgb[k];
-    lrgb[k] = rgba;
+  for (u32 s = 0; s < t.lslots; s++) {
+    memcpy(t.lw[s], t.target_w[t.palettes[t.lslot[s]]], 3);
   }
   t.lprev_ver = t.lrgb_ver;
   t.lrgb_ver = t.ver;
+}
+
+// Compact entry k at the table's version (as tod_entry_slow: per channel min(255, sum >> 6), the
+// color's alpha; a TodMul from its color's), made at its first use since the version moved; its
+// change against its last making (a group holding the refresh before made it then)
+inline void tod_light_color(CtrLevelData::Tod& t, u32 k) {
+  if (t.lstamp[k] == t.lrgb_ver) {
+    return;
+  }
+  t.lstamp[k] = t.lrgb_ver;
+  u32* const day = &t.lday[3 * k];
+  if (t.ldstamp[k] != t.lday_ver) {
+    t.ldstamp[k] = t.lday_ver;
+    const u8* src = t.colors.data() + (size_t)t.lent[k] * t.palette_count * 3;
+    u32 r = 0, g = 0, b = 0;
+    for (u32 d = 0; d < t.lnd; d++) {
+      const u8* x = src + t.ldslot[d];
+      r += t.ldw[d][0] * x[0];
+      g += t.ldw[d][1] * x[1];
+      b += t.ldw[d][2] * x[2];
+    }
+    day[0] = r;
+    day[1] = g;
+    day[2] = b;
+  }
+  const u8* rows = &t.lrows[(size_t)k * t.lslots * 3];
+  u32 r = day[0], g = day[1], b = day[2];
+  for (u32 s = 0; s < t.lslots; s++, rows += 3) {
+    r += t.lw[s][0] * rows[0];
+    g += t.lw[s][1] * rows[1];
+    b += t.lw[s][2] * rows[2];
+  }
+  const u32 rgba = std::min<u32>(255, r >> 6) | std::min<u32>(255, g >> 6) << 8 |
+                   std::min<u32>(255, b >> 6) << 16 | tod_alpha_of(t, t.lent[k]);
+  t.lchg[k] = rgba != t.lrgb[k];
+  t.lrgb[k] = rgba;
+}
+inline void tod_light_entry(CtrLevelData::Tod& t, u32 k) {
+  if (k < t.lcolors) {
+    tod_light_color(t, k);
+    return;
+  }
+  if (t.lstamp[k] == t.lrgb_ver) {
+    return;
+  }
+  const u32 c = t.lmul_color[k - t.lcolors];
+  tod_light_color(t, c);
+  t.lstamp[k] = t.lrgb_ver;
+  const u32 rgba = tod_mul_rgb(t.lrgb[c], t.muls[t.lent[k] - t.color_count]);
+  t.lchg[k] = rgba != t.lrgb[k];
+  t.lrgb[k] = rgba;
 }
 
 // The title's entry copies (Tod::chunk_entries): u32 count, then the entries
@@ -4069,6 +4080,7 @@ u32 tod_light_write(CtrLevelData& lev, size_t ci, const u8* shown) {
     const bool part = gr.lver && gr.lver == prev;
     for (; it < end && (*it & 0xffff) <= ghi; it++) {
       const u32 x = *it, k = x >> 16, vi = x & 0xffff;
+      tod_light_entry(t, k);
       if (part && !lchg[k]) {
         continue;
       }
@@ -6242,6 +6254,9 @@ void build_draw_order(CtrLevelData* out) {
     if (d.kind & c3l::kDrawAtlasUV) {
       st.tcc |= CTR_TCC_ST_ATLAS;
     }
+    if (d.kind & c3l::kDrawStrip) {
+      st.flags |= CTR_STATE_STRIP;
+    }
     // (AI-assisted) fog_alpha: the vertex alpha is 0x80 everywhere in this draw
     const size_t di = out->draw_states.size();
     if (di < out->draw_alpha80.size() && out->draw_alpha80[di]) {
@@ -8151,7 +8166,15 @@ void CtrLevels::process_pending_loads(u64 frame) {
     update_level_count();
   }
   stream_take_pending(frame);  // (AI-assisted, streaming) the near chunks read, colored
-  stream_update(frame);        // (AI-assisted, streaming) the near chunks around the camera
+  // the near chunks around the camera: every other frame (its lead is 2 s of the camera's
+  // travel; 1.4-2.7 ms a call on hardware), every frame while the screen is black or after a cut
+  constexpr u64 kHurryFrames = 90;  // (as stream_update's burst after a cut)
+  const bool stream_hurry = m_game_black.load(std::memory_order_relaxed) ||
+                            m_hold_black.load(std::memory_order_relaxed) ||
+                            (m_cut_frame && frame < m_cut_frame + kHurryFrames);
+  if (!(frame & 1) || stream_hurry) {
+    stream_update(frame);
+  }
   tod_sweep(frame);
   // (AI-assisted) levels that loaded with parts left out (no memory then): made again once the last
   // frame's free linear memory covers them (another level was unloaded, or this one's textures

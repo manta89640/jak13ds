@@ -727,6 +727,12 @@ constexpr uint16_t kDrawAlpha80 = 0x1000;
 // back faces may be culled; a reader without them draws both sides.
 constexpr uint16_t kDrawCullCond = 0x2000;
 // 0x4000: retired (a terrain back face mark); readers draw both sides
+// kDrawStrip: the draw's indices are a triangle strip, not a list (the PICA200 takes as long per
+// index either way: a strip's triangle costs one index, a list's three). Each run (VisRun) is a strip
+// of its own of even length: its first index twice, its strips stitched by repeated indices (each
+// starting at an even place: the winding holds), its last index repeated. So any row of consecutive
+// runs is one strip too, and a run's triangles are index_count - 2 with those without area.
+constexpr uint16_t kDrawStrip = 0x8000;
 constexpr uint32_t kAtlasVersion = 15;
 
 /*!

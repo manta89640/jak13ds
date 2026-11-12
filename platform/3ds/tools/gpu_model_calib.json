@@ -29,5 +29,19 @@
   },
   "windows": 133,
   "bound": 14
+ },
+ "p3d": {
+  "source": "hw-nov12e",
+  "costs_ns": {
+   "draws": 460,
+   "binds": 185,
+   "stchg": 150,
+   "progsw": 1370,
+   "unif": 9,
+   "vcost": 1.0,
+   "px": 4.8,
+   "tex_kb16": 45,
+   "copy_rows": 7460
+  }
  }
 }

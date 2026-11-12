@@ -79,6 +79,9 @@ enum {
   /* opaque, depth tested GEQUAL and written, never discarded by the alpha test (the level
    * renderer's draw lists; the GPU layer ignores it) */
   CTR_STATE_EARLY_DEPTH = 1,
+  /* a level mesh draw (ctr_gpu_draw_mesh_*, ctr_gpu_etie_draw) whose indices are a triangle strip
+   * (c3l::kDrawStrip), not a list */
+  CTR_STATE_STRIP = 2,
   /* (AI-assisted) the stencil buffer (only when ctr_gpu_has_stencil): STENCIL_SET marks the pixels
    * the draw writes (where it passes the depth test), STENCIL_OUT draws only where none is marked.
    * The marks are cleared with the depth buffer at the frame start. The ocean's near grid marks,

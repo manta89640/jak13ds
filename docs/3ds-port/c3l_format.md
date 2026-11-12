@@ -207,8 +207,19 @@ share none), the triangles of each visibility run of a draw without blending tha
 put in vertex cache order (blended draws and decals keep their order), then the vertices in
 first-use order (`optimizeVertexFetchRemap`). The GPU's post-vertex cache is cleared before every
 draw (citro3d and the raw draws alike), and the runs of a draw may be drawn on
-their own, so each run starts with an empty cache. The draws are indexed triangle lists (no strips:
-the PICA200 has no restart index, and a list keeps every triangle's own corner order).
+their own, so each run starts with an empty cache. The draws were indexed triangle lists until `kDrawStrip`.
+
+`kDrawStrip` (`Draw::kind` 0x8000, `--no-strips`: none): the draw's indices are a triangle strip. The
+console takes as long per index either way (pica_bench B4 / B7, hw-nov12e: 48.6 ns per index, so
+145.8 ns per list triangle and 48.9 ns per strip triangle, and it reuses no vertex across a list), so
+what counts is indices per triangle. Each run (`VisRun`) of a draw whose order is free (no blending,
+depth written) becomes strips (meshoptimizer's stripifier) stitched by repeated indices: the run's
+first index twice, every strip begun at an even place (the winding holds for back face culling), the
+last index repeated to an even length. Any row of consecutive runs is then one strip too, so the
+runtime still draws ranges of runs in one call. Triangles that overlap another in one plane stay out
+of the stripifier and follow as single triangles in their order. A draw stays a list where strips
+would be longer (shrub quads) or its order matters. Jak 1 levels: 0.60-0.66 of the lists' indices
+(1.80 per stripped triangle); ctysluma 0.76 (2.06).
 Misty: 1.55 -> 1.27 vertices shaded per triangle (FIFO 16).
 
 (AI-assisted) v15 (`--vcache-fifo`): the cache's size and policy aren't documented
