@@ -15,9 +15,9 @@
  *    GPU texture instead (ctr_gpu_anim_slot_set). Sources from texanim.c3t (next to the .c3l
  *    files, kept open), read when the game first sends an animation's array or group and kept;
  *    an animation the game stops sending gives its texture back after kIdleFrames frames.
- *    Outputs at most 64 x 64 (fixed animations 32 x 32); a fixed animation (and the slime) is made
+ *    Outputs at most 64 x 64; a fixed animation (and the slime) is made
  *    the first time the game sends it, then runs only while its slot is drawn
- *    (ctr_gpu_anim_slots_drawn), at most every kFixedRate frames and only when its input changed;
+ *    (ctr_gpu_anim_slots_drawn), every frame its input changed;
  *    a CLUT blend only when its weight changes.
  */
 
@@ -163,7 +163,7 @@ class CtrTexAnimJak2 {
   std::vector<float> m_slime_acc;
 
  public:
-  static constexpr int kFixedRate = 3;
-  static constexpr int kFixedMax = 32;
+  static constexpr int kFixedRate = 1;
+  static constexpr int kFixedMax = 64;
   static constexpr int kIdleFrames = 300;
 };

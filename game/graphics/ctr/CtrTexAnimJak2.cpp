@@ -706,7 +706,7 @@ void CtrTexAnimJak2::fixed_anim(int array, int anim, float time, const u8* vals,
     return;
   }
   auto* o = ready(d.out, w, h);
-  // redrawn every kFixedRate frames, if its input changed
+  // redrawn at most once a frame (kFixedRate), if its input changed
   const size_t n = 4 + (size_t)nvals;
   if (o->tex >= 0 && (m_frame - o->drawn_frame < (u64)kFixedRate ||
                       (o->input.size() == n && !memcmp(o->input.data(), &time, 4) &&
