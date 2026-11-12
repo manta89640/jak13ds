@@ -172,7 +172,7 @@ void report_failure(size_t n, const char* what) {
 }
 
 // ---- (AI-assisted, lavamem) large blocks from linear memory when the heap has none ----
-constexpr size_t kLinearMin = 64 * 1024;
+constexpr size_t kLinearMin = 16 * 1024;
 // A last resort only: linear memory is the near-chunk stream arena's (it grows into what's free
 // down to its 3 MB floor, stream_reserve_kb) and the level loads'. Such a block leaves g_linear_floor
 // free, and all of them together are at most kLinearMax. (AI-assisted, streammem) The floor was a
