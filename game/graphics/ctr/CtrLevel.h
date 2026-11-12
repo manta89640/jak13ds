@@ -624,15 +624,24 @@ struct CtrLevelData {
   std::vector<s32> chunk_morph;
   std::vector<u32> draw_morph_rows;  // per draw of a morph chunk: its list in morph_draw_rows
   // the color targets (c3l::ExtMorph::colors_offset): per instance 1 when its rows carry band 1,
-  // the chunks' palettes; per morph chunk its palette (first, count), the palettes its colors use
-  // (bit 8: known), the time of day version and the mesh its words were written at
+  // the chunks' palettes and their rgb as the targets were last written from (morph_pal, made at
+  // the first write); per morph chunk its palette (first, count), the palettes its colors use
+  // (bit 8: known), the time of day version and mesh its words were written at, the rows whose
+  // words are current (bit r), its light slots (palette indices with a light palette) and the
+  // vertices of a moving row using one (v | a << 16 | b << 24, by row: runs row | count << 8;
+  // made at the first light-only rewrite; ~0u: not made)
   std::vector<u8> morph_band1;
   std::vector<u16> morph_palette;
+  std::vector<u32> morph_pal;
   struct MorphColors {
     u32 first = 0, count = 0, mask = 0, ver = 0;
     int mesh = -1;
+    u32 rows[8] = {};
+    u32 lights_first = ~0u, runs_first = 0, light_runs = 0, slots_first = 0, light_slots = 0;
   };
   std::vector<MorphColors> morph_colors;
+  std::vector<u32> morph_light_verts, morph_light_runs;
+  std::vector<u8> morph_light_slots;
   bool morph_group(size_t g) const { return g < group_mid.size() && group_mid[g] > 0; }
   bool morph_colored(size_t ci) const {
     return ci < chunk_morph.size() && chunk_morph[ci] >= 0 &&
@@ -1444,6 +1453,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_ph_draws = 0, m_ph_emits = 0, m_ph_runs = 0, m_ph_walked = 0, m_ph_calls = 0;
   u64 m_ph_skipped = 0, m_ph_lod_skipped = 0;  // chunks / tie LOD groups their cluster stood for
   u64 m_back_pending = 0;  // backend ticks not yet moved to kPhFlush
+  u64 m_tod_pending = 0;   // tie morph color ticks in a later phase, moved to kPhTod
   u32 m_late_in_view = 0;  // (AI-assisted, j2intro) draw_level: missing in view (note_late_in_view)
   // (AI-assisted, gpu-rt) a pass's draws (flush_calls)
   std::vector<ctr_mesh_call> m_calls;
@@ -1501,6 +1511,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   std::vector<float> m_morph_rows;
   std::vector<s32> m_morph_row_of;
   std::vector<u32> m_morph_row_id;
+  std::vector<u8> m_morph_col_done;  // per slot: its color targets brought up to date
   void draw_wind_calls(const CtrLevelData& lev);
   void draw_env_calls(std::vector<EnvCall>& calls);
   CtrLevels* m_levels;
@@ -1595,6 +1606,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_tf_groups[3] = {0, 0, 0};
   u64 m_tf_tris[2] = {0, 0};
   u64 m_tf_colors_written = 0, m_tf_frames = 0;
+  u64 m_tie_colors_written = 0, m_tie_colors_ticks = 0, m_tf_colors_ticks = 0;
   u64 m_morph_prog_tris[2] = {0, 0};  // triangles drawn by the tie / tfrag morph programs
   std::vector<int> m_visible_slot;  // per chunk: index in m_visible, -1: not drawn
   // (AI-assisted) with vista chunks: the visible draws of early_draws, sorted_draws and

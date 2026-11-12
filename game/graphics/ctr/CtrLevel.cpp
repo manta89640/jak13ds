@@ -110,13 +110,17 @@ Holes g_holes;
 void tod_drop_entries(CtrLevelData::Tod& t, size_t ci);
 bool dist_frees(const CtrLevelData& lev, size_t ci);
 // chunk ci's mesh freed or made again (a later mesh may get the same id): its time of day and
-// tfrag morph colors are made again
+// tfrag / tie morph colors are made again
 void forget_chunk_colors(CtrLevelData& lev, size_t ci) {
   if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
     lev.tod->chunk_mesh[ci] = -1;
   }
   if (ci < lev.tf_mesh.size()) {
     lev.tf_mesh[ci] = -1;
+  }
+  if (ci < lev.chunk_morph.size() && lev.chunk_morph[ci] >= 0 &&
+      (size_t)lev.chunk_morph[ci] < lev.morph_colors.size()) {
+    lev.morph_colors[lev.chunk_morph[ci]].mesh = -1;
   }
 }
 // (AI-assisted, title3) host diagnostic, env CTR_POP_LOG: per level draw, what changed on screen
@@ -4295,9 +4299,12 @@ u32 tf_morph_colors(CtrLevelData& lev, size_t ci, const u8* shown) {
 }
 
 // The tie geomorph's color targets (c3l::MorphChunk::colors): each vertex's target rgb (the mean
-// of two of the chunk's palette colors) in chunk ci's tail, when a palette its colors use moved
-// since they were written. Returns the vertices written.
-u32 tie_morph_colors(CtrLevelData& lev, size_t ci) {
+// of two of the chunk's palette colors) in chunk ci's tail, made current before the chunk's first
+// morph draw of a frame for the rows whose color factor isn't 0 (rows: the slot's morph rows; a
+// target of another row is multiplied by 0). A row that starts moving gets all of its vertices,
+// the others those using a palette color that changed (when only light palettes moved: from the
+// chunk's light list). Returns the vertices written.
+u32 tie_morph_colors(CtrLevelData& lev, size_t ci, const float* rows) {
   auto& t = *lev.tod;
   const int mesh = ci < lev.meshes.size() ? lev.meshes[ci] : -1;
   if (mesh < 0 || !t.blended_valid || !lev.morph_colored(ci)) {
@@ -4317,7 +4324,29 @@ u32 tie_morph_colors(CtrLevelData& lev, size_t ci) {
     }
     mc.mask = m;
   }
-  if (mc.ver && mc.ver >= t.lut[mc.mask & 0xff]) {
+  // the rows read this frame (bit r; a row past the chunk's: always)
+  const u32 lim =
+      std::min<u32>(lev.morph_chunks[lev.chunk_morph[ci]].row_count, c3l::kMorphRows - 1);
+  u32 act[8], fresh[8];
+  for (u32 k = 0; k < 8; k++) {
+    act[k] = 32 * k > lim ? ~0u : 32 * k + 31 <= lim ? 0u : ~0u << (lim - 32 * k + 1);
+  }
+  bool any_row = false;
+  for (u32 r = 1; r <= lim; r++) {
+    if (rows[4 * r + 2] != 0.f) {
+      act[r >> 5] |= 1u << (r & 31);
+      any_row = true;
+    }
+  }
+  if (!mc.ver) {
+    std::fill(mc.rows, mc.rows + 8, 0u);
+  }
+  u32 any_fresh = 0;
+  for (u32 k = 0; k < 8; k++) {
+    fresh[k] = act[k] & ~mc.rows[k];
+    any_fresh |= fresh[k];
+  }
+  if (!any_row || (mc.ver && mc.ver >= t.lut[mc.mask & 0xff] && !any_fresh)) {
     return 0;
   }
   int n = 0;
@@ -4325,25 +4354,142 @@ u32 tie_morph_colors(CtrLevelData& lev, size_t ci) {
   if (!base || (u32)n != lev.chunks[ci].vertex_count) {
     return 0;
   }
-  mc.ver = std::max<u32>(t.ver, 1);
+  if (lev.morph_pal.size() != lev.morph_palette.size()) {
+    lev.morph_pal.assign(lev.morph_palette.size(), 0);
+    for (auto& x : lev.morph_colors) {
+      x.ver = 0;
+    }
+    std::copy(act, act + 8, fresh);
+  }
   const u8* const rec = base + lev.normals_offset_in_mesh(ci);
   tod_word* const col = (tod_word*)(base + lev.morph_colors_offset(ci));
-  u32 pal[256];
-  for (u32 i = 0; i < 256; i++) {
-    const u32 e = i < mc.count ? lev.morph_palette[mc.first + i] : nt;
-    pal[i] = e < nt ? tod_entry(t, e) : 0u;
+  const u16* const palette = lev.morph_palette.data() + mc.first;
+  u32* const pal = lev.morph_pal.data() + mc.first;
+  u32 moved = 0xff;
+  if (mc.ver) {
+    moved = 0;
+    for (u32 pm = mc.mask & 0xff; pm; pm &= pm - 1) {
+      moved |= t.pal_ver[__builtin_ctz(pm)] > mc.ver ? 1u << __builtin_ctz(pm) : 0;
+    }
+  }
+  const bool light_only = mc.ver && !(moved & ~t.light_mask) && n <= 0x10000;
+  auto bit = [](const u32* m, u32 i) { return (m[i >> 5] >> (i & 31)) & 1; };
+  if (light_only && mc.lights_first == ~0u) {
+    u32 light[8] = {};
+    mc.slots_first = (u32)lev.morph_light_slots.size();
+    for (u32 i = 0; i < mc.count; i++) {
+      if (palette[i] < nt && (t.color_mask[palette[i]] & t.light_mask)) {
+        light[i >> 5] |= 1u << (i & 31);
+        lev.morph_light_slots.push_back((u8)i);
+      }
+    }
+    mc.light_slots = (u32)lev.morph_light_slots.size() - mc.slots_first;
+    // (by row: a counting sort)
+    u32 per_row[256] = {};
+    for (int pass = 0; pass < 2; pass++) {
+      for (u32 v = 0; v < (u32)n && mc.light_slots; v++) {
+        const u32 a = rec[8 * v + 7], b = col[v] >> 24, r = rec[8 * v + 3];
+        if (!r || a >= mc.count || b >= mc.count || !((bit(light, a) | bit(light, b)))) {
+          continue;
+        }
+        if (pass == 0) {
+          per_row[r]++;
+        } else {
+          lev.morph_light_verts[per_row[r]++] = v | a << 16 | b << 24;
+        }
+      }
+      if (pass == 0) {
+        mc.lights_first = (u32)lev.morph_light_verts.size();
+        mc.runs_first = (u32)lev.morph_light_runs.size();
+        u32 at = mc.lights_first;
+        for (u32 r = 1; r < 256; r++) {
+          if (per_row[r]) {
+            lev.morph_light_runs.push_back(r | per_row[r] << 8);
+            const u32 c = per_row[r];
+            per_row[r] = at;
+            at += c;
+          }
+        }
+        mc.light_runs = (u32)lev.morph_light_runs.size() - mc.runs_first;
+        lev.morph_light_verts.resize(at);
+      }
+    }
+  }
+  // the palette colors whose palettes moved since the words were written: those that changed
+  u32 changed[8] = {};
+  bool any_changed = false;
+  auto refresh = [&](u32 i) {
+    const u32 e = palette[i];
+    if (mc.ver && e < nt && !(t.color_mask[e] & moved)) {
+      return;
+    }
+    const u32 c = e < nt ? tod_entry(t, e) & 0xffffffu : 0u;
+    if (c != pal[i]) {
+      pal[i] = c;
+      changed[i >> 5] |= 1u << (i & 31);
+      any_changed = true;
+    }
+  };
+  if (light_only) {
+    for (u32 k = 0; k < mc.light_slots; k++) {
+      refresh(lev.morph_light_slots[mc.slots_first + k]);
+    }
+  } else {
+    for (u32 i = 0; i < mc.count; i++) {
+      refresh(i);
+    }
+  }
+  if (!mc.ver) {
+    std::fill(changed, changed + 8, ~0u);  // (the file's words)
+    any_changed = true;
+  }
+  mc.ver = std::max<u32>(t.ver, 1);
+  std::copy(act, act + 8, mc.rows);
+  if (!any_fresh && !any_changed) {
+    return 0;
   }
   auto avg = [](u32 a, u32 b) { return (a & b) + (((a ^ b) & 0xfefefefeu) >> 1); };
-  u32 written = 0;
-  for (u32 v = 0; v < (u32)n; v++) {
-    const u32 w = col[v], a = rec[8 * v + 7], b = w >> 24;
-    if (a >= mc.count || b >= mc.count) {
-      continue;
+  u32 written = 0, lo = UINT32_MAX, hi = 0;
+  auto write = [&](u32 v) {
+    const u32 w = col[v], a = rec[8 * v + 7], b = w >> 24, r = rec[8 * v + 3];
+    if (a >= mc.count || b >= mc.count || !bit(act, r) ||
+        !(bit(fresh, r) || bit(changed, a) || bit(changed, b))) {
+      return;
     }
-    col[v] = (w & 0xff000000u) | (avg(pal[a], pal[b]) & 0xffffffu);
+    col[v] = (w & 0xff000000u) | avg(pal[a], pal[b]);
+    lo = std::min(lo, v);
+    hi = std::max(hi, v);
     written++;
+  };
+  if (light_only && !any_fresh) {
+    // (the list holds each vertex's slots: the mesh is only written)
+    const u32* e = lev.morph_light_verts.data() + mc.lights_first;
+    const u32* const runs = lev.morph_light_runs.data() + mc.runs_first;
+    for (u32 k = 0; k < mc.light_runs; k++) {
+      const u32* const end = e + (runs[k] >> 8);
+      if (!bit(act, runs[k] & 0xff)) {
+        e = end;
+        continue;
+      }
+      for (; e < end; e++) {
+        const u32 x = *e, a = (x >> 16) & 0xff, b = x >> 24;
+        if (bit(changed, a) | bit(changed, b)) {
+          const u32 v = x & 0xffff;
+          col[v] = b << 24 | avg(pal[a], pal[b]);
+          lo = std::min(lo, v);
+          hi = std::max(hi, v);
+          written++;
+        }
+      }
+    }
+  } else {
+    for (u32 v = 0; v < (u32)n; v++) {
+      write(v);
+    }
   }
-  tod_dirty().emplace_back((uintptr_t)col, (uintptr_t)(col + n));
+  if (written) {
+    tod_dirty().emplace_back((uintptr_t)(col + lo), (uintptr_t)(col + hi + 1));
+  }
   return written;
 }
 
@@ -5287,6 +5433,9 @@ void load_morph(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   lev->morph_colors.clear();
   lev->morph_band1.clear();
   lev->morph_palette.clear();
+  lev->morph_pal.clear();
+  lev->morph_light_verts.clear();
+  lev->morph_light_slots.clear();
   c3l::ExtHeader eh;
   if (!hdr.ext_offset || lev->lod_groups.empty() || !read_ext_header(f, hdr, &eh) ||
       eh.size < c3l::kExtHeaderMorphSize) {
@@ -11163,22 +11312,26 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
     // (AI-assisted) c3l v17 tie levels of detail
     const double n = (double)m_lod_frames;
     lg::info("[ctr] {}: tie levels of detail: {:.0f} groups near, {:.0f} near + {:.0f} far version "
-             "tris drawn ({:.0f} by the morph program) per level draw ({} level draws)",
+             "tris drawn ({:.0f} by the morph program), {:.0f} morph color targets written "
+             "({:.3f} ms) per level draw ({} level draws)",
              m_name, m_lod_groups_near / n, m_lod_tris[0] / n, m_lod_tris[1] / n,
-             m_morph_prog_tris[0] / n, m_lod_frames);
+             m_morph_prog_tris[0] / n, m_tie_colors_written / n,
+             ctr_gpu_ticks_to_ms(m_tie_colors_ticks) / n, m_lod_frames);
     m_lod_groups_near = m_lod_frames = m_lod_tris[0] = m_lod_tris[1] = m_morph_prog_tris[0] = 0;
+    m_tie_colors_written = m_tie_colors_ticks = 0;
   }
   if (rs.log_now && m_tf_frames) {
     // the PS2's tfrag geomorph (c3l::ExtTfrag)
     const double n = (double)m_tf_frames;
     lg::info("[ctr] {}: tfrag geomorph: groups near / mid / far {:.0f} / {:.0f} / {:.0f}, {:.0f} "
              "near + mid ({:.0f} by the morph program) and {:.0f} far version tris drawn, {:.0f} "
-             "morph colors written per level draw ({} level draws)",
+             "morph colors written ({:.3f} ms) per level draw ({} level draws)",
              m_name, m_tf_groups[0] / n, m_tf_groups[1] / n, m_tf_groups[2] / n, m_tf_tris[0] / n,
-             m_morph_prog_tris[1] / n, m_tf_tris[1] / n, m_tf_colors_written / n, m_tf_frames);
+             m_morph_prog_tris[1] / n, m_tf_tris[1] / n, m_tf_colors_written / n,
+             ctr_gpu_ticks_to_ms(m_tf_colors_ticks) / n, m_tf_frames);
     m_tf_groups[0] = m_tf_groups[1] = m_tf_groups[2] = m_tf_tris[0] = m_tf_tris[1] = 0;
     m_morph_prog_tris[1] = 0;
-    m_tf_colors_written = m_tf_frames = 0;
+    m_tf_colors_written = m_tf_frames = m_tf_colors_ticks = 0;
   }
   if (rs.log_now && m_tod_frames) {
     lg::info("[ctr] {}: time of day {} blends, {:.0f} vertices recolored ({:.0f} light) {:.2f} ms "
@@ -11200,6 +11353,7 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
 // (AI-assisted, gpu-rt) the pass's draws collected by draw_level, to the backend (0: the main
 // pass, 1: the vista pass)
 void CtrTfragRenderer::flush_calls(int /*pass*/) {
+  tod_finish();  // (the tie morph color targets written by the draws)
   if (!m_calls.empty()) {
     const u64 t0 = ctr_gpu_ticks();
     ctr_gpu_draw_mesh_calls(m_calls.data(), (int)m_calls.size());
@@ -11220,7 +11374,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   m_back_pending = 0;
   auto phase = [&](int k) {
     const u64 now = ctr_gpu_ticks();
-    m_ph[k] += now - ph_t - m_back_pending;
+    m_ph[k] += now - ph_t - m_back_pending - m_tod_pending;
+    m_ph[kPhTod] += m_tod_pending;
+    m_tod_pending = 0;
     m_ph[kPhFlush] += m_back_pending;
     m_back_pending = 0;
     ph_t = now;
@@ -13088,10 +13244,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     for (const auto& vc : m_visible) {
       if (vc.tmorph) {
+        const u64 c0 = ctr_gpu_ticks();
         m_tf_colors_written += tf_morph_colors(lev, vc.chunk, shown_of(vc));
-      }
-      if (lev.morph_colored(vc.chunk)) {
-        m_tf_colors_written += tie_morph_colors(lev, vc.chunk);
+        m_tf_colors_ticks += ctr_gpu_ticks() - c0;
       }
     }
     tod_finish();
@@ -13350,6 +13505,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     size_t n = 0;
     m_morph_row_of.assign(m_visible.size(), -1);
     m_morph_row_id.assign(m_visible.size(), 0);
+    m_morph_col_done.assign(m_visible.size(), 0);
     for (size_t slot = 0; slot < m_visible.size(); slot++) {
       const s32 mi = lev.chunk_morph[m_visible[slot].chunk];
       if (mi >= 0) {
@@ -13536,6 +13692,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const float* const mrows = morph ? morph_rows_of(slot) : nullptr;
     const int moff = morph ? (int)lev.normals_offset_in_mesh(vc.chunk) : 0;
     const int mcoff = morph ? (int)lev.morph_colors_offset(vc.chunk) : 0;
+    if (mcoff && lev.tod && !m_morph_col_done[slot]) {
+      // (written here, flushed by flush_calls before the draw goes to the GPU)
+      m_morph_col_done[slot] = 1;
+      const u64 c0 = ctr_gpu_ticks();
+      m_tie_colors_written += tie_morph_colors(lev, vc.chunk, mrows);
+      const u64 dt = ctr_gpu_ticks() - c0;
+      m_tie_colors_ticks += dt;
+      m_tod_pending += dt;
+      tod_ms += ctr_gpu_ticks_to_ms(dt);
+    }
     // the tfrag geomorph: a chunk with near or mid versions shown
     const bool tmorph = vc.tmorph && !vista_pass && !wind && env < 0;
     if (part == kPartMoving && !tmorph) {
