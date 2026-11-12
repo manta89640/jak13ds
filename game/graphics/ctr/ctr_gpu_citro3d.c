@@ -373,6 +373,12 @@ static struct {
   C3D_Tex fog_tex;        /* 64x8: alpha ramp 0..1 along s, fog color */
   uint32_t fog_tex_rgb;
   int fog_tex_valid;
+  /* the level meshes' fog table (fog_lut_update): A8, the fog per clip w at s = lut_k * w + lut_c */
+  C3D_Tex lut_tex;
+  int lut_valid;
+  float lut_k, lut_c;
+  uint32_t lut_gen;      /* changes with lut_k / lut_c (never 0) */
+  uint32_t last_clip_lut; /* the clip uniform's rows 4-5: the fog table row (1) or the fog rows */
   DVLB_s* clip_dvlb; /* immediate draws in clip space (ctr_clip.v.pica) */
   DVLB_s* clip2_dvlb; /* the same with two texture coordinates (ctr_clip2.v.pica: clouds) */
   DVLB_s* etie_dvlb;      /* (AI-assisted, j2water2) ctr_etie.v.pica (Jak II) */
@@ -595,14 +601,29 @@ static int16_t s_tex_mask[MAX_TEXTURES], s_mask_of[MAX_TEXTURES];
 /* the masks units 1 and 2 hold (unit 1: NULL while it has the fog ramp) */
 static const C3D_Tex* s_tex1_mask;
 static const C3D_Tex* s_tex2_mask;
+static const void* s_tex1_lut; /* the fog table copy unit 1 holds (NULL: another texture) */
+/* the level meshes' fog tables (fog_lut_update): a copy per fog set, kept while a frame may read it */
+#define FOG_LUT_N 512
+#define FOG_LUT_COPIES 8
+static struct {
+  void* data;
+  float key[6];
+  float k, c;
+  int last_frame;
+} s_fog_lut[FOG_LUT_COPIES];
+static int s_fog_lut_cur = -1;
+static int s_fog_lut_full_logged;
+
 /* every unit-1 bind but bind_mask's: unit 1 no longer holds a mask */
 static void tex1_bind(C3D_Tex* t) {
   C3D_TexBind(1, t);
   s_tex1_mask = NULL;
+  s_tex1_lut = NULL;
 }
 /* units 1 and 2 emptied outside the draws (self-test, bench): no cached binding holds */
 static void tex_units_forget(void) {
   s_tex1_mask = NULL;
+  s_tex1_lut = NULL;
   s_tex2_mask = NULL;
   g.ocean_tex2_bound = 0;
 }
@@ -1351,6 +1372,15 @@ int ctr_gpu_init(void) {
     C3D_TexSetWrap(&g.fog_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
     g.fog_tex_valid = 1;
     g.fog_tex_rgb = 0xffffffff; /* force the first fill */
+  }
+  if (!g.lut_valid && C3D_TexInit(&g.lut_tex, FOG_LUT_N, 8, GPU_A8)) {
+    C3D_TexSetFilter(&g.lut_tex, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap(&g.lut_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    s_fog_lut[0].data = g.lut_tex.data;
+    memset(s_fog_lut[0].key, 0xff, sizeof(s_fog_lut[0].key));
+    s_fog_lut[0].last_frame = -1000;
+    g.lut_gen = 1;
+    g.lut_valid = 1;
   }
   g.clip_dvlb = DVLB_ParseFile((u32*)ctr_clip_shbin, (u32)ctr_clip_shbin_size);
   shaderProgramInit(&g.ps->clip);
@@ -4455,6 +4485,9 @@ static void bind_mask(TexSlot* m, const C3D_Tex* color, int unit) {
   }
   C3D_TexBind(unit, t);
   *cur = t;
+  if (unit == 1) {
+    s_tex1_lut = NULL;
+  }
   s_mask_data[unit] = t->data;
   s_mask_param[unit] = t->param;
   s_mask_lod[unit] = t->lodParam;
@@ -4595,6 +4628,13 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) 
     C3D_TexEnvSrc(env1, C3D_Alpha, GPU_PREVIOUS, GPU_TEXTURE1, 0);
     C3D_TexEnvOpAlpha(env1, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_R, GPU_TEVOP_A_SRC_ALPHA);
     C3D_TexEnvFunc(env1, C3D_Alpha, GPU_MODULATE);
+  } else if (mesh == 1 && g.lut_valid) {
+    /* fog: rgb = mix(previous, fog color, the fog table's amount) */
+    C3D_TexEnvSrc(env1, C3D_RGB, GPU_CONSTANT, GPU_PREVIOUS, GPU_TEXTURE1);
+    C3D_TexEnvOpRgb(env1, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR,
+                    GPU_TEVOP_RGB_SRC_ALPHA);
+    C3D_TexEnvFunc(env1, C3D_RGB, GPU_INTERPOLATE);
+    C3D_TexEnvColor(env1, g.fog_abgr);
   } else if ((mesh == 1 || mesh == 6) && g.fog_tex_valid) {
     /* fog: rgb = mix(previous, fog color, fog amount) with the amount from the fog ramp texture
      * (texcoord1 from the mesh shader; bound on unit 1 at frame begin) */
@@ -4765,8 +4805,15 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) 
    * stage 2 (the ocean's), its amount from texture unit 1 (ctr_skin_opt's texcoord1) */
   const int merc_fog = mesh == 2 && (st->tcc & CTR_TCC_FOG) && g.fog_tex_valid;
   /* unit 1 back to the fog ramp after an alpha mask, for the draws that read it */
-  const int need_ramp = mesh == 1 || mesh == 6 || (mesh == 7 && smask < 0) || merc_fog;
-  if (need_ramp && s_tex1_mask && g.fog_tex_valid) {
+  const int need_lut = mesh == 1 && g.lut_valid;
+  const int need_ramp =
+      (mesh == 1 && !g.lut_valid) || mesh == 6 || (mesh == 7 && smask < 0) || merc_fog;
+  if (need_lut && s_tex1_lut != g.lut_tex.data) {
+    C3D_TexBind(1, &g.lut_tex);
+    s_tex1_mask = NULL;
+    s_tex1_lut = g.lut_tex.data;
+    g.cur.tex_binds++;
+  } else if (need_ramp && (s_tex1_mask || s_tex1_lut) && g.fog_tex_valid) {
     tex1_bind(&g.fog_tex);
   }
   if (s_tex2_mask && mesh != 6 && mesh != 7 && !(smask >= 0 && mesh == 2)) {
@@ -4774,7 +4821,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) 
   }
   if (g.fog_tex_valid) {
     C3Di_Context* tctx = &__C3D_Context;
-    const int need1 = need_ramp || (smask >= 0 && mesh != 2);
+    const int need1 = need_ramp || need_lut || (smask >= 0 && mesh != 2);
     const int is_off = !(tctx->texConfig & BIT(1));
     (void)need1;
     if (is_off) {
@@ -6333,10 +6380,11 @@ static void mesh_scales_set(int atlas) {
  * encoding of every level geometry draw, so that neighbouring chunks and every program meet
  * exactly), when the matrix changes. words: 18, or 15 without the game fog's row (df programs). */
 static void raw_mesh_matrix(const ctr_mesh_matrix* matrix, u32 words) {
-  if (g.last_mesh_valid && g.last_clip_id == matrix->id) {
+  if (g.last_mesh_valid && g.last_clip_id == matrix->id && !g.last_clip_lut) {
     return;
   }
   g.last_clip_id = matrix->id;
+  g.last_clip_lut = 0;
   /* the fog rows are made once per matrix and fog (fog_gen) */
   ctr_mesh_matrix* mm = (ctr_mesh_matrix*)matrix;
   if (mm->fog_gen != g.fog_gen) {
@@ -6347,6 +6395,31 @@ static void raw_mesh_matrix(const ctr_mesh_matrix* matrix, u32 words) {
     mm->fog_gen = g.fog_gen;
   }
   raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, matrix->f24, words, 0));
+  g.last_mesh_valid = 1;
+}
+
+/* the matrix and the fog table row (the level mesh programs' clip[0..4]), when they change */
+static void raw_mesh_matrix_lut(const ctr_mesh_matrix* matrix) {
+  if (g.last_mesh_valid && g.last_clip_id == matrix->id && g.last_clip_lut) {
+    return;
+  }
+  g.last_clip_id = matrix->id;
+  g.last_clip_lut = 1;
+  ctr_mesh_matrix* mm = (ctr_mesh_matrix*)matrix;
+  if (mm->lut_gen != g.lut_gen) {
+    const float* w = matrix->m + 12;
+    float row[4];
+    for (int k = 0; k < 4; k++) {
+      row[k] = g.lut_k * w[k];
+    }
+    row[0] += g.lut_c;
+    raw_pack_f24(row, mm->lut24);
+    mm->lut_gen = g.lut_gen;
+  }
+  u32 v[15];
+  memcpy(v, matrix->f24, 12 * sizeof(u32));
+  memcpy(v + 12, mm->lut24, 3 * sizeof(u32));
+  raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, v, 15, 0));
   g.last_mesh_valid = 1;
 }
 
@@ -6380,7 +6453,7 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
                  tex_mask(tex_res(state->tex)) >= 0;
   /* (AI-assisted) shader_opt with the game fog off: the programs with only the draw distance fog */
   const int df = g.ps->df_ok && g.fog_df;
-  use_program(fa ? (df ? PROG_MESH_DF_FA : PROG_MESH_FA) : (df ? PROG_MESH_DF : PROG_MESH));
+  use_program(fa ? (df ? PROG_MESH_DF_FA : PROG_MESH_FA) : PROG_MESH);
   /* (AI-assisted) c3l v15 atlas draws (CTR_TCC_ST_ATLAS): texture coordinates in 1/32768. The
    * draws are sorted by texture, so an atlas's draws come one after another: two writes per run */
   {
@@ -6400,7 +6473,11 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
     raw_mesh_buffers(ms);
     raw_sync();
     /* the draw distance fog's row only with the game fog off: the df programs don't read the other */
-    raw_mesh_matrix(matrix, df ? 15 : 18);
+    if (fa) {
+      raw_mesh_matrix(matrix, df ? 15 : 18);
+    } else {
+      raw_mesh_matrix_lut(matrix);
+    }
     raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
   }
   g.cur.draws++;
@@ -6475,7 +6552,7 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
     }
   }
   raw_sync();
-  raw_mesh_matrix(matrix, 18);
+  raw_mesh_matrix_lut(matrix);
   if (g.wind_rows_id != rows_id || !rows_id) {
     g.wind_rows_id = rows_id;
     raw_unif_xyzw(g.ps->uloc_wind, rows, row_count);
@@ -6532,7 +6609,11 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
       raw_vertex_buffers_n(3, w);
     }
     raw_sync();
-    raw_mesh_matrix(matrix, 18);
+    if (fa) {
+      raw_mesh_matrix(matrix, 18);
+    } else {
+      raw_mesh_matrix_lut(matrix);
+    }
     u32* p = raw_ptr();
     if (!g.morph_slot_id[0]) {
       g.morph_slot_id[0] = 1;
@@ -6605,7 +6686,11 @@ void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix
       raw_vertex_buffers_n(3, w);
     }
     raw_sync();
-    raw_mesh_matrix(matrix, 18);
+    if (fa) {
+      raw_mesh_matrix(matrix, 18);
+    } else {
+      raw_mesh_matrix_lut(matrix);
+    }
     if (g.tmorph_unif_id != unif_id) {
       g.tmorph_unif_id = unif_id;
       u32 v[8]; /* w z y x, per vector */
@@ -7390,6 +7475,118 @@ static void mesh_fog_uniforms(const float fog0[4], const float fog1[4], float ou
   out1[3] = 0.0f;
 }
 
+/* the fog table: the amount the old fog rows, clamps, max and ramp gave, per clip w where it changes */
+
+/* the old ramp's alpha (0..1) at amount a: 64 texels x * 255 / 63, linear, clamped */
+static float fog_ramp_alpha(float a) {
+  const float u = a * 64.0f - 0.5f;
+  if (!(u > 0.0f)) {
+    return 0.0f;
+  }
+  if (u >= 63.0f) {
+    return 1.0f;
+  }
+  const int i = (int)u;
+  const float t0 = (float)(i * 255 / 63), t1 = (float)((i + 1) * 255 / 63);
+  return (t0 + (t1 - t0) * (u - (float)i)) / 255.0f;
+}
+
+/* the fog amount at clip w, as ctr_mesh_opt's fog rows and clamps gave it */
+static float fog_amount(const float f0[4], const float f1[4], float w) {
+  float a = f0[0] * w + f0[2], b = f0[1] * w + f0[3];
+  a = a > f1[0] ? a : f1[0];
+  b = b > f1[1] ? b : f1[1];
+  return -a > b ? -a : b;
+}
+
+static void fog_lut_update(void) {
+  if (!g.lut_valid) {
+    return;
+  }
+  const float key[6] = {g.fog0[0], g.fog0[1], g.fog0[2], g.fog0[3], g.fog1[0], g.fog1[1]};
+  if (s_fog_lut_cur >= 0 && words_equal(s_fog_lut[s_fog_lut_cur].key, key, 6)) {
+    return;
+  }
+  int pick = -1, write = 0;
+  for (int i = 0; i < FOG_LUT_COPIES && pick < 0; i++) {
+    if (s_fog_lut[i].data && words_equal(s_fog_lut[i].key, key, 6)) {
+      pick = i;
+    }
+  }
+  for (int i = 0; i < FOG_LUT_COPIES && pick < 0; i++) {
+    if (i != s_fog_lut_cur && s_fog_lut[i].data && s_fog_lut[i].last_frame < g.frame_no - 3) {
+      pick = i;
+      write = 1;
+    }
+  }
+  for (int i = 0; i < FOG_LUT_COPIES && pick < 0; i++) {
+    if (!s_fog_lut[i].data) {
+      ctr_linear_lock();
+      s_fog_lut[i].data = linearAlloc(FOG_LUT_N * 8);
+      ctr_linear_unlock();
+      if (s_fog_lut[i].data) {
+        pick = i;
+        write = 1;
+      }
+      break;
+    }
+  }
+  if (pick < 0) {
+    if (!s_fog_lut_full_logged) {
+      s_fog_lut_full_logged = 1;
+      printf("[ctr] fog table: no free copy, the last one kept\n");
+    }
+    return;
+  }
+  if (s_fog_lut_cur >= 0) {
+    s_fog_lut[s_fog_lut_cur].last_frame = g.frame_no;
+  }
+  s_fog_lut[pick].last_frame = g.frame_no;
+  s_fog_lut_cur = pick;
+  if (write) {
+    /* where the amount changes: each term's ends within the ramp's range, clipped to w >= 0 */
+    const float* f0 = g.fog0;
+    const float* f1 = g.fog1;
+    float lo = 1e30f, hi = 0.0f;
+    const float ends[6][2] = {{f0[0], f0[2] - f1[0]}, {f0[0], f0[2] + 1.0f}, {f0[0], f0[2]},
+                              {f0[1], f0[3] - f1[1]}, {f0[1], f0[3] - 1.0f}, {f0[1], f0[3]}};
+    for (int e = 0; e < 6; e++) {
+      if (ends[e][0] != 0.0f) {
+        float w = -ends[e][1] / ends[e][0];
+        w = w > 0.0f ? w : 0.0f;
+        lo = w < lo ? w : lo;
+        hi = w > hi ? w : hi;
+      }
+    }
+    if (!(hi > lo) || !(hi < 1e9f)) {
+      lo = 0.0f;
+      hi = 1.0f;
+    }
+    /* texel 0's center at lo, the last one's at hi */
+    const float step = (hi - lo) / (FOG_LUT_N - 1);
+    s_fog_lut[pick].k = 1.0f / (step * FOG_LUT_N);
+    s_fog_lut[pick].c = 0.5f / FOG_LUT_N - lo * s_fog_lut[pick].k;
+    memcpy(s_fog_lut[pick].key, key, sizeof(key));
+    uint8_t* dst = (uint8_t*)s_fog_lut[pick].data;
+    for (int x = 0; x < FOG_LUT_N; x++) {
+      const float a = fog_ramp_alpha(fog_amount(f0, f1, lo + step * (float)x));
+      const uint8_t v = (uint8_t)(a * 255.0f + 0.5f);
+      for (int y = 0; y < 8; y++) {
+        dst[(x / 8) * 64 + morton8((u32)x & 7, (u32)y & 7)] = v;
+      }
+    }
+    cache_flush_frame(dst, FOG_LUT_N * 8);
+    s_tex1_lut = NULL; /* (a rebind clears the texture cache) */
+  }
+  g.lut_tex.data = s_fog_lut[pick].data;
+  if (g.lut_k != s_fog_lut[pick].k || g.lut_c != s_fog_lut[pick].c) {
+    g.lut_k = s_fog_lut[pick].k;
+    g.lut_c = s_fog_lut[pick].c;
+    g.lut_gen = g.lut_gen + 1 ? g.lut_gen + 1 : 1;
+  }
+  g.last_state_valid = 0;
+}
+
 void ctr_gpu_set_mesh_fog(const float fog0_in[4], const float fog1[4], uint8_t r, uint8_t gr,
                           uint8_t b) {
   /* (AI-assisted) the same inputs as the last call that set the uniforms (the level renderers of
@@ -7418,6 +7615,7 @@ void ctr_gpu_set_mesh_fog(const float fog0_in[4], const float fog1[4], uint8_t r
    * are equal (config.ini fog = off: 0, 255, 255, -1/255), and no fog when that constant is <= 0
    * (half a step of the fog ramp's 255 for rounding) */
   g.fog_df = fog0[1] == fog0[2] && 1.0f + fog0[3] * fog0[1] <= 0.5f / 255.0f;
+  fog_lut_update();
   /* (AI-assisted) new fog rows with the next matrix upload, the clamps now */
   g.last_mesh_valid = 0;
   if (is_mesh_prog(g.cur_prog)) {

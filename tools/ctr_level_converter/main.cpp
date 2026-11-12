@@ -135,6 +135,10 @@ struct Options {
   // (config merc_gen_lod). 0: none
   float gen_lod_ratio = 0.3f;
   float gen_lod_error = 0.02f;  // largest error, relative to the model's size
+  // and a coarse copy for far away (c3l::kMercGenLod2Suffix, gen_merc_coarse): down to
+  // gen_lod2_ratio of the triangles, its error at most gen_lod2_error of the model's size (0: none)
+  float gen_lod2_ratio = 0.2f;
+  float gen_lod2_error = 0.03f;
   // the model's open edges (holes, cards) stay where they are. Off by default: with the draws
   // simplified together the only open edges are the model's own, which move along themselves
   bool gen_lod_lock_border = false;
@@ -3472,6 +3476,226 @@ bool gen_merc_lod(const c3l::MercModel& mm,
   return true;
 }
 
+// The coarse merc copy: all draws welded by position and simplified as one surface, each triangle
+// back to a draw with vertices at its corners (else copies of that draw's nearest ones, appended)
+bool gen_merc_coarse(const c3l::MercModel& mm,
+                     std::vector<c3l::MercVertex>& verts,
+                     const Options& opt,
+                     MercOut* out,
+                     c3l::MercModel* gen,
+                     std::vector<c3l::MercDraw>* gdraws) {
+  const size_t first_draw = mm.first_draw, end_draw = mm.first_draw + mm.draw_count;
+  std::map<std::pair<u32, u32>, int> range_id;
+  std::vector<std::pair<u32, u32>> ranges;
+  std::vector<u8> range_eye;
+  for (size_t di = first_draw; di < end_draw; di++) {
+    const auto& d = out->draws[di];
+    const auto key = std::make_pair(d.first_index, d.index_count);
+    if (range_id.emplace(key, (int)ranges.size()).second) {
+      ranges.push_back(key);
+      range_eye.push_back(0);
+    }
+    range_eye[range_id[key]] |= d.eye_id != 0xff && d.eye_id != c3l::kMercEnvmapDraw;
+  }
+  // welded positions (within a 500th of the model's size) and per position each draw's vertices
+  float lo = 1e30f, hi = -1e30f;
+  for (size_t di = first_draw; di < end_draw; di++) {
+    const auto& d = out->draws[di];
+    for (u32 i = d.first_index; i < d.first_index + d.index_count; i++) {
+      for (int c = 0; c < 3; c++) {
+        lo = std::min(lo, (float)verts[out->indices[i]].pos[c]);
+        hi = std::max(hi, (float)verts[out->indices[i]].pos[c]);
+      }
+    }
+  }
+  const float q = std::max(1.f, (hi - lo) * 0.002f);
+  std::map<std::array<s32, 3>, u32> wid_of;
+  std::vector<float> wpos;
+  std::vector<std::vector<std::pair<int, u32>>> at;  // per position: (range, vertex)
+  std::vector<u8> wlock;
+  auto wid = [&](u32 vi) {
+    const auto& v = verts[vi];
+    auto [it, fresh] = wid_of.emplace(
+        std::array<s32, 3>{(s32)std::lround(v.pos[0] / q), (s32)std::lround(v.pos[1] / q),
+                           (s32)std::lround(v.pos[2] / q)},
+        (u32)at.size());
+    if (fresh) {
+      for (int c = 0; c < 3; c++) {
+        wpos.push_back(v.pos[c] * mm.scale);
+      }
+      at.emplace_back();
+      wlock.push_back(0);
+    }
+    return it->second;
+  };
+  std::vector<unsigned int> tri;
+  size_t before = 0;
+  for (size_t r = 0; r < ranges.size(); r++) {
+    for (u32 i = ranges[r].first; i < ranges[r].first + ranges[r].second; i++) {
+      const u32 vi = out->indices[i];
+      const u32 w = wid(vi);
+      auto& list = at[w];
+      if (std::find(list.begin(), list.end(), std::make_pair((int)r, vi)) == list.end()) {
+        list.push_back({(int)r, vi});
+      }
+      if (range_eye[r]) {
+        wlock[w] = 1;  // the eyes' corners stay
+      } else {
+        tri.push_back(vi);
+      }
+    }
+    before += range_eye[r] ? 0 : ranges[r].second / 3;
+  }
+  if (before < 32) {
+    return false;
+  }
+  orient_triangles(tri, verts);
+  std::vector<unsigned int> in;
+  for (size_t t = 0; t + 2 < tri.size(); t += 3) {
+    const u32 a = wid(tri[t]), b = wid(tri[t + 1]), c = wid(tri[t + 2]);
+    if (a != b && b != c && a != c) {
+      in.insert(in.end(), {a, b, c});
+    }
+  }
+  std::vector<unsigned int> res(in.size());
+  float rel_error = 0.f;
+  const size_t target = std::max<size_t>((size_t)(before * opt.gen_lod2_ratio) * 3, 3);
+  res.resize(meshopt_simplifyWithAttributes(res.data(), in.data(), in.size(), wpos.data(),
+                                            at.size(), 3 * sizeof(float), nullptr, 0, nullptr, 0,
+                                            wlock.data(), target, opt.gen_lod2_error,
+                                            meshopt_SimplifyPrune, &rel_error));
+  const size_t after_w = res.size() / 3;
+  if ((float)after_w > (float)before * 0.6f) {
+    lg::debug("merc model {}: no coarse LOD, {} -> {} triangles", mm.name, before, after_w);
+    return false;
+  }
+  // each triangle to a draw
+  const u32 base = (u32)verts.size();
+  std::map<std::pair<int, u32>, u32> moved;  // (range, position) -> new vertex
+  std::vector<std::vector<unsigned int>> per_range(ranges.size());
+  std::set<std::array<u32, 4>> seen;
+  for (size_t t = 0; t + 2 < res.size(); t += 3) {
+    const u32 w[3] = {res[t], res[t + 1], res[t + 2]};
+    std::map<int, int> votes;
+    for (int k = 0; k < 3; k++) {
+      std::set<int> rs;
+      for (const auto& [r, vi] : at[w[k]]) {
+        if (!range_eye[r]) {
+          rs.insert(r);
+        }
+      }
+      for (int r : rs) {
+        votes[r]++;
+      }
+    }
+    if (votes.empty()) {
+      continue;
+    }
+    int r = -1, best = 0;
+    for (const auto& [rr, n] : votes) {
+      if (n > best) {
+        best = n;
+        r = rr;
+      }
+    }
+    u32 v[3];
+    for (int k = 0; k < 3; k++) {
+      v[k] = UINT32_MAX;
+      for (const auto& [rr, vi] : at[w[k]]) {
+        if (rr == r) {
+          v[k] = vi;
+          break;
+        }
+      }
+      if (v[k] != UINT32_MAX) {
+        continue;
+      }
+      auto [it, fresh] = moved.emplace(std::make_pair(r, w[k]), (u32)verts.size());
+      if (fresh) {
+        // the draw's vertex nearest to the corner, moved there
+        const float* p = &wpos[3 * w[k]];
+        u32 near = UINT32_MAX;
+        float bd = 1e30f;
+        for (u32 i = ranges[r].first; i < ranges[r].first + ranges[r].second; i++) {
+          const auto& q = verts[out->indices[i]];
+          float d2 = 0.f;
+          for (int c = 0; c < 3; c++) {
+            const float dc = q.pos[c] * mm.scale - p[c];
+            d2 += dc * dc;
+          }
+          if (d2 < bd) {
+            bd = d2;
+            near = out->indices[i];
+          }
+        }
+        c3l::MercVertex nv = verts[near];
+        const auto& src = verts[at[w[k]][0].second];
+        for (int c = 0; c < 3; c++) {
+          nv.pos[c] = src.pos[c];
+        }
+        verts.push_back(nv);
+      }
+      v[k] = it->second;
+    }
+    if (v[0] == v[1] || v[1] == v[2] || v[0] == v[2]) {
+      continue;
+    }
+    std::array<u32, 4> key{(u32)r, v[0], v[1], v[2]};
+    std::rotate(key.begin() + 1, std::min_element(key.begin() + 1, key.end()), key.end());
+    if (!seen.insert(key).second) {
+      continue;
+    }
+    per_range[r].insert(per_range[r].end(), v, v + 3);
+  }
+  if (verts.size() > 65536) {
+    verts.resize(base);
+    return false;
+  }
+  size_t after = 0;
+  std::vector<std::pair<u32, u32>> new_range(ranges.size());
+  for (size_t r = 0; r < ranges.size(); r++) {
+    std::vector<unsigned int> t2;
+    if (range_eye[r]) {
+      t2.assign(out->indices.begin() + ranges[r].first,
+                out->indices.begin() + ranges[r].first + ranges[r].second);
+    } else if (!per_range[r].empty()) {
+      t2.resize(per_range[r].size());
+      meshopt_optimizeVertexCache(t2.data(), per_range[r].data(), t2.size(), verts.size());
+      after += t2.size() / 3;
+    }
+    new_range[r] = {(u32)out->indices.size(), (u32)t2.size()};
+    for (unsigned int vi : t2) {
+      out->indices.push_back((u16)vi);
+    }
+  }
+  gdraws->clear();
+  for (size_t di = first_draw; di < end_draw; di++) {
+    c3l::MercDraw d = out->draws[di];
+    const auto& nr = new_range[range_id[{d.first_index, d.index_count}]];
+    if (!nr.second) {
+      continue;
+    }
+    d.first_index = nr.first;
+    d.index_count = nr.second;
+    d.palette[c3l::kMercDrawFlagsByte] &= (u8)~c3l::kMercDrawCullBack;
+    gdraws->push_back(d);
+  }
+  *gen = mm;
+  const std::string name = std::string(mm.name) + c3l::kMercGenLod2Suffix;
+  memset(gen->name, 0, sizeof(gen->name));
+  strncpy(gen->name, name.c_str(), sizeof(gen->name) - 1);
+  gen->blerc_first = out->blerc_verts.size();
+  gen->blerc_count = 0;
+  // the error in model units (c3l::merc_gen_lod_error): the runtime switches where it is <= 1 px
+  const float error = std::max(rel_error, 1e-6f) *
+                      meshopt_simplifyScale(wpos.data(), at.size(), 3 * sizeof(float));
+  memcpy(&gen->pad, &error, 4);
+  lg::info("merc model {}: coarse LOD {}, {} -> {} triangles ({:.0f}%), {} vertices more, error {:.3f} m",
+           mm.name, gen->name, before, after, 100.0 * after / before, verts.size() - base,
+           error / 4096.f);
+  return true;
+}
+
 /*!
  * (AI-assisted) Back face culling marks of a model's draws (Options::merc_cull_agree): the merc
  * strips became triangles without the strips' alternating winding, so a triangle's winding says
@@ -3969,23 +4193,38 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
     mm.vertex_count = local_verts.size();
     mm.draw_count = out->draws.size() - mm.first_draw;
     mark_merc_cull(mm, local_verts, cv, out);  // (AI-assisted) before the generated LOD copies
-    out->verts.insert(out->verts.end(), local_verts.begin(), local_verts.end());
-    out->models.push_back(mm);
     // a generated LOD below the model's lowest game LOD ("<base>-lod<N>", the largest N; the
     // runtime switches to it where its error is under a pixel). Not with blend shapes or
     // rewritten vertices (those move per frame), not Jak and Daxter (always close), not
     // c3l::merc_gen_lod_exempt (pickups, far views, Jak II's gun ...)
     std::string base;
     const int lod = lod_of(model.name, &base);
-    if (cv.opt.gen_lod_ratio > 0.f && lod >= 0 && lowest_lod[base] == lod &&
+    const bool gen_lods =
+        cv.opt.gen_lod_ratio > 0.f && lod >= 0 && lowest_lod[base] == lod &&
         model.name.rfind("eichar-", 0) != 0 && model.name.rfind("sidekick-", 0) != 0 &&
         model.name.rfind("keira-as-", 0) != 0 && !c3l::merc_gen_lod_exempt(model.name) &&
-        !mm.blerc_count && out->mod_effects.size() == mod_first) {
+        !mm.blerc_count && out->mod_effects.size() == mod_first;
+    // the coarse copy's vertices go with the model's (its draws after the other copy's)
+    c3l::MercModel gen2;
+    std::vector<c3l::MercDraw> gen2_draws;
+    const bool coarse = gen_lods && cv.opt.gen_lod2_ratio > 0.f &&
+                        gen_merc_coarse(mm, local_verts, cv.opt, out, &gen2, &gen2_draws);
+    mm.vertex_count = local_verts.size();
+    out->verts.insert(out->verts.end(), local_verts.begin(), local_verts.end());
+    out->models.push_back(mm);
+    if (gen_lods) {
       c3l::MercModel gen;
       lg::debug("merc model {}: lowest LOD, generating a low LOD", model.name);
       if (gen_merc_lod(mm, local_verts, cv.opt, out, &gen)) {
         out->models.push_back(gen);
       }
+    }
+    if (coarse) {
+      gen2.vertex_count = mm.vertex_count;
+      gen2.first_draw = out->draws.size();
+      gen2.draw_count = gen2_draws.size();
+      out->draws.insert(out->draws.end(), gen2_draws.begin(), gen2_draws.end());
+      out->models.push_back(gen2);
     }
   }
 }
@@ -8932,6 +9171,11 @@ int main(int argc, char** argv) {
                  "none)");
   app.add_option("--gen-lod-error", opt.gen_lod_error,
                  "largest error of the generated low LOD, relative to the model's size");
+  app.add_option("--gen-lod2", opt.gen_lod2_ratio,
+                 "and a coarse copy for far away with at most this fraction of the triangles (0: "
+                 "none)");
+  app.add_option("--gen-lod2-error", opt.gen_lod2_error,
+                 "largest error of the coarse copy, relative to the model's size");
   app.add_flag("--gen-lod-lock-border", opt.gen_lod_lock_border,
                "the generated low LOD keeps the model's open edges in place");
   bool no_etc1 = false, no_mips = false;

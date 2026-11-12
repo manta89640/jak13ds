@@ -6,6 +6,7 @@
 ; ctr_mesh_opt's, at the same places.
 ; Every output component is written exactly once (platform/3ds/tools/check_shaders.py).
 
+; the fog: one dph with clip[4], the fog table row (fog_lut_update: the amount per clip w on unit 1)
 .fvec clip[6]       ; as ctr_mesh_opt.v.pica
 .fvec scales
 .fvec fog1
@@ -31,13 +32,10 @@
   add r2.xz, wind[a0.x].zzww, r2
   add r1.xz, inpos, r2
   ; from here ctr_mesh_opt on the swayed position r1
-  dph r0.x, r1, clip[5]
-  dph r0.y, r1, clip[4]
+  dph outtc.zw, r1, clip[4]
   dph outpos.x, r1, clip[0]
   dph outpos.y, r1, clip[1]
-  max r0.xy, fog1.xyxy, r0.xyxy
   dph outpos.z, r1, clip[2]
-  max outtc.zw, -r0.xxxx, r0.yyyy
   dph outpos.w, r1, clip[3]
   mul outclr, scales.yyyy, inclr
   end

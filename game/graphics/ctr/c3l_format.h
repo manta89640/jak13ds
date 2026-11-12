@@ -837,6 +837,8 @@ constexpr uint8_t kMercDrawCullBack = 0x01;
 // first_vertex and vertex_count; draws and indices of its own, ctr_level_converter --gen-lod). No
 // layout change: older readers load it as one more model, which nothing asks for.
 constexpr char kMercGenLodSuffix[] = "~genlod";
+// and its coarse copy for far away (a few pixels tall; same vertices, larger error in pad)
+constexpr char kMercGenLod2Suffix[] = "~genlod2";
 // The generated LOD's MercModel::pad: its simplification error in model units (float bits; 0 in
 // older files: then at most kMercGenLodErrorMax of the model's extent, the converter's default
 // --gen-lod-error)
