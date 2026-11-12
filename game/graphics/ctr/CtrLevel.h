@@ -1570,6 +1570,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // per chunk the version of its runs' flags (moves when they may differ from its last draw), per
   // draw the index ranges it submitted at a version (in m_dr_pool: start, count pairs)
   std::vector<u32> m_chunk_rver;
+  std::vector<u8> m_run_synced;  // per chunk: m_run_shown / m_run_nomerge hold its raw flags
   u32 m_rver_next = 0;
   struct DrawRanges {
     u32 ver = 0, epoch = 0, at = 0, n = 0, drawn = 0;

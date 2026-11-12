@@ -12604,6 +12604,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       m_rc_gen = lev.generation;
       m_run_cache.assign(lev.chunks.size(), RunCache());
       m_chunk_rver.assign(lev.chunks.size(), 0);
+      m_run_synced.assign(lev.chunks.size(), 0);
       m_dr_cache.assign(lev.draws.size(), DrawRanges());
       m_dr_pool.clear();
       m_dr_epoch++;
@@ -12700,6 +12701,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       // the run cache: used for this chunk, its flags as at the chunk's last draw, changed after
       // the run loop (prototypes, shrub fades)
       bool runs_cached = false, runs_kept = false, runs_mod = false;
+      // m_run_shown / m_run_nomerge hold its raw flags from its last draw (nothing changed them)
+      const bool was_synced = ci < m_run_synced.size() && m_run_synced[ci];
+      if (ci < m_run_synced.size()) {
+        m_run_synced[ci] = 0;
+      }
       // (AI-assisted) ties always; tfrag with the level's own string (not its low resolution
       // version), or every tier with a neighbour's (neighbour_vis)
       const bool vis_test = !vista_tier && m_vis && ch.vis_run_count &&
@@ -12899,8 +12905,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           }
           in.shown_out = m_run_shown.data();
           in.nomerge_out = m_run_nomerge.data();
-          memcpy(&m_run_shown[r0], &m_raw_shown[r0], nr);
-          memcpy(&m_run_nomerge[r0], &m_raw_nomerge[r0], nr);
+          if (!(runs_kept && was_synced)) {
+            memcpy(&m_run_shown[r0], &m_raw_shown[r0], nr);
+            memcpy(&m_run_nomerge[r0], &m_raw_nomerge[r0], nr);
+          } else if (run_check_enabled()) {
+            m_rc_checked++;
+            m_rc_bad += memcmp(&m_run_shown[r0], &m_raw_shown[r0], nr) != 0 ||
+                        memcmp(&m_run_nomerge[r0], &m_raw_nomerge[r0], nr) != 0;
+          }
+          m_run_synced[ci] = 1;
         } else {
           loop(in, r0, nr, &o);
         }
@@ -12915,6 +12928,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             m_run_shown[*it] = 0;
             m_run_nomerge[*it] = 1;
             runs_mod = true;
+            if (ci < m_run_synced.size()) {
+              m_run_synced[ci] = 0;
+            }
           }
         }
         shown = o.shown;
@@ -12985,6 +13001,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         } else {
           cst = (u8)(all_near ? (cst & ~8) : (cst | 8));
           runs_mod = true;
+          if (ci < m_run_synced.size()) {
+            m_run_synced[ci] = 0;
+          }
           if (!runs_valid) {
             for (u32 r = r0; r < r0 + nr; r++) {
               m_run_shown[r] = 1;
@@ -13387,6 +13406,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
   for (size_t ci = cl.first, ci_end = cl.first + cl.count; ci < ci_end; ci++) {
     const auto& ch = chunks[ci];
+    // (the ARM11 has no hardware prefetch: the record two chunks ahead asked for, 80 bytes)
+    __builtin_prefetch(&chunks[ci + 2]);
+    __builtin_prefetch((const u8*)&chunks[ci + 2] + 64);
+    if (rc_on && ci + 2 < m_run_cache.size()) {
+      __builtin_prefetch(&m_run_cache[ci + 2]);
+    }
     if (ch.kind == c3l::CHUNK_KIND_VISTA) {
       continue;  // (AI-assisted) after the others (their decisions pick its runs)
     }
