@@ -9,6 +9,12 @@
 
 ;; DECOMP BEGINS
 
+;; og:preserve-this 3DS static ocean (ocean-mid.gc)
+(#when TARGET_3DS
+  (define-extern ocean-3ds-static-packet (function ocean dma-buffer symbol none))
+  (define-extern *ocean-3ds-static-on* symbol)
+  )
+
 (defmethod set-corners! ((this ocean) (corner-x float) (corner-z float))
   (let* ((f2-0 (/ corner-x (meters 3)))
          (f3-0 (/ corner-z (meters 3)))
@@ -1187,6 +1193,12 @@
           ;; disable whatever this is
           ;; (ocean-method-79 this s4-0)
         (init-buffer! this s4-0)
+        ;; og:preserve-this 3DS: the far mid tiles are the renderer's static mesh
+        (#when TARGET_3DS
+          (if *ocean-3ds-static-on*
+              (ocean-3ds-static-packet this s4-0 (not (-> this mid-off)))
+              )
+          )
         (if (-> this far-on)
             (draw-ocean-far this s4-0)
             )

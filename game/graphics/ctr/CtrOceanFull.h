@@ -60,6 +60,7 @@
 #include "game/graphics/ctr/CtrOcean.h"
 #include "game/graphics/ctr/CtrOceanVu.h"
 #include "game/graphics/ctr/CtrRenderer.h"
+#include "game/graphics/ctr/ctr_gpu.h"
 
 class CtrDirect;
 class CtrOceanMidVu;
@@ -89,7 +90,10 @@ class CtrOceanFull : public CtrOceanEnvHook {
   void update_texture_gpu(const TextureDma& t, CtrRenderState& rs);
   void make_wave_rt();
   bool update_env(u64 tex0, CtrRenderState& rs);
-  void read_far(DmaFollower& dma);
+  void read_far(DmaFollower& dma, CtrRenderState& rs, const ctr_draw_state& st);
+  void draw_static(const u8* packet, CtrRenderState& rs);
+  void draw_far(const u8* packet);
+  void build_static(const u8* mem, u32 colors, u32 indices, u32 masks);
   void frame_stats(const CtrRenderState& rs);
   bool texture_due(const CtrRenderState& rs) const;
 
@@ -127,6 +131,14 @@ class CtrOceanFull : public CtrOceanEnvHook {
   bool m_refl_ok = false;
   std::vector<u32> m_refl_src, m_refl_texels;
   std::vector<u64> m_refl_logged;
+
+  // the static ocean (ocean-mid.gc ocean-3ds-static-packet): the mid tiles without the sky
+  // reflection as a mesh made once per ocean map; per tile its index ranges
+  // (whole: its 8 x 8 squares; coarse: 2 x 2 squares as one where none is left out)
+  int m_static_mesh = -1;
+  u32 m_static_key[5] = {0, 0, 0, 0, 0};
+  u32 m_static_first[36][2] = {}, m_static_count[36][2] = {};
+  int m_static_tiles = 0, m_static_tris = 0, m_static_frames = 0;
 
   // statistics: ms on the render thread, per frame
   u64 m_stat_frame = ~0ull;

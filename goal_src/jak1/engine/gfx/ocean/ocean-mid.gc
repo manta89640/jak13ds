@@ -732,6 +732,95 @@
     (.ppach v1-2 (the-as uint128 0) v1-1)
     (zero? (the-as int v1-2))))
 
+;; og:preserve-this 3DS static ocean (CtrOceanFull.cpp draw_static, draw_far): the mid ocean's
+;; tiles that get no sky reflection (192 m and more away) are one mesh the renderer keeps, made from
+;; *ocean-map*, and the far ocean is made by the renderer. In place of the far ocean's packets: the
+;; camera (as add-pc-tfrag3-data, with the hmge scales), the map, which tiles the mesh draws (in
+;; view, coarse from OCEAN_3DS_COARSE; draw-ocean-mid leaves those out) and the far ocean's facing.
+(#when TARGET_3DS
+  (defconstant OCEAN_3DS_COARSE (meters 400))
+  (define *ocean-3ds-static* (the-as uint 0))
+  ;; on (ocean-3ds-static-set!, for A/B tests: off draws the PS2's far ocean and every mid tile)
+  (define *ocean-3ds-static-on* #t)
+  (defun ocean-3ds-static-set! ((on int))
+    (set! *ocean-3ds-static-on* (nonzero? on))
+    (set! *ocean-3ds-static* (the-as uint 0))
+    0)
+
+  (defun ocean-3ds-static-packet ((dma-buf dma-buffer) (mid? symbol))
+    "The static ocean's packet, and *ocean-3ds-static* for draw-ocean-mid."
+    (let ((static-mask 0)
+          (coarse-mask 0))
+      (when mid?
+        (let ((cam (-> *math-camera* trans)))
+          (dotimes (tz 6)
+            (dotimes (tx 6)
+              (let* ((i (+ (* 6 tz) tx))
+                     (sph (-> *ocean-map* ocean-spheres spheres i))
+                     (idx (-> (the-as (pointer int16) (+ (* i 2) (the-as int (-> *ocean-map* ocean-mid-indices)))))))
+                (when (and (>= idx 0) (sphere-cull-for-ocean sph))
+                  (let ((d (- (vector-vector-distance sph cam) (-> sph w))))
+                    (when (>= d 786432.0)
+                      (logior! static-mask (ash 1 i))
+                      (if (>= d OCEAN_3DS_COARSE)
+                          (logior! coarse-mask (ash 1 i)))))))))))
+      (set! *ocean-3ds-static* (the-as uint static-mask))
+      (let ((packet (the-as dma-packet (-> dma-buf base))))
+        (set! (-> packet dma) (new 'static 'dma-tag :id (dma-tag-id cnt) :qwc 27))
+        (set! (-> packet vif0) (new 'static 'vif-tag))
+        (set! (-> packet vif1) (new 'static 'vif-tag :cmd (vif-cmd pc-port)))
+        (set! (-> dma-buf base) (the pointer (&+ packet 16))))
+      (let ((q (the-as (pointer uint128) (-> dma-buf base))))
+        (set! (-> q 0) (-> *math-camera* plane 0 quad))
+        (set! (-> q 1) (-> *math-camera* plane 1 quad))
+        (set! (-> q 2) (-> *math-camera* plane 2 quad))
+        (set! (-> q 3) (-> *math-camera* plane 3 quad))
+        (set! (-> q 4) (-> *math-camera* hmge-scale quad))
+        (set! (-> q 5) (-> *math-camera* inv-hmge-scale quad))
+        (set! (-> q 6) (the-as uint128 0))
+        (set! (-> q 7) (the-as uint128 0))
+        (set! (-> q 8) (-> *math-camera* camera-temp vector 0 quad))
+        (set! (-> q 9) (-> *math-camera* camera-temp vector 1 quad))
+        (set! (-> q 10) (-> *math-camera* camera-temp vector 2 quad))
+        (set! (-> q 11) (-> *math-camera* camera-temp vector 3 quad))
+        (set! (-> q 12) (-> *math-camera* hvdf-off quad))
+        (let ((v (-> (the-as (inline-array vector) q) 13)))
+          (set! (-> v x) (-> *math-camera* pfog0))
+          (set! (-> v y) (-> *math-camera* fog-min))
+          (set! (-> v z) (-> *math-camera* fog-max))
+          ;; the far ocean (drawn by the renderer): the strips its facing leaves out (draw-ocean-far)
+          ;; with bit 31 set
+          (set! (-> v w) (the-as float (logior #x80000000
+                                               (case *ocean-facing*
+                                                 ((0) 4)
+                                                 ((1) 2)
+                                                 ((3) 8)
+                                                 ((2) 16)
+                                                 (else 30))))))
+        (set! (-> q 14) (-> (math-camera-pos) quad))
+        (set! (-> q 15) (-> *math-camera* camera-rot vector 0 quad))
+        (set! (-> q 16) (-> *math-camera* camera-rot vector 1 quad))
+        (set! (-> q 17) (-> *math-camera* camera-rot vector 2 quad))
+        (set! (-> q 18) (-> *math-camera* camera-rot vector 3 quad))
+        (set! (-> q 19) (-> *math-camera* perspective vector 0 quad))
+        (set! (-> q 20) (-> *math-camera* perspective vector 1 quad))
+        (set! (-> q 21) (-> *math-camera* perspective vector 2 quad))
+        (set! (-> q 22) (-> *math-camera* perspective vector 3 quad))
+        (set! (-> q 23) (-> *ocean-map* start-corner quad))
+        (set! (-> q 24) (-> *ocean-map* far-color quad))
+        (let ((w (the-as (pointer uint32) (&-> q 25))))
+          (set! (-> w 0) (the-as uint (-> *ocean-map* ocean-colors)))
+          (set! (-> w 1) (the-as uint (-> *ocean-map* ocean-mid-indices)))
+          (set! (-> w 2) (the-as uint (-> *ocean-map* ocean-mid-masks data)))
+          (set! (-> w 3) (the-as uint *ocean-map*))
+          (set! (-> w 4) (the-as uint static-mask))
+          (set! (-> w 5) (the-as uint (shr static-mask 32)))
+          (set! (-> w 6) (the-as uint coarse-mask))
+          (set! (-> w 7) (the-as uint (shr coarse-mask 32)))))
+      (&+! (-> dma-buf base) (* 16 27)))
+    0
+    (none)))
+
 ;; definition for function draw-ocean-mid-seams
 ;; INFO: Return type mismatch symbol vs none.
 (defun draw-ocean-mid-seams ((arg0 dma-buffer))
@@ -846,7 +935,9 @@
             ;; (format 0 "draw ocean tile: ~d x ~d = ~d index ~d~%" s4-0 s3-0 s2-0 s0-0)
             ;; (debug-draw-ocean-tile s4-0 s3-0 (new 'static 'rgba :r #x80 :a #x80) (new 'static 'rgba :g #x80 :a #x80) s0-0)
             ;; og:preserve-this
-            (when (sphere-cull-for-ocean s1-0)
+            (when (and (sphere-cull-for-ocean s1-0)
+                       ;; og:preserve-this 3DS: not the static ocean's tiles (ocean-3ds-static-packet)
+                       (#if TARGET_3DS (not (logtest? *ocean-3ds-static* (ash 1 s2-0))) #t))
               ;;(format 0 " vis!~%")
               (cond
                 ((< s0-0 0)

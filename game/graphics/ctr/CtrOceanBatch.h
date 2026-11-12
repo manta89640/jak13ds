@@ -202,6 +202,26 @@ class CtrOceanBatch {
     }
   }
 
+  //! a polygon of GS-space vertices (as a far ocean GS packet's: x, y 12.4, z, q, s * q, t * q,
+  //! fog amount), drawn as a fan
+  void gs_fan(const ctr_ocean_full_vertex* in, int n) {
+    if (n < 3 || !mode(kModeGs) || !room(n, 3 * n)) {
+      return;
+    }
+    const int first = m_nv;
+    memcpy(m_v + m_nv, in, sizeof(ctr_ocean_full_vertex) * (size_t)n);
+    u16* idx = m_i + m_ni;
+    for (int i = 2; i < n; i++) {
+      idx[0] = (u16)first;
+      idx[1] = (u16)(first + i - 1);
+      idx[2] = (u16)(first + i);
+      idx += 3;
+    }
+    m_nv += n;
+    m_ni += 3 * (n - 2);
+    vertices += n;
+  }
+
   // statistics
   int vertices = 0, triangles = 0, draws = 0, dropped = 0;
   int env_draws = 0;  // (AI-assisted, j1ocean) draws with the sky reflection
