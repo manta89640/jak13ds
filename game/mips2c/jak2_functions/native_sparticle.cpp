@@ -84,6 +84,51 @@ inline TimeVec time_vec(const ParticleMem& m, u32 spad, u32 info) {
   return {m.u(t) & 255u, m.f(t + 4), m.f(t + 8), m.f(t + 12)};
 }
 
+/*!
+ * Particle LOD (config.ini logic_lod; sparticle.gc process-particles fills *sp-lod-work*: the
+ * camera's position, its forward axis, then the frame count, on, the squared distance and the
+ * depth behind the camera). A 2d particle of a plain block without a callback, an orbit, an aux
+ * sprite or an alpha to restore that is that far from the camera or that far behind it is updated
+ * on every other frame only (staggered by index), over both frames' time.
+ */
+struct SpLod {
+  bool on = false;
+  float cx = 0, cy = 0, cz = 0, fx = 0, fy = 0, fz = 0, far2 = 0, behind = 0;
+  u32 frame = 0;
+};
+
+SpLod sp_lod_read(const ParticleMem& m) {
+  static const u32 work_sym = sym_val_addr("*sp-lod-work*");
+  SpLod l;
+  const u32 w = m.u(work_sym);
+  if (w == 0 || m.f(w + 36) == 0.f) {
+    return l;
+  }
+  l.on = true;
+  l.cx = m.f(w);
+  l.cy = m.f(w + 4);
+  l.cz = m.f(w + 8);
+  l.fx = m.f(w + 16);
+  l.fy = m.f(w + 20);
+  l.fz = m.f(w + 24);
+  l.frame = m.u(w + 32);
+  l.far2 = m.f(w + 40);
+  l.behind = m.f(w + 44);
+  return l;
+}
+
+//! 0: update as usual, 1: wait this frame, 2: update over two frames
+inline int sp_lod_2d(const SpLod& l, const ParticleMem& m, u32 info, u32 vec, u64 index) {
+  if (!l.on || (m.u(info + 104) & (0x8080 | 64 | 32))) {
+    return 0;
+  }
+  const float dx = m.f(vec) - l.cx, dy = m.f(vec + 4) - l.cy, dz = m.f(vec + 8) - l.cz;
+  if (dx * dx + dy * dy + dz * dz <= l.far2 && dx * l.fx + dy * l.fy + dz * l.fz >= -l.behind) {
+    return 0;
+  }
+  return ((index + l.frame) & 1) ? 1 : 2;
+}
+
 //! the done tests: color r g b all 0, alpha <= 0, x or y size below 0 (with the flags' bits)
 inline bool particle_done(u32 flags, u32 r, u32 g, u32 b, u32 a, float sx, float sy) {
   if ((flags & 2) && r == 0 && g == 0 && b == 0) {
@@ -600,6 +645,7 @@ void block_2d_in_place(const ParticleMem& m,
                        u32 clocks) {
   static const u32 orbiter_sym = sym_val_addr("sp-orbiter");
   static const u32 relaunch_sym = sym_val_addr("sp-relaunch-particle-2d");
+  const SpLod lod = sp_lod_read(m);
   for (u32 i = 0; i < count; i++) {
     if (!s.valid[i]) {
       continue;
@@ -607,7 +653,19 @@ void block_2d_in_place(const ParticleMem& m,
     const u32 info = m_info + kInfoSize * i;
     const u32 vec = m_vec + kVecSize * i;
     const u64 index = index0 + i;
-    const TimeVec tv = time_vec(m, clocks, info);
+    TimeVec tv = time_vec(m, clocks, info);
+    if (tv.frames != 0 && s.cls[i] == SP_FN_NONE) {
+      const int lod_mode = sp_lod_2d(lod, m, info, vec, index);
+      if (lod_mode == 1) {
+        continue;
+      }
+      if (lod_mode == 2) {
+        tv.frames *= 2;
+        tv.vel *= 2.f;
+        tv.acc *= 2.f;
+        tv.friction *= 2.f;
+      }
+    }
     const u64 frames = tv.frames;
     if (frames == 0) {
       if (m.u(info + 104) & 0x8080) {
