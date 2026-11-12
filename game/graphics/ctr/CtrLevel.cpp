@@ -7646,6 +7646,7 @@ bool CtrLevels::load_file(const fs::path& path,
               g.first_draw + g.draw_count <= mdraws.size()) {
             md.gen_draws.assign(mdraws.begin() + g.first_draw,
                                 mdraws.begin() + g.first_draw + g.draw_count);
+            md.gen_err = c3l::merc_gen_lod_error(g);
           }
         }
       }
@@ -7706,6 +7707,18 @@ bool CtrLevels::load_file(const fs::path& path,
           }
           if (md.blerc_count || !md.mod.empty()) {
             md.indices = mindices;
+          }
+          if (!md.gen_draws.empty() && !(md.gen_err > 0.f)) {
+            // older files: the converter's error limit times the model's extent
+            float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+            for (u32 v = 0; v < m.vertex_count; v++) {
+              for (int c = 0; c < 3; c++) {
+                lo[c] = std::min(lo[c], (float)mverts[v].pos[c]);
+                hi[c] = std::max(hi[c], (float)mverts[v].pos[c]);
+              }
+            }
+            const float extent = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], 1.f});
+            md.gen_err = c3l::kMercGenLodErrorMax * extent * m.scale;
           }
           md.mesh = ctr_gpu_skinned_mesh_create(mverts.data(), m.vertex_count, mindices.data(),
                                                 end - first);

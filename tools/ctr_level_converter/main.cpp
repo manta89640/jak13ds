@@ -3206,12 +3206,13 @@ bool gen_merc_lod(const c3l::MercModel& mm,
   orient_triangles(in, verts);
   const size_t target = std::max<size_t>((size_t)(in.size() / 3 * opt.gen_lod_ratio) * 3, 3);
   res.resize(in.size());
+  float rel_error = 0.f;
   size_t n = meshopt_simplifyWithAttributes(res.data(), in.data(), in.size(), pos.data(),
                                             verts.size(), 3 * sizeof(float), attrs.data(),
                                             kLodAttrs * sizeof(float), attr_weights.data(),
                                             kLodAttrs, lock.data(), target, opt.gen_lod_error,
                                             opt.gen_lod_lock_border ? meshopt_SimplifyLockBorder : 0,
-                                            nullptr);
+                                            &rel_error);
   res.resize(n);
   // back to the ranges, each in vertex cache order
   std::vector<std::vector<unsigned int>> per_range(ranges.size());
@@ -3267,9 +3268,13 @@ bool gen_merc_lod(const c3l::MercModel& mm,
   gen->draw_count = gdraws.size();
   gen->blerc_first = out->blerc_verts.size();
   gen->blerc_count = 0;
+  // the error in model units (c3l::merc_gen_lod_error): the runtime switches where it is <= 1 px
+  const float error =
+      std::max(rel_error, 1e-6f) * meshopt_simplifyScale(pos.data(), verts.size(), 3 * sizeof(float));
+  memcpy(&gen->pad, &error, 4);
   out->draws.insert(out->draws.end(), gdraws.begin(), gdraws.end());
-  lg::info("merc model {}: generated low LOD {}, {} -> {} triangles ({:.0f}%)", mm.name, gen->name,
-           before / 3, after / 3, 100.0 * after / before);
+  lg::info("merc model {}: generated low LOD {}, {} -> {} triangles ({:.0f}%), error {:.3f} m",
+           mm.name, gen->name, before / 3, after / 3, 100.0 * after / before, error / 4096.f);
   out->gen_lod_models++;
   return true;
 }

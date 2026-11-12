@@ -96,7 +96,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
     } else if (key == "merc_gen_lod") {
       s.merc_gen_lod = parse_bool(v);  // (AI-assisted)
     } else if (key == "merc_lod_scale") {
-      s.merc_lod_scale = std::clamp(f, 0.05f, 1.f);  // (AI-assisted) (kmachine.cpp reads it too)
+      // the game's own LOD distances: kmachine.cpp reads it
     } else if (key == "shadows") {
       // full | off (on = full; the removed all = full, blob = off)
       if (v == "full" || v == "all" || parse_bool(v)) {
@@ -403,7 +403,7 @@ std::string CtrSettings::summary() const {
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
       "merc {} sprites {} "
-      "pipeline {} ocean {} sky {} clouds {} distort {} envmap {} merc_gen_lod {} (x{:.2f}) shadows {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
+      "pipeline {} ocean {} sky {} clouds {} distort {} envmap {} merc_gen_lod {} shadows {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "compact_textures {} sprite_alpha_discard {} "
       "vis_culling {} run_culling {} tie_lod {} streaming {} neighbour_vis {} lowres_vista {} vista {:.0f}m cull_ties {} cull_merc {} merc_fog {} raw_cmds {} asm_tex {} asm_mem {} "
       "ocean_tex_half {} fast_clock {} "
@@ -419,7 +419,7 @@ std::string CtrSettings::summary() const {
       merc ? "on" : "off", sprites ? "on" : "off", pipeline ? "on" : "off", ocean ? "on" : "off",
       sky ? "on" : "off", clouds ? "on" : "off", distort ? "on" : "off",
       envmap ? "on" : "off",
-      merc_gen_lod ? "on" : "off", merc_lod_scale,
+      merc_gen_lod ? "on" : "off",
       shadows == ShadowMode::Full ? "full" : "off",
       rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"),
