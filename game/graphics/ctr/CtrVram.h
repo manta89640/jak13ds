@@ -171,6 +171,7 @@ class CtrVram {
     int revived = 0;
     int chunks_written = 0;  // (AI-assisted) 16 KB chunks of page uploads written to the VRAM copy
     int chunks_skipped = 0;  // (AI-assisted) and not written: the same data was there already
+    int notes_cached = 0;    // page uploads whose texture notes came from the note cache
   };
   /*! (AI-assisted, j2-mem2) the bytes the VRAM copy holds (sparse: the chunks written so far) */
   u32 copy_bytes() const { return m_full_chunks * kChunkBytes + m_top_chunks * (kChunkBytes / 4); }
@@ -382,7 +383,7 @@ class CtrVram {
     u64 key = 0;
     u64 hash = 0;
   };
-  static constexpr u32 kHashMemos = 64;
+  static constexpr u32 kHashMemos = 256;
   HashMemo m_hash_memo[kHashMemos];
   const u32* m_epoch = nullptr;
   // a page chunk's id (page_chunk_id's sampled hash), kept the same way
@@ -392,7 +393,7 @@ class CtrVram {
     u64 key = 0;
     u64 id = 0;
   };
-  static constexpr u32 kChunkMemos = 256;
+  static constexpr u32 kChunkMemos = 1024;
   ChunkMemo m_chunk_memo[kChunkMemos];
   u64 chunk_id(const u8* chunk_src, u64 page_key);
   // Jak II: a page's dest offsets (lookup_jak2_texture_dest_offset) by texture index, by page id
@@ -412,6 +413,22 @@ class CtrVram {
   // entries of all its textures, which a hash map made a large part of the "tex" buckets' time
   std::vector<TexInfo> m_tex_info;
   void note_tex_info(const u8* tpage, s32 count, const u8* ee_mem, u32 s7_ptr);
+  // a page's notes (its textures' entries) while *m_epoch stands: a page uploaded again after
+  // another one took its blocks (Jak II alternates pages every frame) writes them without
+  // reading its texture records from EE memory again
+  struct NoteEntry {
+    u16 dest0;
+    u8 remap;
+    TexInfo info;
+    u32 ptr;
+  };
+  struct NoteCache {
+    u32 epoch = 0;
+    s32 count = -1;
+    bool keep = false;  // not a font page (setup-font-texture changes its records)
+    std::vector<NoteEntry> e;
+  };
+  std::unordered_map<const u8*, NoteCache> m_note_cache;
 
   struct Relocation {
     u32 psm;

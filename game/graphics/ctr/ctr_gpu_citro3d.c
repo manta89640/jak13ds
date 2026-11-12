@@ -6434,11 +6434,43 @@ static void raw_unif_xyzw(int loc, const float* xyzw, int n) {
   raw_end(raw_unif(raw_ptr(), loc, v, 4u * (u32)n, 1));
 }
 
+/* (AI-assisted) CTR_PROBES builds (diagnosis only): system ticks per part of the level and merc
+ * draws, logged with the gpu flushes line */
+#ifdef CTR_PROBES
+enum {
+  PR_MESH, PR_MESH_STATE, PR_MESH_BUF, PR_MESH_SYNC, PR_MESH_MTX, PR_MESH_DRAW,
+  PR_SKIN, PR_SKIN_STATE, PR_SKIN_SYNC, PR_SKIN_CLIP, PR_SKIN_ROWS, PR_SKIN_LIGHTS, PR_SKIN_DRAW,
+  PR_MERC_MODEL, PR_MERC_FLUSH, PR_N
+};
+static const char* const kProbeNames[PR_N] = {
+    "mesh", "mesh.state", "mesh.buf", "mesh.sync", "mesh.mtx", "mesh.draw",
+    "skin", "skin.state", "skin.sync", "skin.clip", "skin.rows", "skin.lights", "skin.draw",
+    "merc.model", "merc.flush"};
+static u64 s_pr_ticks[PR_N];
+static u32 s_pr_calls[PR_N];
+#define PR_T() svcGetSystemTick()
+#define PR_ADD(k, t0) (s_pr_ticks[k] += svcGetSystemTick() - (t0), s_pr_calls[k]++)
+void ctr_gpu_probe_add(int k, uint64_t ticks) {
+  if (k >= 0 && k < PR_N) {
+    s_pr_ticks[k] += ticks;
+    s_pr_calls[k]++;
+  }
+}
+#else
+#define PR_T() 0
+#define PR_ADD(k, t0) ((void)(t0))
+void ctr_gpu_probe_add(int k, uint64_t ticks) {
+  (void)k;
+  (void)ticks;
+}
+#endif
+
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                                 int mesh, int first_index, int index_count) {
   if (!g.ready || !g.in_frame || index_count < 3) {
     return;
   }
+  const u64 pr0 = PR_T();
   if (mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1) {
     g.cur.dead_draws++;
     return;
@@ -6469,19 +6501,30 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
   {
     /* (AI-assisted) state, vertex buffer, then (after citro3d's pending updates) the matrix
      * as float24 and the draw */
+    u64 t = PR_T();
     apply_state(state, mesh_mode);
+    PR_ADD(PR_MESH_STATE, t);
+    t = PR_T();
     raw_mesh_buffers(ms);
+    PR_ADD(PR_MESH_BUF, t);
+    t = PR_T();
     raw_sync();
+    PR_ADD(PR_MESH_SYNC, t);
+    t = PR_T();
     /* the draw distance fog's row only with the game fog off: the df programs don't read the other */
     if (fa) {
       raw_mesh_matrix(matrix, df ? 15 : 18);
     } else {
       raw_mesh_matrix_lut(matrix);
     }
+    PR_ADD(PR_MESH_MTX, t);
+    t = PR_T();
     raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
+    PR_ADD(PR_MESH_DRAW, t);
   }
   g.cur.draws++;
   g.cur.triangles += index_count / 3;
+  PR_ADD(PR_MESH, pr0);
 }
 
 void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int mesh,
@@ -6724,7 +6767,16 @@ int ctr_gpu_micro_line(char* out, int size) {
   s_defer_added = 0;
   s_defer_flushed = 0;
   frame0 = (u32)g.frame_no;
-  return l < size ? l : size - 1;
+  int len = l < size ? l : size - 1;
+#ifdef CTR_PROBES
+  for (int k = 0; k < PR_N && len < size - 48; k++) {
+    len += snprintf(out + len, (size_t)(size - len), "; %s %.3f ms (%.1f)", kProbeNames[k],
+                    (double)s_pr_ticks[k] / (SYSCLOCK_ARM11 / 1000.0) / f, s_pr_calls[k] / f);
+    s_pr_ticks[k] = 0;
+    s_pr_calls[k] = 0;
+  }
+#endif
+  return len;
 }
 
 int ctr_gpu_has_stencil(void) {
@@ -7197,12 +7249,18 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
   if (!cmd_room_for(CMD_DRAW_WORDS + 320)) {
     return;
   }
+  const u64 pr0 = PR_T();
   /* c3l v23: a texture with an alpha mask (on unit 2) */
   use_program(g.ps->mask_ok && tex_mask(tex_res(state->tex)) >= 0 ? PROG_SKIN_MASK : PROG_SKIN);
   const MeshSlot* ms = &g.meshes[mesh];
+  u64 t = PR_T();
   apply_state_tint(state, 2, 0xffffffffu);
+  PR_ADD(PR_SKIN_STATE, t);
   raw_vertex_buffer(ms->verts_pa, 0x543210, RAW_BUF_FLAGS1(24, 6, 0));
+  t = PR_T();
   raw_sync();
+  PR_ADD(PR_SKIN_SYNC, t);
+  t = PR_T();
   /* matrix and lights: uploaded when they change (the draws of a model share them) */
   const int same_clip = g.last_skin_valid && words_equal(g.last_skin_clip, clip, 16);
   /* (AI-assisted) bones and lights: their own registers (skin_bl_valid, while the skin program
@@ -7221,6 +7279,8 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
   if (g.ps->uloc_skin_mfog >= 0 && g.skin_mfog_gen != g.merc_fog_gen) {
     skin_fog_rows();
   }
+  PR_ADD(PR_SKIN_CLIP, t);
+  t = PR_T();
   if (palette_count > CTR_MAX_PALETTE) {
     palette_count = CTR_MAX_PALETTE;
   }
@@ -7235,6 +7295,8 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
     g.last_skin_palette_count = palette_count;
     g.last_skin_bones_id = bones_id;
   }
+  PR_ADD(PR_SKIN_ROWS, t);
+  t = PR_T();
   if (!same_lights) {
     /* (AI-assisted, gpuopt) the words made once per instance (skin_light_words): shader_opt's
      * scaled light colors */
@@ -7242,11 +7304,15 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
     raw_end(raw_unif(raw_ptr(), g.ps->uloc_skin_lights, le->words, 28, 1));
     memcpy(g.last_skin_lights, lights, sizeof(g.last_skin_lights));
   }
+  PR_ADD(PR_SKIN_LIGHTS, t);
   g.last_skin_valid = 1;
   g.skin_bl_valid = 1;
+  t = PR_T();
   raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
+  PR_ADD(PR_SKIN_DRAW, t);
   g.cur.draws++;
   g.cur.triangles += index_count / 3;
+  PR_ADD(PR_SKIN, pr0);
 }
 
 void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16], const float* bones,
