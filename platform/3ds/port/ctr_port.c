@@ -1591,27 +1591,45 @@ int ctr_core1_share(void) {
   return s_cpu_limit;
 }
 
-static void core_probe_thread(void* arg) {
-  *(volatile int*)arg = 1;
+/* iterations of a small integer loop in 100 ms of wall time: a core's share shows as fewer */
+static u32 core_probe_spin(void) {
+  const u64 end = svcGetSystemTick() + (u64)SYSCLOCK_ARM11 / 10;
+  volatile u32 x = 1;
+  u32 n = 0;
+  while (svcGetSystemTick() < end) {
+    for (int i = 0; i < 1000; i++) {
+      x = x * 1664525u + 1013904223u;
+    }
+    n++;
+  }
+  return n;
 }
 
-/* what the console grants: the first core 1 share's result and whether core 3 takes a thread */
+static void core_probe_thread(void* arg) {
+  *(volatile u32*)arg = core_probe_spin() + 1;
+}
+
+/* what the console grants: the first core 1 share's result, and core 3's speed against core 0 */
 void ctr_core_probe(char* out, unsigned int size) {
   u32 got = 0;
   APT_GetAppCpuTimeLimit(&got);
-  volatile int ran = 0;
+  volatile u32 ran = 0;
   int core3 = -1;
+  u32 here = 0;
   if (ctr_is_new3ds()) {
+    here = core_probe_spin();
     Thread t = threadCreate(core_probe_thread, (void*)&ran, 4096, 0x30, 3, false);
     core3 = t ? 1 : 0;
-    if (t && R_SUCCEEDED(threadJoin(t, 1000000000ULL)) && ran) {
+    if (t && R_SUCCEEDED(threadJoin(t, 2000000000ULL)) && ran) {
       threadFree(t); /* (one that never ran keeps its stack) */
     }
   }
-  snprintf(out, size, "core 1 share: asked %d%% first -> %08lx, now %lu%%; core 3 thread: %s%s",
+  snprintf(out, size,
+           "core 1 share: asked %d%% first -> %08lx, now %lu%%; core 3 thread: %s; 100 ms of work: "
+           "this core %lu, core 3 %lu",
            s_cpu_first, (unsigned long)s_cpu_first_rc, (unsigned long)got,
-           core3 < 0 ? "not tried" : core3 ? "created" : "refused",
-           core3 == 1 ? (ran ? ", ran" : ", never ran") : "");
+           core3 < 0 ? "not tried" : !core3 ? "refused" : ran ? "created, ran" : "created, never ran",
+           (unsigned long)here, (unsigned long)(ran ? ran - 1 : 0));
 }
 
 int ctr_core1_enable(void) {
