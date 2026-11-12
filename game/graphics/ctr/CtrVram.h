@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -66,7 +67,9 @@ class CtrVram {
    * source memory afterwards (the common textures are uploaded once, at boot).
    */
   void upload_texture_page_now(const u8* tpage, int mode, const u8* ee_mem, u32 s7_ptr) {
+    m_upload_now = true;
     upload_texture_page(tpage, mode, ee_mem, s7_ptr);
+    m_upload_now = false;
     flush_pending();
     // also chunks an identical earlier upload left lazy (that upload is skipped)
     materialize(m_page_first, m_page_end);
@@ -175,6 +178,8 @@ class CtrVram {
   };
   /*! (AI-assisted, j2-mem2) the bytes the VRAM copy holds (sparse: the chunks written so far) */
   u32 copy_bytes() const { return m_full_chunks * kChunkBytes + m_top_chunks * (kChunkBytes / 4); }
+  /*! the chunks of the VRAM copy by what they hold (memory log) */
+  std::string copy_text();
   const Stats& stats() const { return m_stats; }
 
  private:
@@ -218,6 +223,32 @@ class CtrVram {
   const u8* m_lazy_src[256] = {};
   u64 m_lazy_key[256] = {};
   u32 m_lazy_n = 0;
+  // per chunk: the last per-frame page upload over it (its frame, the chunk's source and page
+  // key); frame 0: none, or uploaded "now" (its source may be gone)
+  u32 m_frame = 1;
+  bool m_upload_now = false;
+  u32 m_up_frame[256] = {};
+  const u8* m_up_src[256] = {};
+  u64 m_up_key[256] = {};
+  void note_page_upload(const u8* src, u32 dest_block, u32 words, u64 page_key, bool now);
+  // Chunk memory given back (CtrVram.cpp drop_cold). Per chunk: the source and page key of the
+  // page's chunk it holds (nullptr: something else), the frame its bytes were last read or
+  // written in part, whether it waits for its source again (m_relazy; m_dropped: dropped while
+  // its page was uploaded every frame)
+  const u8* m_src[256] = {};
+  u64 m_key[256] = {};
+  u32 m_touch[256] = {};
+  u8 m_dropped[256] = {}, m_relazy[256] = {};
+  u32 m_drop_at = 0;
+  u32 m_drops = 0, m_drop_back = 0, m_drop_lost = 0, m_drop_stopped = 0;
+  bool m_page_write = false;  // a page's whole chunk is being written
+  // host check (env CTR_VRAM_CHECK): the bytes dropped, compared when the chunk is read again
+  std::unique_ptr<u8[]> m_shadow[256];
+  u64 m_shadow_id[256] = {};
+  u32 m_drop_checked = 0, m_drop_bad = 0;
+  static bool drop_check();
+  void free_chunk(u32 c, bool same_bytes);
+  void drop_cold();
   u32 m_page_first = 0, m_page_end = 0;  // the last upload_texture_page's blocks
   void materialize(u32 first_block, u32 end_block);
   void materialize_all() { materialize(0, kChunkCount * 64); }

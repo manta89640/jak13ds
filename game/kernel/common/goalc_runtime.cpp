@@ -773,10 +773,12 @@ u32 goalc_link_module_entry(const u8* link,
 // Calling GOAL
 // ---------------------------------------------------------------------------
 
+extern u32 g_ee_main_mem_size;  // game/runtime.cpp: the bytes of EE memory that exist
+
 bool goalc_on_goal_stack() {
   uintptr_t sp;
   GOALC_READ_HOST_SP(sp);
-  return sp > (uintptr_t)goalc_mem && sp <= (uintptr_t)goalc_mem + EE_MAIN_MEM_SIZE;
+  return sp > (uintptr_t)goalc_mem && sp <= (uintptr_t)goalc_mem + g_ee_main_mem_size;
 }
 
 namespace {
@@ -827,7 +829,7 @@ u64 goalc_call_goal(u32 f, u64 a, u64 b, u64 c, u64 st) {
 }
 
 u64 goalc_call_goal_on_stack(u32 f, u8* stack_top, u64 st) {
-  ASSERT(stack_top > goalc_mem && stack_top <= goalc_mem + EE_MAIN_MEM_SIZE);
+  ASSERT(stack_top > goalc_mem && stack_top <= goalc_mem + g_ee_main_mem_size);
   goalc_st = st;
   u64 saved_pp = goalc_pp;
   goalc_pp = st;
@@ -875,7 +877,7 @@ void goalc_print_backtrace(const goalc_ctx* ctx) {
     }
 #endif
     lg::error("  [{}] pc 0x{:x} sp/fp #x{:x}: {}", depth, pc, fp - (uintptr_t)goalc_mem, where);
-    if (!fp || fp < (uintptr_t)goalc_mem || fp >= (uintptr_t)goalc_mem + EE_MAIN_MEM_SIZE) {
+    if (!fp || fp < (uintptr_t)goalc_mem || fp >= (uintptr_t)goalc_mem + g_ee_main_mem_size) {
       break;
     }
     uintptr_t next_fp;

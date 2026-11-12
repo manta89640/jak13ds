@@ -604,6 +604,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     }
   }
   if (m_rs.log_now) {
+    lg::info("[ctr] VRAM copy: {}", m_vram->copy_text());
     const auto& vs = m_vram->stats();
     lg::debug("[ctr] frame {}: {} draws {} tris, vram uploads {} (written {}, chunks {} written, {} "
               "already there), relocates skipped {}, textures decoded {} (reused {}), gpu "

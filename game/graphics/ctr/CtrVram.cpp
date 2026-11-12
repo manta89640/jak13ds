@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 
@@ -31,6 +32,8 @@ static int lookup_jak2_texture_dest_offset(int, int) {
 #endif
 
 #include "game/graphics/ctr/ctr_gpu.h"
+
+extern u32 g_ee_main_mem_size;  // game/runtime.cpp: the bytes of EE memory that exist
 
 namespace {
 constexpr u32 kVramBytes = 4 * 1024 * 1024;
@@ -231,6 +234,10 @@ void CtrVram::note_chunks() const {
 
 u8* CtrVram::make_full(u32 chunk) {
   // (only sparse copies have chunks without memory)
+  if (m_shadow[chunk] && !m_page_write) {
+    m_drop_bad++;  // (check: written in part without the bytes dropped)
+    m_shadow[chunk].reset();
+  }
   std::unique_ptr<u8[]> mem(new u8[kChunkBytes]());
   u8* c = mem.get();
   if (m_is_top[chunk]) {
@@ -396,6 +403,7 @@ void CtrVram::mark_unique(u32 first_block, u32 end_block) {
   for (u32 c = c0; c <= c1 && c < c0 + kChunks; c++) {
     m_chunk_id[c % kChunks] = m_next_unique_id;
     m_next_unique_id += 2;
+    m_src[c % kChunks] = nullptr;  // (no page's chunk any more)
   }
 }
 
@@ -624,11 +632,11 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
   }
   words = (words + 4095) & ~4095u;
   // the PS2 reads past the page's data to fill the last chunk: stay inside EE memory
-  if ((u64)seg.block_data_ptr + (u64)words * 4 > (u64)EE_MAIN_MEM_SIZE) {
-    if (seg.block_data_ptr >= (u32)EE_MAIN_MEM_SIZE) {
+  if ((u64)seg.block_data_ptr + (u64)words * 4 > (u64)g_ee_main_mem_size) {
+    if (seg.block_data_ptr >= g_ee_main_mem_size) {
       return;
     }
-    words = ((u32)EE_MAIN_MEM_SIZE - seg.block_data_ptr) / 4 / 128 * 128;
+    words = (g_ee_main_mem_size - seg.block_data_ptr) / 4 / 128 * 128;
   }
   const u32 dest_block = seg.dest / 64;
   // whole 32 row chunks of a 128 pixel wide image: a contiguous block range
@@ -650,6 +658,7 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
   // skip the upload if this exact page is already there
   const u8* src = ee_mem + seg.block_data_ptr;
   const u64 page_key = ((u64)page.id << 32 | page.name_ptr) ^ ((u64)(uintptr_t)tpage << 7);
+  note_page_upload(src, dest_block, words, page_key, m_upload_now);
   u64 hash;
   HashMemo& hm = m_hash_memo[(((uintptr_t)src >> 12) ^ ((uintptr_t)src >> 18) ^ words) % kHashMemos];
   const u32 epoch = m_epoch ? *m_epoch : 0;
@@ -681,6 +690,136 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
   trim_pending(dest_block, end_block);
   m_pending.push_back(PendingUpload{src, dest_block, end_block, words, page_key});
   m_stats.uploads++;
+}
+
+void CtrVram::note_page_upload(const u8* src, u32 dest_block, u32 words, u64 page_key, bool now) {
+  if (dest_block % kChunkBlocks) {
+    return;
+  }
+  for (u32 done = 0; done + kChunkWords <= words; done += kChunkWords) {
+    const u32 c = (dest_block / kChunkBlocks + done / kChunkWords) % kChunks;
+    m_up_frame[c] = now ? 0 : m_frame;
+    m_up_src[c] = src + (size_t)done * 4;
+    m_up_key[c] = page_key;
+  }
+}
+
+std::string CtrVram::copy_text() {
+  u32 live = 0, page = 0, uniq = 0, lazy = 0;
+  for (u32 c = 0; c < kChunks; c++) {
+    if (!m_wr[c]) {
+      continue;
+    }
+    if (m_lazy_src[c]) {
+      lazy++;
+    } else if (!(m_chunk_id[c] & 1)) {
+      uniq++;
+    } else if (m_up_frame[c] + 2 >= m_frame && m_up_frame[c] && m_up_src[c] == m_src[c]) {
+      live++;
+    } else {
+      page++;
+    }
+  }
+  std::string check;
+  if (drop_check()) {
+    check = fmt::format("; check: {} read again compared with the bytes dropped, {} differed",
+                        m_drop_checked, m_drop_bad);
+  }
+  return fmt::format("{} full chunks ({} a page upload of this frame, {} another page's or an "
+                     "older one's, {} not a page's, {} waiting to be written), {} top-byte chunks; "
+                     "{} chunks' memory given back so far ({} read again from their source, {} of "
+                     "them from a changed one; {} taken back when their page's uploads stopped){}",
+                     m_full_chunks, live, page, uniq, lazy, m_top_chunks, m_drops, m_drop_back,
+                     m_drop_lost, m_drop_stopped, check);
+}
+
+bool CtrVram::drop_check() {
+#ifdef __3DS__
+  return false;
+#else
+  static const bool on = getenv("CTR_VRAM_CHECK") != nullptr;
+  return on;
+#endif
+}
+
+void CtrVram::free_chunk(u32 c, bool same_bytes) {
+  if (drop_check() && same_bytes) {
+    m_shadow[c] = std::move(m_own[c]);
+    m_shadow_id[c] = m_chunk_id[c];
+  }
+  m_own[c].reset();
+  m_wr[c] = nullptr;
+  m_rd[c] = kZeroChunk;
+  m_full_chunks--;
+  m_drops++;
+  note_chunks();
+}
+
+// A full chunk whose bytes were not read for kColdFrames frames gives its memory back when they
+// can be had again from a page's source in EE memory, or are never read again:
+//  - waiting to be written (m_lazy_src): its bytes are written whole before any read;
+//  - a page's chunk (m_src) with another page's upload pending over all of it (the pages that
+//    alternate in the same VRAM), or whose page was uploaded this frame: back to waiting for its
+//    source, if that still holds what the chunk does (its id).
+// A chunk dropped while its page was uploaded takes its bytes back when the uploads stop (the
+// source may go). Once a frame: kLook chunks looked at, kDrops dropped.
+void CtrVram::drop_cold() {
+  constexpr u32 kColdFrames = 150, kLook = 64, kDrops = 2;
+  if (!m_sparse) {
+    return;
+  }
+  u32 drops = 0;
+  for (u32 k = 0; k < kLook && drops < kDrops; k++) {
+    const u32 c = m_drop_at;
+    m_drop_at = (m_drop_at + 1) % kChunks;
+    if (m_dropped[c]) {
+      if (!m_lazy_src[c]) {
+        m_dropped[c] = 0;
+      } else if (m_up_frame[c] + 1 < m_frame || m_up_src[c] != m_lazy_src[c]) {
+        m_drop_stopped++;
+        materialize(c * kChunkBlocks, (c + 1) * kChunkBlocks);
+      }
+      continue;
+    }
+    if (!m_wr[c] || !m_own[c] || m_frame - m_touch[c] < kColdFrames) {
+      continue;
+    }
+    if (m_lazy_src[c]) {
+      free_chunk(c, false);
+      drops++;
+      continue;
+    }
+    const u8* const src = m_src[c];
+    if (!(m_chunk_id[c] & 1) || !src) {
+      continue;
+    }
+    const bool live = m_up_frame[c] == m_frame && m_up_src[c] == src && m_up_key[c] == m_key[c];
+    bool dead = false;
+    for (size_t i = 0; !live && !dead && i < m_pending.size(); i++) {
+      const auto& p = m_pending[i];
+      const u32 b = c * kChunkBlocks;
+      if (p.dest_block <= b && b + kChunkBlocks <= p.end_block &&
+          (b - p.dest_block) % kChunkBlocks == 0) {
+        const u32 at = (b - p.dest_block) / kChunkBlocks * kChunkWords;
+        dead = at + kChunkWords <= p.words &&
+               chunk_id(p.src + (size_t)at * 4, p.page_key) != m_chunk_id[c];
+      }
+    }
+    if (!live && !dead) {
+      continue;
+    }
+    drops++;  // (a hash of its source)
+    if (page_chunk_id(src, m_key[c]) != m_chunk_id[c]) {
+      m_src[c] = nullptr;  // (its source went: kept)
+      continue;
+    }
+    m_lazy_src[c] = src;
+    m_lazy_key[c] = m_key[c];
+    m_lazy_n++;
+    m_dropped[c] = live;
+    m_relazy[c] = 1;
+    free_chunk(c, true);
+  }
 }
 
 const void* CtrVram::upload_source(u32 block, u64* hash) const {
@@ -725,13 +864,20 @@ void CtrVram::write_upload(const u8* src, u32 dest_block, u32 words, u64 page_ke
         m_stats.chunks_skipped++;
         continue;
       }
+      m_shadow[c].reset();  // (check: another page's chunk now)
+      m_dropped[c] = m_relazy[c] = 0;
       if (bytes) {
+        m_page_write = true;
         write_rows(s, block, n);
+        m_page_write = false;
         m_stats.chunks_written++;
         if (m_lazy_src[c]) {
           m_lazy_src[c] = nullptr;
           m_lazy_n--;
         }
+        m_src[c] = s;
+        m_key[c] = page_key;
+        m_touch[c] = m_frame;
       } else {
         if (!m_lazy_src[c]) {
           m_lazy_n++;
@@ -769,10 +915,17 @@ u64 CtrVram::chunk_id(const u8* chunk_src, u64 page_key) {
 }
 
 void CtrVram::materialize(u32 first_block, u32 end_block) {
-  if (!m_lazy_n || end_block <= first_block) {
+  if (end_block <= first_block) {
     return;
   }
+  // (every read and every write in part comes through here first: drop_cold)
   const u32 c0 = first_block / kChunkBlocks, c1 = (end_block - 1) / kChunkBlocks;
+  for (u32 k = c0; k <= c1 && k < c0 + kChunks; k++) {
+    m_touch[k % kChunks] = m_frame;
+  }
+  if (!m_lazy_n) {
+    return;
+  }
   for (u32 k = c0; k <= c1 && k < c0 + kChunks; k++) {
     const u32 c = k % kChunks;
     const u8* s = m_lazy_src[c];
@@ -781,9 +934,25 @@ void CtrVram::materialize(u32 first_block, u32 end_block) {
     }
     m_lazy_src[c] = nullptr;
     m_lazy_n--;
+    m_page_write = true;
     write_rows(s, c * kChunkBlocks, kChunkWords);
+    m_page_write = false;
     m_stats.chunks_written++;
+    m_src[c] = s;
+    m_key[c] = m_lazy_key[c];
     const u64 id = page_chunk_id(s, m_lazy_key[c]);
+    if (m_relazy[c]) {
+      m_drop_back++;
+      m_drop_lost += id != m_chunk_id[c];
+    }
+    if (m_shadow[c]) {
+      if (id == m_shadow_id[c]) {
+        m_drop_checked++;
+        m_drop_bad += memcmp(m_wr[c], m_shadow[c].get(), kChunkBytes) != 0;
+      }
+      m_shadow[c].reset();
+    }
+    m_dropped[c] = m_relazy[c] = 0;
     if (id != m_chunk_id[c]) {
       // the source changed since: what it holds now, under an id of its own
       m_chunk_id[c] = id;
@@ -1370,7 +1539,9 @@ bool CtrVram::decode_for_cpu(u64 tex0, std::vector<u32>* out, int* w, int* h) {
     flush_pending(t.tbp0(), t.tbp0() + blocks);
     flush_pending(t.cbp(), t.cbp() + 4);
   }
-  materialize_all();
+  // (what it reads, as get_texture)
+  materialize(t.tbp0(), t.tbp0() + texture_block_span(t));
+  materialize(t.cbp(), t.cbp() + 4);
   const Relocation* reloc = find_relocation(t.tbp0(), (u32)t.psm());
   Range r;
   if (reloc) {
@@ -1693,6 +1864,8 @@ bool CtrVram::prewarm_page(const u8* tpage, int mode, const u8* ee_mem, u32 s7_p
 }
 
 void CtrVram::prewarm(double budget_ms) {
+  drop_cold();
+  m_frame++;
   if (m_prewarm_at >= m_prewarm.size()) {
     return;
   }
