@@ -4962,6 +4962,7 @@ struct TieLodStats {
   size_t groups = 0, candidates = 0, selected = 0, no_dist = 0;
   size_t core = 0;  // (AI-assisted, streaming) selected groups the budget took
   size_t morph = 0;  // selected groups with the PS2's geomorph (three versions)
+  size_t wind_ps2 = 0;  // wind groups at their prototype's PS2 far-plane
   size_t near_tris = 0, far_tris = 0;          // all groups: near / far geometry
   size_t sel_near_tris = 0, sel_far_tris = 0;  // the selected groups
   double cost_kb = 0, cost_all_kb = 0;         // estimated extra vertex + index data
@@ -5047,6 +5048,17 @@ void select_tie_lods(tfrag3::Level& level, const Options& opt, Converter* cv, Ti
     if (!tie_lod::ps2_dists(g_dist_prefix + level.level_name, names[i], &mid, &far)) {
       far = opt.tie_lod_default_m;
       st->no_dist += g.proto != 0xffff;
+      // a wind instance: its prototype's PS2 far-plane (the geomorph data)
+      const u64 wi = list[i].first & 0xffffffffffull;
+      if (g.proto == 0xffff && cv->morph && tree < cv->morph->trees[0].size() &&
+          wi < cv->morph->trees[0][tree].wind.size()) {
+        const auto& mt = cv->morph->trees[0][tree];
+        const u32 p = mt.wind[wi].proto;
+        if (p < mt.protos.size() && mt.protos[p].dists[3] > 0) {
+          far = mt.protos[p].dists[3] / 4096.f;
+          st->wind_ps2++;
+        }
+      }
     }
     dists[i] = far * 4096.f;
     st->groups++;

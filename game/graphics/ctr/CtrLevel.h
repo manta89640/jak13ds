@@ -1,5 +1,6 @@
 #pragma once
 
+#include "game/graphics/ctr/CtrDetail.h"
 #include "game/graphics/ctr/CtrLight.h"
 
 /*!
@@ -224,26 +225,13 @@ struct CtrLevelData {
   // the PS2 far-plane x detail_scale (+ hysteresis, + radius): never coarser than the PS2
   float lod_floor_k = 0.f;
   float lod_switch_error(size_t g) const {
-    // (a morph group's near data: within its far-plane)
-    if (g < group_mid.size() && group_mid[g] > 0) {
-      return lod_groups[g].dist * lod_floor_k;
-    }
-    const float e = std::max(std::max(lod_error[g], lod_groups[g].dist * lod_floor_k), lod_min_e);
-    if (lod_ring_e > 0) {
-      // the floor's factor: within ring 0 the config's switch
-      const float e_cfg = std::max(std::max(lod_error[g] * lod_cfg_ratio,
-                                            lod_groups[g].dist * lod_floor_k), lod_min_e);
-      return std::max(e, std::min(e_cfg, lod_ring_e));
-    }
-    return e;
+    // its near data: within its far-plane (a group without the geomorph: and its fade band)
+    return lod_groups[g].dist * lod_floor_k *
+           (g < group_mid.size() && group_mid[g] > 0 ? 1.f : ctr_detail::kFadeBand);
   }
-  // the floor moved the factor (else 0): ring 0 in the units of lod_switch_error, and the
-  // config's factor / this one
-  float lod_ring_e = 0.f, lod_cfg_ratio = 1.f;
-  float lod_bound_e() const { return std::max(lod_min_e, lod_ring_e); }
-  // (AI-assisted, titlemove) the title screen's least switch distance, in the units of
-  // lod_switch_error (distance / factor; 0 elsewhere)
-  float lod_min_e = 0.f;
+  // the floor moved the factor (else 0): ring 0 in the units of lod_switch_error
+  float lod_ring_e = 0.f;
+  float lod_bound_e() const { return lod_ring_e; }
   std::vector<int> textures;  // ctr_gpu handles
   std::vector<u8> tex_min_alpha;  // (AI-assisted) smallest texel alpha per texture (0xff = 1.0)
   u32 tex_empty = 0;  // (AI-assisted) c3l v15: textures the file has no texels for (in atlases)
@@ -309,7 +297,8 @@ struct CtrLevelData {
   // bits 0-1 detailed/coarse (1 near, 2 far, 0 not decided yet), bit 2 within its draw distance,
   // bit 3 shrub runs faded, bit 4 its distance decided at least once
   std::vector<u8> chunk_state;
-  std::vector<u16> lod_switch_at;  // per tie LOD group: the frame (u16) it last switched version
+  // per tie LOD group without the geomorph: its near version's weight in its crossfade (128: whole)
+  std::vector<u8> lod_fade;
   // (AI-assisted, title-popin) per chunk of tiers 1/2: a sphere around its lod_center holding both
   // versions of the cell (the same for both: their in-view tests agree), x y z r
   std::vector<float> lod_cell_sphere;
@@ -571,7 +560,6 @@ struct CtrLevelData {
   std::vector<u32> unit_group_first;
   std::vector<u32> unit_groups;
   std::vector<u8> unit_ok;  // per unit, this frame (draw_level): there and within its distance
-  std::vector<u32> lod_hold_since;  // per LOD group: the frame its far version began to be kept
   bool streaming = false;
   float stream_k = 0.f;   // the last draw's tie LOD factor (a group is near within its error x
                           // this + its radius; 0: no near versions)
@@ -1532,7 +1520,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
     u32 row_first, row_count, rows_id;
     int mesh, slots_offset, first, count, nofog;
   };
-  std::vector<WindCall> m_wind_calls;
+  std::vector<WindCall> m_wind_calls, m_wind_fade_calls;
   std::vector<float> m_wind_rows;
   std::vector<s32> m_wind_row_of;  // per visible chunk (m_visible index): its rows, -1 none yet
   std::vector<u32> m_wind_row_id;

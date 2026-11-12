@@ -160,12 +160,6 @@ bool size_hist_on() {
   return on;
 }
 #endif
-// (AI-assisted, titlemove) the title screen's least tie LOD switch distance, meters
-// (CtrTfragRenderer::draw_level). Host, the flight's first ~8 s: switches in view 80 -> 19 (all at
-// 102-113 m; the island's groups are near from the reveal on), the flight's later parts +3-10k
-// triangles; 130 m: 7 switches, but +14-34k triangles later (Azahar: 201k triangles, 28 ms render
-// thread build where the gameplay distances drew 138k / 19.5 ms)
-constexpr float kTitleLodMin = 100.f;
 // below the render thread (0x2F) and the sound mixer (0x2E), which share core 2 with the loader
 constexpr int kLoaderPrio = 0x3C;
 // a prefetched level nothing asked for is dropped after this long
@@ -356,7 +350,7 @@ LevelMem level_mem(const CtrLevelData& lev) {
             vec_bytes(lev.stream_units) + vec_bytes(lev.chunk_unit) +
             vec_bytes(lev.group_unit_first) + vec_bytes(lev.group_unit_count) +
             vec_bytes(lev.group_units) + vec_bytes(lev.unit_group_first) +
-            vec_bytes(lev.unit_groups) + vec_bytes(lev.unit_ok) + vec_bytes(lev.lod_hold_since) +
+            vec_bytes(lev.unit_groups) + vec_bytes(lev.unit_ok) + vec_bytes(lev.lod_fade) +
             sizeof(CtrLevelData);
   if (lev.tod) {
     const auto& t = *lev.tod;
@@ -5141,11 +5135,6 @@ void load_tie_lod(c3l::Reader& f,
            lev->lod_error.empty() ? ", switched at the PS2 distances"
                                   : ", switched by screen-space error");
 }
-
-#ifndef __3DS__
-// (AI-assisted, lodnear) host log counters (CTR_LOD_LOG), by unit state
-u64 g_lod_far_why[4] = {}, g_lod_far_close[4] = {};
-#endif
 
 // (AI-assisted, j2vis) c3l v20 prototype visibility (c3l::ExtProtoVis): the prototypes the game
 // hides by task state, each with its runs (mapped onto vis_runs like load_tie_lod) and their chunks.
@@ -10409,10 +10398,10 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
     u8 nomerge = 0, lod_version = 0;
     if (LOD) {
       const auto& rl = run_lod[r];
-      // (bit 3: a morph group's mid version, c3l::ExtMorph)
+      // (bit 3: a morph group's mid version, c3l::ExtMorph; bit 7: a crossfade, both)
       const u8 gs = rl.lod != c3l::kRunLodAlways ? lod_state[rl.group] : 0;
       const u8 want = (gs & 1) ? ((gs & 8) ? c3l::kRunLodMid : c3l::kRunLodNear) : c3l::kRunLodFar;
-      if (rl.lod != c3l::kRunLodAlways && rl.lod != want) {
+      if (rl.lod != c3l::kRunLodAlways && rl.lod != want && !(gs & 128)) {
         nomerge = 1;
         if (s) {
           s = false;
@@ -11402,23 +11391,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   auto R = make_cam_mat(cam.rot, cam.perspective, cam.fog.x(), cam.hvdf_off.z());
   m_late_in_view = 0;  // (AI-assisted, j2intro) counted below, reported after the chunk loop
-  // (AI-assisted, titlemove) the title screen (the title level loaded): its attract camera flies a
-  // fixed path over Sandover. No tie group switches LOD (geometry 3 -> 0) nearer than
-  // kTitleLodMin there: at the gameplay distances (the PS2 far-plane, 35-75 m for the island) the
-  // island's palms, grass, hut and rock switched one after another on screen as the flight came
-  // nearer (807 switches in view in 40 s in Azahar; 81 in its first ~8 s on the host, objects up to
-  // 137 px across), each a step in shape and in the vertex colors (the far versions' own shading)
+  // the title screen (the title level loaded)
   m_levels->loaded(&m_loaded);
   bool title_on = false;
   for (const auto* l : m_loaded) {
     title_on = title_on || (m_jak2_slot < 0 && l->name == "title");  // (Jak 1's title level)
   }
-  float title_min = kTitleLodMin;
-#ifndef __3DS__
-  if (const char* e = getenv("CTR_TITLE_LOD_MIN")) {
-    title_min = (float)atof(e);  // (host test: meters; 0 = as in gameplay)
-  }
-#endif
   // (AI-assisted, title3) shown again after a gap (the title's reveal of Sandover behind the logo,
   // a level's start): reveal_frame (late near chunks in view)
   {
@@ -12035,17 +12013,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   const u32 frame32p = std::max<u32>((u32)rs.frame_idx, 1u);
   u32 late_groups = 0;  // (AI-assisted, streaming) drawn far: their near chunks not there yet
   u32 held_groups = 0;  // (AI-assisted, streaming) ... there now, but kept far while in view
-#ifndef __3DS__
-  if (getenv("CTR_LOD_LOG") && rs.frame_idx % 30 == 0 &&
-      (g_lod_far_why[0] + g_lod_far_why[2] + g_lod_far_why[3])) {
-    lg::info("[lodlog] {}: group frames in view within their distance but far (30 frames): late {} "
-             "(within 20 m: {}), beyond the near chunk's distance {} ({}), no near chunk {} ({})",
-             lev.name, g_lod_far_why[3], g_lod_far_close[3], g_lod_far_why[2], g_lod_far_close[2],
-             g_lod_far_why[0], g_lod_far_close[0]);
-    memset(g_lod_far_why, 0, sizeof(g_lod_far_why));
-    memset(g_lod_far_close, 0, sizeof(g_lod_far_close));
-  }
-#endif
+  bool lod_fading = false;  // a group without the geomorph crossfades (lod_fade)
   u32 late_view = 0;    // (AI-assisted, title3) ... late and in view
   // ... late, in view and within ring 0 (its surface)
   u32 ring0_late = 0;
@@ -12078,31 +12046,19 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // never coarser than the PS2, and where the PS2 distance decides, its far version's error at
     // the switch is under tie_lod_px
     lev.lod_floor_k = by_error && k > 0 ? k0p / k : 0.f;
-    // (AI-assisted, titlemove) the title: no group switches nearer than kTitleLodMin meters
-    lev.lod_min_e = title_on && by_error && k > 0 ? title_min * 4096.f / k : 0.f;
     // ring 0: the floor's factor never moves a switch nearer than kNearRingMeters
     const float k_cfg = by_error ? k0 * focal / std::max(settings.tie_lod_px, 0.25f) : k0p;
     const bool ring_on = by_error && k > 0 && k < k_cfg;
     lev.lod_ring_e = ring_on ? ctr_detail::kNearRingMeters * 4096.f / k : 0.f;
-    lev.lod_cfg_ratio = ring_on ? k_cfg / k : 1.f;
 #ifndef __3DS__
     static const bool no_floor = getenv("CTR_LOD_NO_FLOOR") != nullptr;  // (host A/B: as before)
     if (no_floor) {
       lev.lod_floor_k = 0.f;
     }
 #endif
-    if (lev.lod_switch_at.size() != lev.lod_groups.size()) {
-      lev.lod_switch_at.assign(lev.lod_groups.size(), 0);
+    if (lev.lod_fade.size() != lev.lod_groups.size()) {
+      lev.lod_fade.assign(lev.lod_groups.size(), 0);
     }
-    u16* const lod_sw = lev.lod_switch_at.data();
-    const u16 f16 = (u16)rs.frame_idx;
-    constexpr u16 kLodDwellFrames = 45;
-    if (has_units && lev.lod_hold_since.size() != lev.lod_groups.size()) {
-      lev.lod_hold_since.assign(lev.lod_groups.size(), 0);
-    }
-    // (AI-assisted, streaming) the longest a group drawn far for want of its data is kept far in
-    // view once the data came (1 s at 30 fps)
-    constexpr u32 kHoldFrames = 30;  // (AI-assisted, lodnear: was 120)
     // the PS2's geomorph (c3l::ExtMorph): its distances x detail_scale, never pulled in by the
     // floor (geometry 3's own vertex colors can't carry geometry 0's lighting: nearer, it shows)
     const bool morph_on = !lev.group_mid.empty();
@@ -12122,20 +12078,18 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // members all were far and not held last frame (state 2) stands for their decisions: each
     // would come out far again, state 2
     const u8* const lod_st = lev.lod_state.data();
-    const bool lod_skip = by_error && lev.lod_state.size() == lev.lod_groups.size();
+    const bool lod_skip = lev.lod_state.size() == lev.lod_groups.size();
     const bool cull_check = cull_check_enabled();
     bool lod_check = false;
     u32 chk_near = 0;
     for (const auto& gcl : lev.lod_clusters) {
       if (lod_skip && !(gcl.flags & CtrLevelData::kClPlain)) {
-        // (lod_switch_error: lodnear's PS2 floor and titlemove's title minimum raise the error)
-        const float sw = by_error ? std::max(std::max(gcl.raw[0], gcl.raw[1] * lev.lod_floor_k),
-                                             lev.lod_bound_e())
-                                  : gcl.raw[1];
-        bool far = !(k > 0);
+        // (every member's near version within its far-plane x kd, with the fade band beyond)
+        bool far = !(kd > 0);
         if (!far) {
           const float dx = gcl.c[0] - cx, dy = gcl.c[1] - cy, dz = gcl.c[2] - cz;
-          const float reach = (gcl.a + std::max(sw, 0.f) * k) * 1.0002f + 256.f;
+          const float reach =
+              (gcl.a + gcl.raw[1] * kd * ctr_detail::kFadeBand) * 1.0002f + 256.f;
           far = dx * dx + dy * dy + dz * dz > reach * reach;
         }
         if (far) {
@@ -12243,158 +12197,78 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         near += v < 2;
         continue;
       }
-      const float dx = lg.bsphere[0] - cx, dy = lg.bsphere[1] - cy, dz = lg.bsphere[2] - cz;
-      const float d2 = dx * dx + dy * dy + dz * dz;
-      const float sw = by_error ? lev.lod_switch_error(g) : lg.dist;
-      const float f = (st & 1) ? 1.1f : 1.f;
-      auto near_at = [&](float kk) {
-        const float lim = sw * kk * f + lg.bsphere[3];
-        return kk > 0 && d2 < lim * lim;
-      };
-      bool n = near_at(k);
-      // (AI-assisted, streaming) c3l v19: the near version only while every near chunk holding it
-      // is there and within its distance; else the far version (data late: statistics). A group
-      // drawn far in view for want of its data (bit 4: held) keeps its far version while in view
-      // once the data is there: switching then would be a pop on screen; it switches out of view
-      // (AI-assisted, title3) not while the screen is black: none was seen far
-      bool keep_far = (st & 4) != 0 && !g_screen_black;
-      const bool n_nat = n;  // (ctr_pop: by distance alone)
+      // a group without the geomorph (Jak 1's wind ties): its near version within its PS2
+      // far-plane x the factor, crossfaded into the far one over the fade band beyond it (both
+      // drawn there, the one going out blended over the other: lod_fade, bit 7; not tf_state's 5)
+      const float dv = std::sqrt(dx2(lg.bsphere)) - lg.bsphere[3];
+      const float fl = lg.dist * kd;
+      constexpr float kBand = ctr_detail::kFadeBand - 1.f;
+      float a = fl > 0 ? std::clamp((fl * ctr_detail::kFadeBand - dv) / (fl * kBand), 0.f, 1.f)
+                       : 0.f;
+#ifndef __3DS__
+      static const bool wind_hard = getenv("CTR_WIND_HARD") != nullptr;  // (host pricing)
+      if (wind_hard) {
+        a = dv < fl ? 1.f : 0.f;
+      }
+#endif
+      const float a_nat = a;
       bool gone = false;
-      bool held_now = false;
-      if (n && has_units) {
-        if (g >= lev.group_unit_count.size() || !lev.group_unit_count[g]) {
-          n = false;  // (a v19 group whose near version is in no near chunk: none to draw)
-        } else {
-          const u32* gu = &lev.group_units[lev.group_unit_first[g]];
-          bool ok = true, late = false;
-          for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
-            const u8 uo = lev.unit_ok[gu[j]];
-            ok = ok && uo == 1;
-            late = late || uo == 3;
-          }
-          gone = late;
-          if (!ok) {
-            n = false;
-#ifndef __3DS__
-            {
-              // (AI-assisted, lodnear) host log: groups in view within their distance drawn far,
-              // by why (worst unit state: 3 late, 2 beyond the near chunk's draw distance, 0 none)
-              static const bool lod_log2 = getenv("CTR_LOD_LOG") != nullptr;
-              if (lod_log2 && sphere_in_view(cam, lg.bsphere)) {
-                u8 w = 1;
-                for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
-                  const u8 uo = lev.unit_ok[gu[j]];
-                  w = uo == 3 ? 3 : (w == 3 ? 3 : (uo != 1 ? uo : w));
-                }
-                const float d = std::sqrt(d2) / 4096.f;
-                g_lod_far_why[w & 3] += 1;
-                if (d < 20.f) {
-                  g_lod_far_close[w & 3] += 1;
-                }
-              }
-            }
-#endif
-            // a level its string hides whole asks for no near chunks: none of its groups is late
-            if (late && !j2_hidden) {
-              late_groups++;
-              for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
-                if (lev.unit_ok[gu[j]] == 3) {
-                  m_levels->stream_late(lev, gu[j], rs.frame_idx);
-                }
-              }
-              const bool seen = sphere_in_view(cam, lg.bsphere);
-              m_late_in_view += seen;  // (AI-assisted, j2intro) Jak II
-              late_view += seen;       // (AI-assisted, title3) Jak 1
-              ring0_late += seen && ring0_seen(lg.bsphere);
-              // (AI-assisted, j2intro / title3) not while the screen is black: it switches as
-              // soon as the data is there
-              if (!keep_far && !g_screen_black && seen) {
-                keep_far = true;
-                lev.lod_hold_since[g] = (u32)rs.frame_idx;
-              }
-            }
-          } else if (keep_far && g_screen_black) {
-            keep_far = false;  // (AI-assisted, j2intro) black screen: near at once
-          } else if (keep_far) {
-            // kept far while in view, at most kHoldFrames, and while the switch would show: the
-            // far version's error at least 1.5 x tie_lod_px (the camera nearer than 2/3 of the
-            // group's near distance; near it the error is about tie_lod_px). (AI-assisted,
-            // lodnear) but not where the far version is plainly wrong: from 3 x tie_lod_px of
-            // error on (the camera within 1/3 of that distance) the near version at once. Held
-            // up to 4 s, a continue's late groups stayed coarse 3-15 m from the camera and then
-            // switched together
-            const float e = by_error ? lev.lod_error[g] : lg.dist;
-            const float lim = e * k / 1.5f + lg.bsphere[3], lim_close = e * k / 3.f + lg.bsphere[3];
-            if (sphere_in_view(cam, lg.bsphere) && d2 < lim * lim && d2 > lim_close * lim_close &&
-                (u32)rs.frame_idx - lev.lod_hold_since[g] < kHoldFrames) {
-              n = false;
-              held_groups++;
-              held_now = true;
-            } else {
-              keep_far = false;
-            }
-          }
+      if (a > 0 && has_units) {
+        // data presence only stops an upgrade; the near version comes and goes with its units'
+        // morph floor (a fade here)
+        bool ok = g < lev.group_unit_count.size() && lev.group_unit_count[g] > 0;
+        bool late = false;
+        const u32* gu = ok ? &lev.group_units[lev.group_unit_first[g]] : nullptr;
+        for (u32 j = 0; ok && j < lev.group_unit_count[g]; j++) {
+          ok = lev.unit_ok[gu[j]] == 1;
+          late = late || lev.unit_ok[gu[j]] == 3;
         }
-      } else if (!n) {
-        keep_far = false;  // (beyond its distance: far anyway)
-      }
-      // ctr_pop: these switch without a morph
-      const bool forced = n != n_nat && lev.group_unit_count.size() > g && lev.group_unit_count[g];
-      // in view, a switch back within kLodDwellFrames of the last one waits while the version
-      // drawn is there and not plainly wrong (a camera swinging across a switch distance)
-      if ((st & 2) && ((st & 1) != 0) != n && !forced && !keep_far && !g_screen_black &&
-          (u16)(f16 - lod_sw[g]) < kLodDwellFrames && sphere_in_view(cam, lg.bsphere)) {
-        if (n) {
-          const float e = by_error ? lev.lod_error[g] : lg.dist;
-          const float lim = e * k / 1.5f + lg.bsphere[3];
-          n = d2 < lim * lim;
-        } else {
-          bool ok = !has_units;
-          if (has_units && g < lev.group_unit_count.size() && lev.group_unit_count[g]) {
-            ok = true;
-            const u32* gu = &lev.group_units[lev.group_unit_first[g]];
+        gone = late;
+        if (!ok) {
+          a = 0.f;
+          if (late && !j2_hidden) {
+            late_groups++;
             for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
-              ok = ok && lev.unit_ok[gu[j]] == 1;
+              if (lev.unit_ok[gu[j]] == 3) {
+                m_levels->stream_late(lev, gu[j], rs.frame_idx);
+              }
+            }
+            const bool seen = sphere_in_view(cam, lg.bsphere);
+            m_late_in_view += seen;
+            late_view += seen;
+            ring0_late += seen && ring0_seen(lg.bsphere);
+            if (seen && !g_screen_black) {
+              for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
+                lev.stream_units[gu[j]].late_seen = frame32p;
+              }
             }
           }
-          n = ok;
+        }
+        for (u32 j = 0; ok && j < lev.group_unit_count[g]; j++) {
+          const auto& su = lev.stream_units[gu[j]];
+          a = std::min(a, 1.f - CtrLevelData::unit_floor(su, frame32p));
         }
       }
-      if ((st & 2) && ((st & 1) != 0) != n) {
-        lod_sw[g] = f16;
-      }
-#ifndef __3DS__
-      // (AI-assisted, lodnear) host log, env CTR_LOD_LOG: every switch of a group in view, its
-      // distance, the PS2 far-plane and the screen-error distance, and why it is far
-      static const bool lod_log = getenv("CTR_LOD_LOG") != nullptr;
-      if (lod_log && (st & 2) && ((st & 1) != 0) != n && sphere_in_view(cam, lg.bsphere)) {
-        const char* why = n ? "near" : !near_at(k) ? "dist" : keep_far ? "late/held" : "nodata";
-        lg::info("[lodlog] {} g{} {} d {:.1f} m (to surface {:.1f}) ps2 far {:.1f} err-dist {:.1f} "
-                 "r {:.1f} err {:.3f} m",
-                 lev.name, g, why, std::sqrt(d2) / 4096.f, (std::sqrt(d2) - lg.bsphere[3]) / 4096.f,
-                 lg.dist / 4096.f, by_error ? lev.lod_error[g] * k / 4096.f : 0.f,
-                 lg.bsphere[3] / 4096.f, by_error ? lev.lod_error[g] / 4096.f : 0.f);
-      }
-#endif
-      if (pop_log_on() && (st & 2) && ((st & 1) != 0) != n && sphere_in_view(cam, lg.bsphere)) {
-        (n ? g_pop.lod_up : g_pop.lod_down)++;
-        lg::info("[popL] f={} {} g{} {} d={:.1f} sw={:.1f} r={:.1f} keep_far={}", rs.frame_idx,
-                 lev.name, g, n ? "near" : (!near_at(k) ? "dist" : "nodata/late"),
-                 std::sqrt(d2) / 4096.f, (sw * k) / 4096.f, lg.bsphere[3] / 4096.f,
-                 keep_far ? 1 : 0);  // (titlemove: which group, why)
-      }
-      if (forced && pop_on && !far_level) {
+      const u8 fade = (u8)std::lround(a * 128.f);
+      const bool forced = a != a_nat;
+      if (forced && pop_on) {
         m_pop_kept.push_back((u32)g);
       }
-      if ((st & 2) && ((st & 1) != 0) != n && pop_on && sphere_in_view(cam, lg.bsphere)) {
-        pop(far_flip ? ctr_pop::kFar
-            : forced ? (gone ? ctr_pop::kEvict : held_now ? ctr_pop::kHold : ctr_pop::kUnit)
-                     : (st & 16) ? ctr_pop::kLate
-                                 : ctr_pop::kLod,
-            lg.bsphere, n ? "tie group near" : "tie group far", (u32)g);
+      // ctr_pop: a quarter of the crossfade or more in one frame (data that came or went)
+      if ((st & 2) && std::abs((int)fade - (int)lev.lod_fade[g]) >= 32 && pop_on &&
+          sphere_in_view(cam, lg.bsphere)) {
+        pop(forced ? (gone ? ctr_pop::kEvict : ctr_pop::kUnit) : ctr_pop::kLod,
+            lg.bsphere, fade ? "tie group near" : "tie group far", (u32)g);
+        if (pop_log_on()) {
+          lg::info("[popL] f={} {} g{} fade {} -> {} d={:.1f} far={:.1f} r={:.1f}", rs.frame_idx,
+                   lev.name, g, lev.lod_fade[g], fade, dv / 4096.f, fl / 4096.f,
+                   lg.bsphere[3] / 4096.f);
+        }
       }
-      st = (u8)((keep_far ? 4 : 0) | 2 | (n ? 1 : 0) | (forced ? 16 : 0));
-      near += n;
+      lev.lod_fade[g] = fade;
+      lod_fading = lod_fading || (fade > 0 && fade < 128);
+      st = (u8)(2 | (fade ? 1 : 0) | (fade > 0 && fade < 128 ? 128 : 0) | (forced ? 16 : 0));
+      near += fade > 0;
     }
       if (lod_check) {
         lod_check = false;
@@ -12906,6 +12780,28 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         runs_valid = true;
         faded = true;
         partly = true;
+      }
+      // a crossfading LOD group's runs (lod_fade): the version coming in whole up to half way,
+      // then the one going out blended over it
+      if (lod_fading && lod_chunk && !tf_chunk && runs_valid && !vista_tier) {
+        const u32 r0 = lev.chunk_first_run[ci];
+        const u32 nr = std::max<u32>(lev.chunk_run_count[ci], ch.vis_run_count);
+        const u8 base = m_tie_fade[ci] < kRunOpaque ? m_tie_fade[ci] : kRunOpaque;
+        bool any = false;
+        for (u32 r = r0; r < r0 + nr && r < lev.run_lod.size(); r++) {
+          const auto& rl = lev.run_lod[r];
+          u8 f = base;
+          if (rl.lod != c3l::kRunLodAlways && rl.group < lev.lod_state.size() &&
+              (lev.lod_state[rl.group] & 128)) {
+            const int a = lev.lod_fade[rl.group];
+            const int lf = std::min(rl.lod == c3l::kRunLodFar ? 2 * (128 - a) : 2 * a, 128);
+            f = (u8)std::min<int>(f, lf);
+            any = any || m_run_shown[r];
+          }
+          m_run_fade[r] = f;
+        }
+        faded = faded || any;
+        partly = partly || any;
       }
       // ctr_pop: drawn now, not chosen last frame
       if (!sel_last && m_pop_why[ci] != 0xff && !lev.is_unit(ci)) {
@@ -13967,12 +13863,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                        lev.wind_k.size() == 2 * lev.wind_insts.size();
   bool wind_inline = false;  // the ordered pass: drawn in its place
   m_wind_calls.clear();
+  m_wind_fade_calls.clear();
   if (wind_on) {
     m_wind_rows.clear();
     m_wind_row_of.assign(m_visible.size(), -1);
     m_wind_row_id.assign(m_visible.size(), 0);
   }
-  auto wind_submit = [&](u32 di, int slot, const VisibleChunk& vc, u32 first, u32 count) {
+  auto wind_submit = [&](u32 di, int slot, const VisibleChunk& vc, u32 first, u32 count,
+                         const ctr_draw_state* faded = nullptr) {
     const auto& ch = lev.chunks[vc.chunk];
     const u32 n = lev.chunk_wind_n[vc.chunk];
     if (m_wind_row_of[slot] < 0) {
@@ -13988,10 +13886,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         m_wind_rows.insert(m_wind_rows.end(), row, row + 4);
       }
     }
-    m_wind_calls.push_back({&lev.draw_states[di], &vc.gpu, (u32)m_wind_row_of[slot], n + 1,
-                            m_wind_row_id[slot], lev.meshes[vc.chunk], lev.chunk_wind[vc.chunk],
-                            (int)first, (int)count, vc.nofog ? 1 : 0});
-    if (wind_inline) {
+    (faded ? m_wind_fade_calls : m_wind_calls)
+        .push_back({faded ? faded : &lev.draw_states[di], &vc.gpu, (u32)m_wind_row_of[slot], n + 1,
+                    m_wind_row_id[slot], lev.meshes[vc.chunk], lev.chunk_wind[vc.chunk],
+                    (int)first, (int)count, vc.nofog ? 1 : 0});
+    if (wind_inline && !faded) {
 #ifdef __3DS__
       flush_calls(0);
 #endif
@@ -14164,6 +14063,20 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // GS's constant alpha; alpha blended draws keep theirs), next runs of the same fade joined
     auto fade_submit = [&](u32 first, u32 count, u8 fade) {
       const ctr_draw_state& st = lev.draw_states[di];
+      if (wind) {
+        // (a crossfading wind group: swayed, blended after the opaque draws)
+        const ctr_draw_state* use = &st;
+        if (st.blend == CTR_BLEND_OFF) {
+          ctr_draw_state& f = m_fade_states.emplace_back(st);
+          f.blend = CTR_BLEND_FIX;
+          f.fix = fade;
+          f.flags &= (u8)~CTR_STATE_EARLY_DEPTH;
+          use = &f;
+        }
+        wind_submit(di, slot, vc, first, count, use);
+        m_fade_runs++;
+        return;
+      }
       if (!m_fade_calls.empty() && fade_di == di && fade_fd == fade) {
         ctr_mesh_call& last = m_fade_calls.back();
         if (last.matrix == &vc.gpu && last.first_index + last.index_count == (int)first) {
@@ -14523,6 +14436,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     ctr_gpu_draw_mesh_prepared(c.state, c.matrix, c.mesh, c.first_index, c.index_count);
   }
 #endif
+  if (!m_wind_fade_calls.empty()) {
+    // the crossfading wind groups' blended versions
+#ifdef __3DS__
+    flush_calls(0);
+#else
+    ctr_gpu_soft_bucket((m_name.substr(0, 2) + "/windfade").c_str());
+#endif
+    m_wind_calls.swap(m_wind_fade_calls);
+    draw_wind_calls(lev);
+    m_wind_fade_calls.clear();
+  }
   if (m_jak2_slot >= 0) {
     // (AI-assisted, j2water) Jak II: the blended and ordered draws (water, glass, decals) wait
     // for the slot's water bucket (draw_jak2_late), after the characters (merc), as the PS2
