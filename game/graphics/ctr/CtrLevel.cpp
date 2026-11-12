@@ -7043,7 +7043,7 @@ bool CtrLevels::load_file(const fs::path& path,
         continue;
       }
       const u64 b = CtrStreamArena::mesh_bytes(ch.vertex_count, hi - lo);
-      const float reach = dist_frees(*out, ci) ? need_reach(*out, ch, 1.f) : 0.f;
+      const float reach = dist_frees(*out, ci) ? need_reach(*out, ch) : 0.f;
       if (dist_frees(*out, ci) &&
           (!ncam || need_excess(ch, reach, pos, ncam) > kNeedReadMeters * 4096.f)) {
         dist_skip[ci] = 1;

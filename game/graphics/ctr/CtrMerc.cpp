@@ -563,6 +563,10 @@ void CtrMercRenderer::note_keira_shadow(const CtrMercModelData& model, u64 frame
   }
 }
 
+namespace {
+u8* vtx_vertices(const CtrMercModelData& model, int mesh, u32 gen);
+}  // namespace
+
 void CtrMercRenderer::apply_blerc(const CtrLevelData& lev,
                                   const CtrMercModelData& model,
                                   int mesh,
