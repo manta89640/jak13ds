@@ -221,4 +221,24 @@ class CtrMercRenderer : public CtrBucketRenderer {
   std::string m_mod_last_model;
   bool m_snap_valid = false;
   bool m_snapshot_mode = false;
+
+  // A bucket's draws, kept until flush_draws. Instances whose draws are all opaque (or shine) are
+  // drawn draw by draw across the instances of a model: one texture bind per draw of the model,
+  // each instance's own draw order kept. Any other instance flushes them before its own draws.
+  struct QueuedDraw {
+    ctr_draw_state st;
+    u32 clip, rows, lights;  // offsets in m_qdata
+    u32 bones_id;
+    int palette_count;
+    float fade[4];
+    int mesh, first_index, index_count;
+    bool env;
+    u64 key;  // model, draw index, instance
+  };
+  std::vector<float> m_qdata;
+  std::vector<QueuedDraw> m_q;
+  std::vector<const void*> m_q_models;
+  u32 m_q_inst = 0;
+  // the first n_sorted queued draws by key, the rest in their order; then the queue is empty
+  void flush_draws(size_t n_sorted);
 };

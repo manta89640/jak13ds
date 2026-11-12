@@ -395,6 +395,7 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
       init = dma.read_and_advance();
     }
   }
+  flush_draws(m_q.size());
 
   if (m_snapshot_mode) {
     return;
@@ -1481,42 +1482,13 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   const CtrSettings& cs = ctr_settings();
   const bool cull_merc = cs.cull_merc && !hud_model;
   bool palette_mirrors = false;
-  // (AI-assisted) the palette's number for the GPU (new with every palette made) and its float24
-  // words for skin_rows_f24, made once per palette (not at every upload: the shine pass uploads
-  // a palette again)
+  // the palette's number for the GPU (new with every palette made)
   u32 palette_id = 0;
   const bool rows_f24 = false;  // skin_rows_f24 is gone: the GPU layer sends float32 rows
-  uint32_t palette_f24[9 * CTR_MAX_PALETTE];
-  bool palette_f24_made = false;
   // not HUD models: their rows are changed after they are made
   const bool bone_cache = !hud_model;
   const u32 bone_stamp = bone_cache ? next_bone_rows_stamp() : 0;
   g_pal.models++;
-  auto direct_f24 = [&](int count) -> const uint32_t* {
-    if (!rows_f24) {
-      return nullptr;
-    }
-    if (!palette_f24_made) {
-      const int n = std::min<int>(count, CTR_MAX_PALETTE);
-      if (bone_cache) {
-        // each bone's words, laid out as pack_skin_rows_f24 does
-        for (int p = 0; p < n; p++) {
-          const uint32_t* w = g_bone_rows[rows_of->palette[p]].f24;
-          uint32_t* o = palette_f24 + 3 * p;
-          for (int row = 0; row < 3; row++, o += 3 * n, w += 3) {
-            o[0] = w[0];
-            o[1] = w[1];
-            o[2] = w[2];
-          }
-        }
-      } else {
-        // (AI-assisted) ctr_gpu_pack_skin_rows_f24's words in fewer instructions (CtrMicro.h)
-        ctr_micro::pack_skin_rows_f24(palette_rows, n, palette_f24);
-      }
-      palette_f24_made = true;
-    }
-    return palette_f24;
-  };
   // (AI-assisted) config merc_gen_lod: the converter's generated low LOD of a model with only lod0
   // (the yeti; (j1ocean) never the pickups: CtrLevel gives those no gen_draws,
   // c3l::merc_gen_lod_exempt) when its first bone is further from the camera than max(25 m, 12.5 x the model's
@@ -1561,6 +1533,47 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // (AI-assisted, shinefold) this model's opaque base draws' triangle ranges (first, count)
   u64 base_ranges[32];
   int n_base_ranges = 0;
+  // the draws go to the bucket's queue (flush_draws); an instance whose order matters (a draw
+  // that blends or doesn't write depth, vertices of its own, a HUD model) flushes it, its own last
+  bool any_order = hud_model || model->blerc_count || !model->mod.empty();
+  const size_t inst_start = m_q.size();
+  const u32 inst_no = m_q_inst++;
+  u32 rank = 0;
+  while (rank < m_q_models.size() && m_q_models[rank] != draws) {
+    rank++;
+  }
+  if (rank == m_q_models.size()) {
+    m_q_models.push_back(draws);
+  }
+  const auto put = [&](const float* src, int n) {
+    const u32 at = (u32)m_qdata.size();
+    m_qdata.insert(m_qdata.end(), src, src + n);
+    return at;
+  };
+  const u32 q_clip = put(clip, 16), q_lights = put(light_data, 28);
+  u32 q_rows = 0, q_rows_id = 0;
+  const auto queue = [&](const ctr_draw_state& st, const c3l::MercDraw& draw, bool env,
+                         const float* fade) {
+    const int pc = std::min<int>(draw.palette_count, CTR_MAX_PALETTE);
+    if (q_rows_id != palette_id) {
+      q_rows = put(palette_rows, 12 * pc);
+      q_rows_id = palette_id;
+    }
+    QueuedDraw q;
+    q.st = st;
+    q.clip = q_clip;
+    q.rows = q_rows;
+    q.lights = q_lights;
+    q.bones_id = palette_id;
+    q.palette_count = draw.palette_count;
+    memcpy(q.fade, fade, sizeof(q.fade));
+    q.mesh = mesh;
+    q.first_index = (int)draw.first_index;
+    q.index_count = (int)draw.index_count;
+    q.env = env;
+    q.key = (u64)rank << 44 | (u64)(&draw - draws->data()) << 24 | (inst_no & 0xffffff);
+    m_q.push_back(q);
+  };
   for (const auto& draw : *draws) {
     if (!(flags.enable_mask & (1ull << draw.effect))) {
       continue;
@@ -1588,7 +1601,6 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
                               !memcmp(rows_of->palette, draw.palette, draw.palette_count);
     if (!same_palette) {
       palette_id = next_palette_id();
-      palette_f24_made = false;
     }
     if (!same_palette) {
       palette_mirrors = false;
@@ -1706,9 +1718,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       }
       // emerc.frag: texture * fade * 2, no alpha test, the envmap mode's blending (adds a shine)
       st.atest = CTR_TEST_ALWAYS;
-      ctr_gpu_draw_skinned_env(&st, clip, palette_rows, draw.palette_count,
-                               direct_f24(draw.palette_count), palette_id, fade, mesh,
-                               draw.first_index, draw.index_count);
+      queue(st, draw, true, fade);
       m_stats.draws++;
       continue;
     }
@@ -1736,9 +1746,33 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     if (opaque && n_base_ranges < 32) {  // (AI-assisted, shinefold)
       base_ranges[n_base_ranges++] = (u64)draw.first_index << 32 | draw.index_count;
     }
-    ctr_gpu_draw_skinned(&st, clip, palette_rows, draw.palette_count,
-                         direct_f24(draw.palette_count), palette_id, light_data, mesh,
-                         draw.first_index, draw.index_count);
+    any_order = any_order || !opaque;
+    queue(st, draw, false, fade);
     m_stats.draws++;
   }
+  if (any_order) {
+    flush_draws(inst_start);
+  }
+}
+
+void CtrMercRenderer::flush_draws(size_t n_sorted) {
+  if (m_q.empty()) {
+    return;
+  }
+  std::sort(m_q.begin(), m_q.begin() + n_sorted,
+            [](const QueuedDraw& a, const QueuedDraw& b) { return a.key < b.key; });
+  const float* d = m_qdata.data();
+  for (const auto& q : m_q) {
+    if (q.env) {
+      ctr_gpu_draw_skinned_env(&q.st, d + q.clip, d + q.rows, q.palette_count, nullptr,
+                               q.bones_id, q.fade, q.mesh, q.first_index, q.index_count);
+    } else {
+      ctr_gpu_draw_skinned(&q.st, d + q.clip, d + q.rows, q.palette_count, nullptr, q.bones_id,
+                           d + q.lights, q.mesh, q.first_index, q.index_count);
+    }
+  }
+  m_q.clear();
+  m_qdata.clear();
+  m_q_models.clear();
+  m_q_inst = 0;
 }
