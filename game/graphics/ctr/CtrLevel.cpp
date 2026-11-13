@@ -3017,10 +3017,12 @@ void tod_drop_all_entries(CtrLevelData::Tod& t) {
 // the PC). fast_day: the title screen. Returns 2: day palettes taken, 1: only light palettes, 0:
 // nothing.
 // palette p's new weights move by more than one 64th from the table's (the day steps by one)
-inline bool tod_weight_jump(const CtrLevelData::Tod& t, int p, const u8 w[3], u8 wa) {
-  bool jump = (t.apal_mask >> p & 1) && std::abs((int)wa - (int)t.wa[p]) > 1;
+// (the title's day moves a few 64ths between its sets: a jump is more than kTodFastJump there)
+constexpr int kTodFastJump = 8;
+inline bool tod_weight_jump(const CtrLevelData::Tod& t, int p, const u8 w[3], u8 wa, int most) {
+  bool jump = (t.apal_mask >> p & 1) && std::abs((int)wa - (int)t.wa[p]) > most;
   for (int c = 0; c < 3; c++) {
-    jump = jump || std::abs((int)w[c] - (int)t.target_w[p][c]) > 1;
+    jump = jump || std::abs((int)w[c] - (int)t.target_w[p][c]) > most;
   }
   return jump;
 }
@@ -3043,7 +3045,8 @@ int tod_update_w(CtrLevelData::Tod& t, const std::string& level, const u8 (*w)[3
       continue;
     }
     changed |= 1u << p;
-    if (!(t.light_mask >> p & 1) && tod_weight_jump(t, p, w[p], wa[p])) {
+    if (!(t.light_mask >> p & 1) &&
+        tod_weight_jump(t, p, w[p], wa[p], fast_day ? kTodFastJump : 1)) {
       day_jump = true;
     }
     if (!(t.light_mask >> p & 1)) {
@@ -3109,7 +3112,7 @@ int tod_update_w(CtrLevelData::Tod& t, const std::string& level, const u8 (*w)[3
 //  - the light palettes' when one moved kTodLightStep/64 or more, or less for kTodSettleFrames
 //    frames, once the last set is written.
 // So the groups drawn are at most one set apart. The title's fast day takes the game's weights
-// every frame.
+// whole once its last set is written (the level draw's caller holds it back until then).
 constexpr int kTodLightStep = 4;
 constexpr u8 kTodSettleFrames = 20;
 int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgroundCamera& cam,
@@ -11837,10 +11840,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   if (lev.tod) {
     const double t0 = tod_now_ms();
     m_tod_frames++;
-    // (AI-assisted, fable1) Jak 1's title: a heavy frame (the frame before drew 3x the table's
-    // entries in vertices or more: its 20x day moves every palette) takes the game's new weights
-    // every fourth frame only. Gameplay in both games takes every frame's weights.
-    const bool tod_skip = m_tod_heavy && title_on && (rs.frame_idx % 4) != 0;
+    // Jak 1's title (its 20x day moves every palette): the game's new weights are taken once the
+    // last set is written to every group drawn, in a heavy frame (the frame before drew 3x the
+    // table's entries in vertices or more) kTodSpreadFast frames after the last at the earliest.
+    const auto& tt = *lev.tod;
+    const bool tod_skip =
+        title_on && tt.app_valid && tt.blended_valid &&
+        (!tt.day_done || !tt.light_done ||
+         (m_tod_heavy && tt.day_move_frame && rs.frame_idx - tt.day_move_frame < kTodSpreadFast));
     m_tod_skipped += tod_skip;
     if (!tod_skip) {
       m_tod_blends += tod_update(*lev.tod, lev.name, cam, rs.frame_idx, title_on) == 2;
@@ -13856,8 +13863,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       ps.fresh_ok = drawn >= kTodFreshRatio * t.table.size();
       // (bounded relighting: the groups one step behind, at most this many vertices a level draw)
       if (t.fast_day) {
-        // (the title: a move spread over kTodSpreadFast frames)
-        ps.spread = t.day_move_frame && rs.frame_idx - t.day_move_frame < kTodSpreadFast;
+        // (the title: a move spread over kTodSpreadFast frames; no new one before it is written)
+        ps.spread = t.day_move_frame != 0;
         ps.spread_left = std::max<s64>(kTodSpreadMin, (s64)(drawn / kTodSpreadFast));
       } else {
         ps.spread = t.day_move_frame != 0;  // (0: a jump, written at once)

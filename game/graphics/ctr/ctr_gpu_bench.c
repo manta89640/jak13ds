@@ -1433,6 +1433,96 @@ static void b10(void) {
   lin_free(idx);
 }
 
+/* ---------------- B11: where a list's vertices are in the buffer ---------------- */
+
+#define B11_TRIS 5460 /* triangles in the buffer: 16380 vertices of 16 bytes, 256 KB */
+#define B11_N 73728   /* triangles drawn, as B9's */
+
+/* One 2 pixel triangle, 5460 copies of its three vertices in the buffer: a list draws B11_N of
+ * them and only the order of the copies changes (no index twice unless the test says so).
+ * seq: in buffer order; step<S>: every S-th; back: backwards; str<K>: K places of the buffer in
+ * turns; win<W>: a random one of the W around a place that moves on; rand: any; twice: seq with
+ * each triangle drawn twice in a row. */
+static void b11(void) {
+  if (B.dead) {
+    return;
+  }
+  VtxS* verts = (VtxS*)lin_alloc((size_t)B11_TRIS * 3 * sizeof(VtxS));
+  u16* idx = (u16*)lin_alloc((size_t)B11_N * 3 * sizeof(u16));
+  if (!verts || !idx) {
+    bench_emit("[bench] B11 skipped=no_memory");
+    lin_free(verts);
+    lin_free(idx);
+    return;
+  }
+  for (int i = 0; i < B11_TRIS * 3; i++) {
+    VtxS* v = &verts[i];
+    memset(v, 0, sizeof(*v));
+    v->x = (s16)(i % 3 == 1);
+    v->y = (s16)(i % 3 == 2);
+    v->w = 1;
+    v->r = v->g = v->b = v->a = 255;
+  }
+  GSPGPU_FlushDataCache(verts, (u32)(B11_TRIS * 3 * sizeof(VtxS)));
+  static const struct {
+    const char* id;
+    int kind, arg; /* 0 step, 1 back, 2 streams, 3 window, 4 random, 5 twice */
+  } tests[] = {
+      {"B11.seq", 0, 1},     {"B11.step2", 0, 2},   {"B11.step4", 0, 4},    {"B11.step8", 0, 8},
+      {"B11.step16", 0, 16}, {"B11.step64", 0, 64}, {"B11.back", 1, 0},     {"B11.str2", 2, 2},
+      {"B11.str4", 2, 4},    {"B11.str8", 2, 8},    {"B11.win4", 3, 4},     {"B11.win16", 3, 16},
+      {"B11.win64", 3, 64},  {"B11.win256", 3, 256}, {"B11.win1024", 3, 1024}, {"B11.rand", 4, 0},
+      {"B11.twice", 5, 0},
+  };
+  for (unsigned ti = 0; ti < sizeof(tests) / sizeof(tests[0]) && !B.dead; ti++) {
+    const int kind = tests[ti].kind, arg = tests[ti].arg;
+    u32 seed = 2463534242u;
+    for (int t = 0; t < B11_N; t++) {
+      int k;
+      seed = seed * 1664525u + 1013904223u;
+      const u32 r = seed >> 8;
+      switch (kind) {
+        case 0:
+          k = (int)(((u32)t * (u32)arg) % B11_TRIS);
+          break;
+        case 1:
+          k = B11_TRIS - 1 - t % B11_TRIS;
+          break;
+        case 2:
+          k = (t % arg) * (B11_TRIS / arg) + (t / arg) % (B11_TRIS / arg);
+          break;
+        case 3:
+          k = (int)(((u32)(t / arg) * (u32)arg + r % (u32)arg) % B11_TRIS);
+          break;
+        case 4:
+          k = (int)(r % B11_TRIS);
+          break;
+        default:
+          k = (t / 2) % B11_TRIS;
+          break;
+      }
+      idx[t * 3] = (u16)(k * 3);
+      idx[t * 3 + 1] = (u16)(k * 3 + 1);
+      idx[t * 3 + 2] = (u16)(k * 3 + 2);
+    }
+    GSPGPU_FlushDataCache(idx, (u32)(B11_N * 3 * sizeof(u16)));
+    bench_start(tests[ti].id);
+    fb_begin(B.t0);
+    plain_state();
+    use_basic(&B.m_geo, L_SHORT);
+    vbuf(verts, L_SHORT);
+    C3Di_UpdateContext();
+    for (int d = 0; d < 8; d++) {
+      C3D_DrawElements(GPU_TRIANGLES, B11_N * 3 / 8, C3D_UNSIGNED_SHORT, idx + d * (B11_N * 3 / 8));
+    }
+    Meas m;
+    run_list(3, &m);
+    put_meas(tests[ti].id, B11_N, 3, &m, "");
+  }
+  lin_free(verts);
+  lin_free(idx);
+}
+
 /* ---------------- B5: attribute fetch ---------------- */
 
 static void b5_one(const char* id, const void* buf, int layout) {
@@ -2145,6 +2235,7 @@ int ctr_gpu_bench_run(void) {
     b7_one("B7.zero", 1);
     b9();
     b10();
+    b11();
     b8(B.t0, "n");
     /* register settings the game never used on hardware: colour buffer reads off, the
      * post-vertex cache size */
