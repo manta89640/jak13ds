@@ -128,15 +128,17 @@ u32 kheapused(Ptr<kheapinfo> heap) {
  * @return        : memory.  0 if we run out of room
  * DONE, PRINT ADDED
  */
-// the global heap's least free space so far, logged when kLowWaterStep less than the last line's
-constexpr u32 kLowWaterStep = 0x10000;
+// the global heap's least free space so far, logged when 1 MB less than the last line's (64 KB
+// once under kLowWaterNear)
+constexpr u32 kLowWaterStep = 0x10000, kLowWaterNear = 4u << 20;
 static void global_low_water(Ptr<kheapinfo> heap, s32 size, const char* name) {
   static u32 logged = 0xffffffffu;
   if (heap != kglobalheap) {
     return;
   }
   const u32 free = heap->top.offset - heap->current.offset;
-  if (logged == 0xffffffffu || free + kLowWaterStep <= logged) {
+  if (logged == 0xffffffffu ||
+      free + (free < kLowWaterNear ? kLowWaterStep : 0x100000u) <= logged) {
     logged = free;
     lg::info("[kmalloc] global heap: {} KB free at the least so far (bottom {} KB, top {} KB "
              "taken; {} {} bytes)",
