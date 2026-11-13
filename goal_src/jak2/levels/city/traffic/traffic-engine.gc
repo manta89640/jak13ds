@@ -616,6 +616,19 @@
             (new 'static 'vector :y 1.0 :w 1.0)
             )
           (set! (-> this rand) (rand-vu))
+          ;; og:preserve-this 3DS: config.ini debug_log: where a traffic object is put (pop-in check)
+          (#when TARGET_3DS
+            (when *pc-3ds-spawn-log*
+              (let ((sph (new 'stack-no-clear 'sphere)))
+                (set! (-> sph quad) (-> s4-0 params position quad))
+                (set! (-> sph r) 8192.0)
+                (format #t "[spawn] type ~D at ~M ~M ~M, ~M from the camera, ~A~%"
+                        arg0 (-> sph x) (-> sph y) (-> sph z)
+                        (vector-vector-distance sph (math-camera-pos))
+                        (if (sphere-in-view-frustum? sph) "IN VIEW" "out of view"))
+                )
+              )
+            )
           (activate-from-params this (-> s4-0 params))
           )
         )

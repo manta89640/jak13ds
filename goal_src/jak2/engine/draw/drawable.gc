@@ -980,6 +980,35 @@
     )
   )
 
+;; og:preserve-this 3DS pop-in check (pad scripts: call pc-3ds-spawn-log-set! 1): traffic activations
+;; (traffic-engine.gc) and every model that starts being drawn well inside the screen are logged
+(#when TARGET_3DS
+  (define *pc-3ds-spawn-log* #f)
+  (define *pc-3ds-was-on* #f)
+  (defun pc-3ds-spawn-log-set! ((on int))
+    (set! *pc-3ds-spawn-log* (nonzero? on))
+    (none))
+  ;; per pid (low 10 bits): the frame of its last draw call << 3 | how far it got (1 hidden by its
+  ;; flags, 2 outside the view, 3 culled after that, 4 drawn)
+  (define *pc-3ds-draw-last* (new 'global 'array 'int32 1024))
+  (define *pc-3ds-draw-prev* 0)
+  (defun pc-3ds-appear-log ((pd process-drawable) (dc draw-control))
+    (let ((cam (new 'stack-no-clear 'vector)))
+      (set! (-> cam quad) (-> dc origin quad))
+      (set! (-> cam w) 1.0)
+      (vector-matrix*! cam cam (-> *math-camera* camera-rot))
+      (let* ((z (-> cam z))
+             (fx (/ (fabs (-> cam x)) (* z (-> *math-camera* x-ratio))))
+             (fy (/ (fabs (-> cam y)) (* z (-> *math-camera* y-ratio)))))
+        (when (and (< 8192.0 z) (< fx 0.8) (< fy 0.8))
+          (format #t "[appear] ~A (~A) ~M away, at ~f ~f of the half screen;" (-> pd name) (-> pd type) z fx fy)
+          (format #t " before: ~D, ~D frames ago; state ~A~%"
+                  (logand *pc-3ds-draw-prev* 7)
+                  (- (the int (-> *display* real-clock integral-frame-counter)) (sar *pc-3ds-draw-prev* 3))
+                  (if (-> pd state) (-> pd state name) #f)))))
+    (none))
+  )
+
 (defun dma-add-process-drawable ((pd process-drawable) (dc draw-control) (flag symbol) (dma-buf dma-buffer))
   "Draw a normal process-drawable. Set up lighting/shadow settings, then pass on to foreground renderer."
   (local-vars
@@ -1035,6 +1064,13 @@
         )
 
       ;; clear previous on-screen flag, we don't know if we're on-screen yet.
+      (#when TARGET_3DS
+        (when *pc-3ds-spawn-log*
+          (let ((slot (logand (-> pd pid) 1023))
+                (now (the int (-> *display* real-clock integral-frame-counter))))
+            (set! *pc-3ds-draw-prev* (-> *pc-3ds-draw-last* slot))
+            (set! *pc-3ds-was-on* (and (= (logand *pc-3ds-draw-prev* 7) 4) (>= (sar *pc-3ds-draw-prev* 3) (- now 1))))
+            (set! (-> *pc-3ds-draw-last* slot) (logior (ash now 3) 1)))))
       (logclear! (-> dc status) (draw-control-status on-screen))
 
       ;; only if we should draw...
@@ -1047,8 +1083,14 @@
           (.lvf vf16 (&-> dc origin quad))
           (.svf (&-> fg-bounds quad) vf16)
 
+          (#when TARGET_3DS
+            (if *pc-3ds-spawn-log*
+                (+! (-> *pc-3ds-draw-last* (logand (-> pd pid) 1023)) 1)))
           ;; sphere cull.
           (when (sphere-in-view-frustum? fg-bounds)
+            (#when TARGET_3DS
+              (if *pc-3ds-spawn-log*
+                  (+! (-> *pc-3ds-draw-last* (logand (-> pd pid) 1023)) 1)))
             (cond
               ((logtest? (-> dc global-effect) (draw-control-global-effect title-light))
                ;; magic special case for title light.
@@ -1352,6 +1394,11 @@
 
                     ;; if we got this far, we're on-screen.
                     (logior! (-> dc status) (draw-control-status on-screen))
+                    (#when TARGET_3DS
+                      (when *pc-3ds-spawn-log*
+                        (+! (-> *pc-3ds-draw-last* (logand (-> pd pid) 1023)) 1)
+                        (if (not *pc-3ds-was-on*)
+                            (pc-3ds-appear-log pd dc))))
                     (if (logtest? (-> dc status) (draw-control-status no-draw-bounds no-draw-bounds2))
                         (return #f)
                         )

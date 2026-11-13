@@ -785,9 +785,18 @@
                  )
              )
            )
+          ;; near the view counts as in it: by what it moves in LOGIC_LOD_SLOW frames and by a camera
+          ;; turn of about 19 degrees (a waiting process stays where its last run left it)
           ((let ((s (new 'stack-no-clear 'sphere)))
              (set! (-> s quad) (-> dc origin quad))
-             (set! (-> s r) (+ rb LOGIC_LOD_VIEW))
+             (set! (-> s r) (+ rb
+                               LOGIC_LOD_VIEW
+                               (* 0.35 (sqrtf d2))
+                               (* (vector-length (-> pd root transv))
+                                  (the float LOGIC_LOD_SLOW)
+                                  (-> *display* entity-clock seconds-per-frame))
+                               )
+                   )
              (sphere-in-view-frustum? s)
              )
            1
