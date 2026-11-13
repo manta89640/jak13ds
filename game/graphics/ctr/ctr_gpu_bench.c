@@ -1318,6 +1318,121 @@ static void b9(void) {
   lin_free(strip);
 }
 
+/* ---------------- B10: the grid of B9 in other index orders ---------------- */
+
+/* B9's grid (same vertices, cell size and draws) as lists with each quad's two triangles rotated
+ * (q<i><j>: the first triangle's indices rotated left i times, the second's j times; q00 is B9's
+ * list), as a list in shuffled triangle order, and as strips of 12 and 48 cells: which previous
+ * triangle's vertices the GPU keeps, and what a strip's length is worth. */
+static void b10(void) {
+  if (B.dead) {
+    return;
+  }
+  const int nv = (B9_N + 1) * (B9_N + 1), list_n = B9_N * B9_N * 6;
+  VtxS* verts = (VtxS*)lin_alloc((size_t)nv * sizeof(VtxS));
+  u16* idx = (u16*)lin_alloc((size_t)list_n * sizeof(u16));
+  if (!verts || !idx) {
+    bench_emit("[bench] B10 skipped=no_memory");
+    lin_free(verts);
+    lin_free(idx);
+    return;
+  }
+  for (int y = 0; y <= B9_N; y++) {
+    for (int x = 0; x <= B9_N; x++) {
+      VtxS* v = &verts[y * (B9_N + 1) + x];
+      memset(v, 0, sizeof(*v));
+      v->x = (s16)(x - B9_N / 2);
+      v->y = (s16)(y - B9_N / 2);
+      v->w = 1;
+      v->s = (s16)(x * 64);
+      v->t = (s16)(y * 64);
+      v->r = v->g = v->b = v->a = 255;
+    }
+  }
+  GSPGPU_FlushDataCache(verts, (u32)nv * sizeof(VtxS));
+  /* tests 0-8: rotations; 9: shuffled; 10, 11: strips of 12 and 48 cells */
+  for (int t = 0; t < 12 && !B.dead; t++) {
+    int n = 0;
+    char id[32];
+    if (t < 10) {
+      const int r1 = t < 9 ? t / 3 : 0, r2 = t < 9 ? t % 3 : 0;
+      for (int y = 0; y < B9_N; y++) {
+        for (int x = 0; x < B9_N; x++) {
+          const u16 a = (u16)(y * (B9_N + 1) + x), b = (u16)(a + 1), c = (u16)(a + B9_N + 1),
+                    d = (u16)(c + 1);
+          const u16 t1[3] = {a, b, c}, t2[3] = {c, b, d};
+          for (int k = 0; k < 3; k++) {
+            idx[n + k] = t1[(k + r1) % 3];
+            idx[n + 3 + k] = t2[(k + r2) % 3];
+          }
+          n += 6;
+        }
+      }
+      if (t == 9) {
+        u32 seed = 12345;
+        for (int i = n / 3 - 1; i > 0; i--) {
+          seed = seed * 1664525u + 1013904223u;
+          const int j = (int)((seed >> 8) % (u32)(i + 1));
+          for (int k = 0; k < 3; k++) {
+            const u16 tmp = idx[i * 3 + k];
+            idx[i * 3 + k] = idx[j * 3 + k];
+            idx[j * 3 + k] = tmp;
+          }
+        }
+        snprintf(id, sizeof(id), "B10.list.shuffled");
+      } else {
+        snprintf(id, sizeof(id), "B10.list.q%d%d", r1, r2);
+      }
+    } else {
+      const int piece = t == 10 ? 12 : 48;
+      for (int y = 0; y < B9_N; y++) {
+        for (int x0 = 0; x0 < B9_N; x0 += piece) {
+          const u16 p0 = (u16)(y * (B9_N + 1) + x0);
+          if (!n) {
+            idx[n++] = p0;
+            idx[n++] = p0;
+          } else {
+            idx[n] = idx[n - 1];
+            n++;
+            idx[n++] = p0;
+            if (n & 1) {
+              idx[n++] = p0;
+            }
+          }
+          for (int x = x0; x <= x0 + piece; x++) {
+            idx[n++] = (u16)(y * (B9_N + 1) + x);
+            idx[n++] = (u16)((y + 1) * (B9_N + 1) + x);
+          }
+          idx[n] = idx[n - 1];
+          n++;
+          if (n & 1) {
+            idx[n] = idx[n - 1];
+            n++;
+          }
+        }
+      }
+      snprintf(id, sizeof(id), "B10.strip.%d", piece);
+    }
+    GSPGPU_FlushDataCache(idx, (u32)n * sizeof(u16));
+    bench_start(id);
+    fb_begin(B.t0);
+    plain_state();
+    use_basic(&B.m_geo, L_SHORT);
+    vbuf(verts, L_SHORT);
+    C3Di_UpdateContext();
+    for (int d = 0; d < B9_DRAWS; d++) {
+      C3D_DrawElements(t < 10 ? GPU_TRIANGLES : GPU_TRIANGLE_STRIP, n, C3D_UNSIGNED_SHORT, idx);
+    }
+    Meas m;
+    run_list(3, &m);
+    char extra[64];
+    snprintf(extra, sizeof(extra), " indices=%d", B9_DRAWS * n);
+    put_meas(id, B9_DRAWS * (list_n / 3), 3, &m, extra);
+  }
+  lin_free(verts);
+  lin_free(idx);
+}
+
 /* ---------------- B5: attribute fetch ---------------- */
 
 static void b5_one(const char* id, const void* buf, int layout) {
@@ -2029,6 +2144,7 @@ int ctr_gpu_bench_run(void) {
     b7_one("B7.px1", 0);
     b7_one("B7.zero", 1);
     b9();
+    b10();
     b8(B.t0, "n");
     /* register settings the game never used on hardware: colour buffer reads off, the
      * post-vertex cache size */
