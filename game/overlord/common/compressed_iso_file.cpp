@@ -1,5 +1,4 @@
 // (AI-assisted) Block-compressed game files (.ogz): see compressed_iso_file.h
-#include "game/runtime.h"
 #include "compressed_iso_file.h"
 
 #include <algorithm>
@@ -210,7 +209,6 @@ bool Reader::read_at(uint32_t pos, void* dst, uint32_t len) {
     m_pos = ~0u;
     return false;
   }
-  ee_mem_touch(dst, len);
   const bool ok = len == 0 || fread(dst, len, 1, m_fp) == 1;
   m_pos = ok ? pos + len : ~0u;
   sd_us += now_us() - t0;
