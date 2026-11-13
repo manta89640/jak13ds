@@ -81,6 +81,7 @@ struct link_control {
   char m_object_name[64];      //! object file name
   int32_t m_object_size;       //! object file size
   Ptr<kheapinfo> m_heap;       //! heap we are putting the object file on
+  uint32_t m_touch_cur0 = 0;   // the heap's current at begin (host tool OPENGOAL_MEM_TOUCH)
   uint32_t m_flags;            //! linker configuration
   Ptr<uint8_t> m_heap_top;     //! where to reset the heap top for clearing temp allocations
   bool m_keep_debug;           //! keep the debug segment, even if DebugSegment is off?

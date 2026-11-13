@@ -107,6 +107,103 @@ u8* g_ee_main_mem = nullptr;
 u8* g_ee_main_mem_exec = nullptr;
 u32 g_ee_main_mem_size = EE_MAIN_MEM_SIZE;
 std::thread::id g_main_thread_id = std::thread::id();
+
+#if !defined(__3DS__) && !defined(_WIN32)
+#include <atomic>
+#include <csignal>
+// Host tool, env OPENGOAL_MEM_TOUCH=<seconds>: which pages of the EE memory are touched. Every
+// period all of it is protected again and the pages touched since are printed, 256 KB per
+// character (0-9a-g: sixteenths of the block's pages touched, "." none).
+namespace {
+size_t g_touch_page = 0;
+std::atomic<u8>* g_touch_map = nullptr;
+size_t g_touch_pages = 0;
+void touch_fault(int sig, siginfo_t* info, void*) {
+  const uintptr_t a = (uintptr_t)info->si_addr, base = (uintptr_t)g_ee_main_mem;
+  if (!g_touch_map || a < base || a >= base + g_ee_main_mem_size) {
+    signal(sig, SIG_DFL);
+    return;
+  }
+  const size_t pg = (a - base) / g_touch_page;
+  g_touch_map[pg].store(1, std::memory_order_relaxed);
+  mprotect((void*)(base + pg * g_touch_page), g_touch_page, PROT_READ | PROT_WRITE);
+}
+void touch_start() {
+  const char* e = getenv("OPENGOAL_MEM_TOUCH");
+  if (!e || atoi(e) <= 0) {
+    return;
+  }
+  const int period = atoi(e);
+  g_touch_page = (size_t)sysconf(_SC_PAGESIZE);
+  g_touch_pages = g_ee_main_mem_size / g_touch_page;
+  g_touch_map = new std::atomic<u8>[g_touch_pages]();
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_sigaction = touch_fault;
+  sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+  // (this thread runs GOAL code on stacks inside the EE memory)
+  static u8 alt[256 * 1024];
+  stack_t ss;
+  ss.ss_sp = alt;
+  ss.ss_size = sizeof(alt);
+  ss.ss_flags = 0;
+  sigaltstack(&ss, nullptr);
+  sigaction(SIGBUS, &sa, nullptr);
+  sigaction(SIGSEGV, &sa, nullptr);
+  // (env OPENGOAL_MEM_TOUCH_FILE: one byte per page per period, for the page size printed)
+  const char* path = getenv("OPENGOAL_MEM_TOUCH_FILE");
+  FILE* bits = path ? fopen(path, "wb") : nullptr;
+  printf("[memtouch] page %zu bytes, %zu pages\n", g_touch_page, g_touch_pages);
+  std::thread([period, bits] {
+    std::vector<u8> snap(g_touch_pages);
+    for (int epoch = 0;; epoch++) {
+      std::this_thread::sleep_for(std::chrono::seconds(period));
+      mprotect(g_ee_main_mem, g_touch_pages * g_touch_page, PROT_NONE);
+      const size_t per = (256 * 1024) / g_touch_page;
+      std::string line;
+      size_t total = 0;
+      for (size_t b = 0; b * per < g_touch_pages; b++) {
+        size_t n = 0;
+        for (size_t i = b * per; i < std::min((b + 1) * per, g_touch_pages); i++) {
+          snap[i] = g_touch_map[i].exchange(0, std::memory_order_relaxed);
+          n += snap[i];
+        }
+        total += n;
+        line += n ? "0123456789abcdefg"[n * 16 / per] : '.';
+      }
+      printf("[memtouch] epoch %d (%d s): %zu KB touched: %s\n", epoch, period,
+             total * g_touch_page / 1024, line.c_str());
+      fflush(stdout);
+      if (bits) {
+        fwrite(snap.data(), 1, snap.size(), bits);
+        fflush(bits);
+      }
+    }
+  }).detach();
+}
+}  // namespace
+bool ee_mem_touch_on() {
+  return g_touch_map != nullptr;
+}
+void ee_mem_touch(const void* p, size_t len) {
+  const uintptr_t a = (uintptr_t)p, base = (uintptr_t)g_ee_main_mem;
+  if (!g_touch_map || !len || a + len <= base || a >= base + g_ee_main_mem_size) {
+    return;
+  }
+  const size_t p0 = (std::max(a, base) - base) / g_touch_page;
+  const size_t p1 = (std::min(a + len, base + g_ee_main_mem_size) - 1 - base) / g_touch_page;
+  for (size_t i = p0; i <= p1; i++) {
+    g_touch_map[i].store(1, std::memory_order_relaxed);
+  }
+  mprotect((void*)(base + p0 * g_touch_page), (p1 - p0 + 1) * g_touch_page,
+           PROT_READ | PROT_WRITE);
+}
+#else
+void ee_mem_touch(const void*, size_t) {}
+bool ee_mem_touch_on() {
+  return false;
+}
+#endif
 GameVersion g_game_version = GameVersion::Jak1;
 BackgroundWorker g_background_worker;
 int g_server_port = DECI2_PORT;
@@ -259,6 +356,9 @@ void ee_runner(SystemThreadInterface& iface) {
 
   lg::debug("[EE] Run!");
   memset((void*)g_ee_main_mem, 0, g_ee_main_mem_size);
+#if !defined(__3DS__) && !defined(_WIN32)
+  touch_start();
+#endif
 
   // prevent access to the first 512 kB of memory.
   // On the PS2 this is the kernel and can't be accessed either.

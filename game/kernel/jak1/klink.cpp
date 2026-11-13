@@ -1,3 +1,4 @@
+#include "game/runtime.h"
 #include "klink.h"
 
 #include <cstring>
@@ -580,6 +581,10 @@ bool link_control::jak1_may_finish() {
  * Complete linking. This will execute the top-level code for v3 object files, if requested.
  */
 void link_control::jak1_finish(bool jump_from_c_to_goal) {
+  if (ee_mem_touch_on()) {
+    printf("[memtouch] link %s data %x size %d heap %x -> %x\n", m_object_name,
+           m_object_data.offset, m_object_size, m_touch_cur0, m_heap->current.offset);
+  }
   kperf::SectionScope perf_section("link-finish");
   CacheFlush(m_code_start.c(), m_code_size);
   auto old_debug_segment = DebugSegment;

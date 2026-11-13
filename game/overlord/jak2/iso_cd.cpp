@@ -1,3 +1,4 @@
+#include "game/runtime.h"
 #include "iso_cd.h"
 
 #include <chrono>
@@ -289,6 +290,7 @@ int sceCdRead(int lsn, int num_sectors, void* dest, void* mode) {
       if (fseek(f->fp, lsn * SECTOR_SIZE, SEEK_SET)) {
         ASSERT_MSG(false, "Failed to fseek");
       }
+      ee_mem_touch(dest, num_sectors * SECTOR_SIZE);
       if (fread(dest, num_sectors * SECTOR_SIZE, 1, f->fp) < 0) {
         printf("dest is %p, num_sectors %d, lsn %d\n", dest, num_sectors, lsn);
         printf("err: %s\n", strerror(errno));

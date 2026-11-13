@@ -37,11 +37,13 @@
  * off, smaller IOP / thread stacks, no Jak 1 code), so 2 MB of it moved here (the market with
  * ctyindb in view had 128 KB of linear memory left); the heap stays at ~69.5 MB, over the 68 MB
  * check. */
-u32 __ctru_linear_heap_size = 34 << 20;
+/* 42 MB: the EE memory is 10 MB smaller (memory_layout.h), 8 MB of it here */
+u32 __ctru_linear_heap_size = 42 << 20;
 #else
 /* 41 MB: the sparse VRAM copy gave the heap back 1.4 MB (4096 -> ~2700 KB); 1 MB of it is here,
  * for the near tie stream arena */
-u32 __ctru_linear_heap_size = 41 << 20;
+/* 45 MB: the EE memory is 7 MB smaller (memory_layout.h), 4 MB of it here */
+u32 __ctru_linear_heap_size = 45 << 20;
 #endif
 
 extern char* fake_heap_start;

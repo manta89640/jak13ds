@@ -1330,7 +1330,7 @@ bool game_camera_trans(float* out) {
     }
   }
   const u32 mc = Ptr<jak1::Symbol>(sym)->value;
-  if ((mc & OFFSET_MASK) != BASIC_OFFSET || mc < 0x100000 || mc + 1024 >= (u32)EE_MAIN_MEM_SIZE) {
+  if ((mc & OFFSET_MASK) != BASIC_OFFSET || mc < 0x100000 || mc + 1024 >= g_ee_main_mem_size) {
     return false;
   }
   // math-camera trans: layout offset 848 (a basic's fields from its address - 4)
@@ -1358,7 +1358,7 @@ bool continue_camera_trans(float* out) {
     }
   }
   auto basic_ok = [](u32 a) {
-    return (a & OFFSET_MASK) == BASIC_OFFSET && a >= 0x100000 && a + 256 < (u32)EE_MAIN_MEM_SIZE;
+    return (a & OFFSET_MASK) == BASIC_OFFSET && a >= 0x100000 && a + 256 < g_ee_main_mem_size;
   };
   const u32 gi = Ptr<jak1::Symbol>(sym)->value;
   if (!basic_ok(gi)) {
@@ -1401,7 +1401,7 @@ int continue_place_jak2(float out[2][3], int* want_levels) {
     return 0;
   }
   auto basic_ok = [](u32 a) {
-    return (a & OFFSET_MASK) == BASIC_OFFSET && a >= 0x100000 && a + 256 < (u32)EE_MAIN_MEM_SIZE;
+    return (a & OFFSET_MASK) == BASIC_OFFSET && a >= 0x100000 && a + 256 < g_ee_main_mem_size;
   };
   const u32 gi = Ptr<Symbol4<u32>>(sym)->value();
   if (!basic_ok(gi)) {
@@ -1449,11 +1449,11 @@ void find_menu_page() {
     }
   }
   const u32 pool = Ptr<jak1::Symbol>(sym)->value;
-  if ((pool & OFFSET_MASK) != BASIC_OFFSET || pool < 0x100000 || pool + 0x2b0 >= (u32)EE_MAIN_MEM_SIZE) {
+  if ((pool & OFFSET_MASK) != BASIC_OFFSET || pool < 0x100000 || pool + 0x2b0 >= g_ee_main_mem_size) {
     return;
   }
   const u32 page = Ptr<u32>(pool + 52 - 4).c()[0];  // common-page 0 (a basic's fields from - 4)
-  if ((page & OFFSET_MASK) == BASIC_OFFSET && page >= 0x100000 && page + 128 < (u32)EE_MAIN_MEM_SIZE) {
+  if ((page & OFFSET_MASK) == BASIC_OFFSET && page >= 0x100000 && page + 128 < g_ee_main_mem_size) {
     g_menu_page = page;
   }
 }

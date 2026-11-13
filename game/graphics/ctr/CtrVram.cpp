@@ -516,7 +516,7 @@ void CtrVram::note_tex_info(const u8* tpage, s32 count, const u8* ee_mem, u32 s7
     // (font pages: setup-font-texture changes their records without a link)
     u32 name_ptr;
     memcpy(&name_ptr, tpage + offsetof(GoalTexturePageHeader, name_ptr), 4);
-    nc->keep = name_ptr && (u64)name_ptr + 68 < (u64)EE_MAIN_MEM_SIZE &&
+    nc->keep = name_ptr && (u64)name_ptr + 68 < (u64)g_ee_main_mem_size &&
                !strstr(std::string((const char*)(ee_mem + name_ptr + 4),
                                    strnlen((const char*)(ee_mem + name_ptr + 4), 63))
                            .c_str(),
@@ -1799,7 +1799,7 @@ void page_tex0s(const u8* tpage, const u8* ee_mem, u32 s7_ptr, std::vector<u64>*
   for (s32 i = 0; i < page.length && i < 1024; i++) {
     u32 ptr;
     memcpy(&ptr, tpage + sizeof(GoalTexturePageHeader) + 4 * i, 4);
-    if (!ptr || ptr == s7_ptr || ptr + sizeof(GoalTexture) > (u32)EE_MAIN_MEM_SIZE) {
+    if (!ptr || ptr == s7_ptr || ptr + sizeof(GoalTexture) > g_ee_main_mem_size) {
       continue;
     }
     GoalTexture gt;

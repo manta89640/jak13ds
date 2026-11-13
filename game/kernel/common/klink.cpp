@@ -112,6 +112,7 @@ void link_control::jak1_jak2_begin(Ptr<uint8_t> object_file,
                                    Ptr<kheapinfo> heap,
                                    uint32_t flags) {
   g_link_generation++;  // (AI-assisted) see klink.h
+  m_touch_cur0 = heap->current.offset;
   if (is_opengoal_object(object_file.c())) {
     // save data from call to begin
     m_object_data = object_file;

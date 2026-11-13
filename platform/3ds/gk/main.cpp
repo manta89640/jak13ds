@@ -28,6 +28,7 @@
 #include <string>
 #include <vector>
 
+#include "game/kernel/common/memory_layout.h"
 #include "common/goal_constants.h"
 #include "common/log/log.h"
 #include "common/util/FileUtil.h"
@@ -181,8 +182,8 @@ int main(int /*argc*/, char** /*argv*/) {
     }
   }
 
-  // The EE memory (48 MB) is one malloc; the rest of the runtime needs about 20 MB more.
-  constexpr unsigned kHeapNeeded = (unsigned)EE_MAIN_MEM_SIZE + (20u << 20);
+  // The EE memory is one malloc (runtime.cpp); the rest of the runtime needs about 20 MB more.
+  constexpr unsigned kHeapNeeded = DEBUG_HEAP_START + 0x10000u + (20u << 20);
   if (mem.heap_size < kHeapNeeded) {
     char text[512];
     snprintf(text, sizeof(text),

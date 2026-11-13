@@ -19,6 +19,9 @@ extern u8* g_ee_main_mem;
 extern u32 g_ee_main_mem_size;
 // executable view of g_ee_main_mem for GOAL calls
 extern u8* g_ee_main_mem_exec;
+// host tool (env OPENGOAL_MEM_TOUCH): a range about to be written by a system call
+void ee_mem_touch(const void* p, size_t len);
+bool ee_mem_touch_on();
 extern GameVersion g_game_version;
 extern BackgroundWorker g_background_worker;
 extern int g_server_port;

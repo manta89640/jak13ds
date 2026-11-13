@@ -8,11 +8,11 @@
  *
  * Default (PC):                          Small memory (OPENGOAL_SMALL_MEMORY, 3DS):
  *   0x0000000 kernel data, symbols         0x0000000 kernel data, symbols
- *   0x013fd20 global heap                  0x013fd20 global heap (42.5 MB)
- *   0x3eb82e0 (end, doubled)               0x2bc0000 kernel stack (256 kB)
- *   0x5000000 debug heap                   0x2c00000 debug heap (4 MB, only with MasterDebug)
- *   0x7ff0000 kernel stack (64 kB)         0x3000000 end (48 MB)
- *   0x8000000 end (128 MB)
+ *   0x013fd20 global heap                  0x013fd20 global heap (42.5 MB on a host;
+ *   0x3eb82e0 (end, doubled)                         35.5 MB Jak 1, 32.5 MB Jak II on the 3DS)
+ *   0x5000000 debug heap                   0x2bc0000 kernel stack (256 kB; lower on the 3DS)
+ *   0x7ff0000 kernel stack (64 kB)         0x2c00000 debug heap (4 MB, only with MasterDebug)
+ *   0x8000000 end (128 MB)                 0x3000000 end (48 MB)
  *
  * The small layout is not the original 32 MB one: with the PC port's level heaps and DMA buffers,
  * Jak 1 needs about 36 MB of global heap (in C mode, where code isn't in GOAL memory). The debug
@@ -36,8 +36,16 @@ constexpr u32 HEAP_START = 0x13fd20;
 #if OPENGOAL_SMALL_MEMORY
 //! Size of the kernel stack.
 constexpr u32 GOAL_KERNEL_STACK_SIZE = 0x40000;
-//! Top of the kernel stack (GOAL address).
+//! Top of the kernel stack (GOAL address). The 3DS builds end the global heap where each game's
+//! use of it ends, plus a margin: after boot the bottom allocations stand at 34.5 MB in Jak 1
+//! (2 MB left) and 30.6 MB in Jak II (2.9 MB left), and "[kmalloc] global heap" logs the least.
+#if defined(__3DS__) && defined(OG3DS_GAME_JAK2)
+constexpr u32 GOAL_KERNEL_STACK_TOP = 0x2200000;
+#elif defined(__3DS__)
+constexpr u32 GOAL_KERNEL_STACK_TOP = 0x2500000;
+#else
 constexpr u32 GOAL_KERNEL_STACK_TOP = 0x2c00000;
+#endif
 //! Where to end the global heap so it doesn't overlap with the stack.
 constexpr u32 GLOBAL_HEAP_END = GOAL_KERNEL_STACK_TOP - GOAL_KERNEL_STACK_SIZE;
 //! Where to place the debug heap

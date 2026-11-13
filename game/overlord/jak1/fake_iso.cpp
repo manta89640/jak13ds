@@ -1,3 +1,4 @@
+#include "game/runtime.h"
 #include "fake_iso.h"
 
 #include <algorithm>
@@ -433,6 +434,7 @@ static int32_t fs_read_plain(LoadStackEntry* fd, void* buffer, int32_t real_size
       real_size = (file_len - offset_into_file);
     }
 
+    ee_mem_touch(buffer, real_size);
     if (fread(buffer, real_size, 1, fd->fp) != 1) {
 #ifdef __3DS__
       // (AI-assisted, streammem) an SD card read error (a handle kept open across loads that went

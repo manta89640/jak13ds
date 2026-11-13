@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "common/goal_constants.h"
+#include "common/log/log.h"
 
 #include "game/kernel/common/kprint.h"
 #include "game/kernel/common/kscheme.h"
@@ -127,6 +128,23 @@ u32 kheapused(Ptr<kheapinfo> heap) {
  * @return        : memory.  0 if we run out of room
  * DONE, PRINT ADDED
  */
+// the global heap's least free space so far, logged when kLowWaterStep less than the last line's
+constexpr u32 kLowWaterStep = 0x10000;
+static void global_low_water(Ptr<kheapinfo> heap, s32 size, const char* name) {
+  static u32 logged = 0xffffffffu;
+  if (heap != kglobalheap) {
+    return;
+  }
+  const u32 free = heap->top.offset - heap->current.offset;
+  if (logged == 0xffffffffu || free + kLowWaterStep <= logged) {
+    logged = free;
+    lg::info("[kmalloc] global heap: {} KB free at the least so far (bottom {} KB, top {} KB "
+             "taken; {} {} bytes)",
+             free >> 10, (heap->current.offset - heap->base.offset) >> 10,
+             (heap->top_base.offset - heap->top.offset) >> 10, name ? name : "?", size);
+  }
+}
+
 Ptr<u8> kmalloc(Ptr<kheapinfo> heap, s32 size, u32 flags, char const* name) {
   uint32_t alignment_flag = flags & 0xfff;
 
@@ -163,6 +181,7 @@ Ptr<u8> kmalloc(Ptr<kheapinfo> heap, s32 size, u32 flags, char const* name) {
     }
 
     heap->current.offset = memend;
+    global_low_water(heap, size, name);
     if (flags & KMALLOC_MEMSET)
       std::memset(Ptr<u8>(memstart).c(), 0, (size_t)size);
     return Ptr<u8>(memstart);
@@ -186,6 +205,7 @@ Ptr<u8> kmalloc(Ptr<kheapinfo> heap, s32 size, u32 flags, char const* name) {
     }
 
     heap->top.offset = memstart;
+    global_low_water(heap, size, name);
 
     if (flags & KMALLOC_MEMSET)
       std::memset(Ptr<u8>(memstart).c(), 0, (size_t)size);

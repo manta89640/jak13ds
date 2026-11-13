@@ -16,6 +16,7 @@
 
 #include "fmt/format.h"
 
+#include "game/runtime.h"
 #include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
@@ -69,7 +70,7 @@ u32 image_bytes(const PcUpload& u) {
 
 bool image_ok(const PcUpload& u, u32 bytes) {
   return bytes && u.width && u.height && u.data &&
-         (u64)u.data + bytes <= (u64)EE_MAIN_MEM_SIZE;
+         (u64)u.data + bytes <= (u64)g_ee_main_mem_size;
 }
 
 // TextureAnimator's m_index_to_clut_addr: a PSMT8 index -> its entry in a 16 x 16 CT32 CLUT
