@@ -1523,6 +1523,74 @@ static void b11(void) {
   lin_free(idx);
 }
 
+/* ---------------- B12: how far back a list reuses a vertex ---------------- */
+
+#define B12_LEN 2304 /* triangles per ribbon */
+#define B12_MAX 16   /* ribbons */
+
+/* Ribbons of 2 pixel triangles as a list, triangle i of a ribbon = its vertices i, i+1, i+2 (two
+ * of the triangle before it). B12.k<K>: K ribbons drawn in turns, one triangle of each, so the
+ * two vertices come back K triangles later: the K where the cost steps up is how many triangles
+ * the GPU keeps. (B11.str<K> has the buffer places' share of it, with no vertex coming back.) */
+static void b12(void) {
+  if (B.dead) {
+    return;
+  }
+  const int per = B12_LEN + 2;
+  VtxS* verts = (VtxS*)lin_alloc((size_t)B12_MAX * per * sizeof(VtxS));
+  u16* idx = (u16*)lin_alloc((size_t)B12_MAX * B12_LEN * 3 * sizeof(u16));
+  if (!verts || !idx) {
+    bench_emit("[bench] B12 skipped=no_memory");
+    lin_free(verts);
+    lin_free(idx);
+    return;
+  }
+  for (int r = 0; r < B12_MAX; r++) {
+    for (int j = 0; j < per; j++) {
+      VtxS* v = &verts[r * per + j];
+      memset(v, 0, sizeof(*v));
+      v->x = (s16)((j / 2) % 48 - 24);
+      v->y = (s16)(2 * r + (j & 1) - 16);
+      v->w = 1;
+      v->r = v->g = v->b = v->a = 255;
+    }
+  }
+  GSPGPU_FlushDataCache(verts, (u32)(B12_MAX * per * sizeof(VtxS)));
+  static const int ks[] = {1, 2, 3, 4, 6, 8, 12, 16};
+  for (unsigned ki = 0; ki < sizeof(ks) / sizeof(ks[0]) && !B.dead; ki++) {
+    const int k = ks[ki], reps = 32 / k;
+    int n = 0;
+    for (int i = 0; i < B12_LEN; i++) {
+      for (int r = 0; r < k; r++) {
+        idx[n++] = (u16)(r * per + i);
+        idx[n++] = (u16)(r * per + i + 1);
+        idx[n++] = (u16)(r * per + i + 2);
+      }
+    }
+    GSPGPU_FlushDataCache(idx, (u32)n * sizeof(u16));
+    char id[32];
+    snprintf(id, sizeof(id), "B12.k%d", k);
+    bench_start(id);
+    fb_begin(B.t0);
+    plain_state();
+    use_basic(&B.m_geo, L_SHORT);
+    vbuf(verts, L_SHORT);
+    C3Di_UpdateContext();
+    /* (at most 27648 indices a draw, as B11's) */
+    for (int d = 0; d < reps; d++) {
+      for (int at = 0; at < n; at += 27648) {
+        const int c = n - at < 27648 ? n - at : 27648;
+        C3D_DrawElements(GPU_TRIANGLES, c, C3D_UNSIGNED_SHORT, idx + at);
+      }
+    }
+    Meas m;
+    run_list(3, &m);
+    put_meas(id, reps * (n / 3), 3, &m, "");
+  }
+  lin_free(verts);
+  lin_free(idx);
+}
+
 /* ---------------- B5: attribute fetch ---------------- */
 
 static void b5_one(const char* id, const void* buf, int layout) {
@@ -2236,6 +2304,7 @@ int ctr_gpu_bench_run(void) {
     b9();
     b10();
     b11();
+    b12();
     b8(B.t0, "n");
     /* register settings the game never used on hardware: colour buffer reads off, the
      * post-vertex cache size */

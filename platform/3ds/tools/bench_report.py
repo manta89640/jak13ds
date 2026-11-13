@@ -159,6 +159,7 @@ def report(s):
         ("B9 one mesh (73.7k triangles of 2 x 2 px) as a list and as stitched strips", "B9."),
         ("B10 the same mesh in other index orders (q<i><j>: the quad's triangles rotated)", "B10."),
         ("B11 one triangle's copies in the buffer, drawn in different orders (73.7k)", "B11."),
+        ("B12 ribbons as a list, K drawn in turns (a vertex comes back K triangles later)", "B12."),
         ("B8 early depth (readback census: a = near/small quad, b = full quad, c = clear)",
          "B8."),
     ]
@@ -254,7 +255,7 @@ def report(s):
                 mpix = n / (ms * 1000.0) if ms else 0.0
                 print(f"  {t:26s} gpu {ms:8.3f} ms  {mpix:7.1f} Mpix/s  "
                       f"{ms * 1e6 / n if n else 0:6.3f} ns/pix  {shares(kv):38s} {tr_text(kv)}")
-        elif prefix in ("B7.", "B9.", "B10.", "B11."):
+        elif prefix in ("B7.", "B9.", "B10.", "B11.", "B12."):
             for t in names:
                 row(t, "ns/triangle", 1e6)
         elif prefix == "B8.":

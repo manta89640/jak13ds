@@ -3754,6 +3754,7 @@ struct TodPass {
   // kTodSpreadFrames frames); everything else is rewritten at once as before
   bool spread = false;
   s64 spread_left = 0;
+  bool spread_used = false;  // a group was written from this pass's budget (the first always is)
   u32 deferred = 0;
   u32 unchanged = 0;  // groups behind whose colors all blend as before (not written)
   u64 frame = 0;
@@ -4252,12 +4253,14 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
         ps.black_late++;
         return;
       }
-      if (ps.spread && gr.ver != 0 && gr.dver + 1 == t.dver && ps.spread_left < end - first) {
+      if (ps.spread && gr.ver != 0 && gr.dver + 1 == t.dver && ps.spread_left < end - first &&
+          ps.spread_used) {
         ps.deferred++;  // (AI-assisted, perfv2) one day step behind: a later frame of the spread
         return;
       }
       ps.black_left -= std::max(0, end - first);
       ps.spread_left -= std::max(0, end - first);
+      ps.spread_used = true;
       const u32 gl = t.group_list[g];
       if (gl && gl != CtrLevelData::Tod::kNoList && lists) {
         // (only the vertices of the entries whose color changed)
